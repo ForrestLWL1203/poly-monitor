@@ -1,6 +1,6 @@
 import unittest
 
-from poly_monitor.book import fill_for_notional, token_book_summary
+from poly_monitor.book import TOP_DEPTH_LEVELS, fill_for_notional, token_book_summary
 
 
 class BookTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class BookTests(unittest.TestCase):
         self.assertEqual(row["bid"], 0.49)
         self.assertEqual(row["ask"], 0.51)
         self.assertEqual(row["book_age_ms"], 150)
-        self.assertEqual(row["depth_levels"], 20)
+        self.assertEqual(row["depth_levels"], TOP_DEPTH_LEVELS)
         self.assertTrue(row["ask_targets"]["5"]["ok"])
         self.assertEqual(row["ask_targets"]["25"]["limit"], 0.52)
         self.assertIn("bid_targets", row)
@@ -47,6 +47,44 @@ class BookTests(unittest.TestCase):
 
         self.assertEqual(row["ask_depth_usdc"], 5.1)
         self.assertEqual(row["bid_depth_usdc"], 4.9)
+
+    def test_token_book_depth_uses_top_depth_levels_by_default(self):
+        bids = [(0.5, 1.0)] * TOP_DEPTH_LEVELS + [(0.5, 1000.0)]
+        asks = [(0.5, 1.0)] * TOP_DEPTH_LEVELS + [(0.5, 1000.0)]
+
+        row = token_book_summary(bids=bids, asks=asks, book_age_ms=1)
+
+        self.assertEqual(row["ask_depth_usdc"], 10.0)
+        self.assertEqual(row["bid_depth_usdc"], 10.0)
+
+    def test_bid_targets_use_bid_prices_best_first(self):
+        row = token_book_summary(
+            bids=[(0.62, 100.0), (0.61, 100.0)],
+            asks=[(0.64, 100.0)],
+            book_age_ms=1,
+            targets=(5.0,),
+        )
+
+        self.assertEqual(row["bid_targets"]["5"], {
+            "ok": True,
+            "avg": 0.62,
+            "limit": 0.62,
+            "filled_usdc": 5.0,
+        })
+
+    def test_targets_use_limited_depth_levels(self):
+        row = token_book_summary(
+            bids=[(0.5, 2.0), (0.5, 1000.0)],
+            asks=[(0.5, 2.0), (0.5, 1000.0)],
+            book_age_ms=1,
+            targets=(5.0,),
+            depth_levels=1,
+        )
+
+        self.assertEqual(row["ask_targets"]["5"]["ok"], False)
+        self.assertEqual(row["ask_targets"]["5"]["filled_usdc"], 1.0)
+        self.assertEqual(row["bid_targets"]["5"]["ok"], False)
+        self.assertEqual(row["bid_targets"]["5"]["filled_usdc"], 1.0)
 
 
 if __name__ == "__main__":

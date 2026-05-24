@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any
 
 
-CANDIDATE_GROUPS = ("seed_watchlist", "active_candidate", "dormant_candidate", "archive_candidate")
+CANDIDATE_GROUPS = ("active_candidate", "dormant_candidate", "archive_candidate")
 SCORED_GROUPS = ("active_candidate", "dormant_candidate", "archive_candidate")
 MAX_ARCHIVE_DISPLAY = 0
 MAX_ACTIVE_DISPLAY = 15
 MAX_DORMANT_DISPLAY = 10
+_SCORE_REQUIRED = frozenset(("pnl_7d", "pnl_30d", "wins_7d", "losses_7d"))
 
 
 def utc_now() -> dt.datetime:
@@ -129,19 +130,6 @@ def _report_candidates(path: Path) -> tuple[dict[str, Any], dict[str, list[dict[
     return report, candidates
 
 
-def _seed_labels(data_dir: Path) -> dict[str, str]:
-    conn = _sqlite_connect(data_dir / "state" / "observer.sqlite")
-    if conn is None:
-        return {}
-    try:
-        rows = conn.execute("SELECT wallet, label FROM seeds").fetchall()
-        return {str(row["wallet"]).lower(): str(row["label"]) for row in rows}
-    except sqlite3.Error:
-        return {}
-    finally:
-        conn.close()
-
-
 def _wallet_names(conn: sqlite3.Connection) -> dict[str, str]:
     names: dict[str, str] = {}
     rows = conn.execute(
@@ -166,13 +154,12 @@ def _sqlite_candidates(data_dir: Path) -> dict[str, list[dict[str, Any]]]:
     if conn is None:
         return candidates
     try:
-        labels = {str(row["wallet"]).lower(): str(row["label"]) for row in conn.execute("SELECT wallet, label FROM seeds").fetchall()}
         trade_names = _wallet_names(conn)
         rows = conn.execute("SELECT * FROM candidate_scores ORDER BY status ASC, rank_score DESC").fetchall()
         for row in rows:
             metrics = _safe_json_loads(row["metrics_json"], {})
             wallet = str(row["wallet"]).lower()
-            display_name = labels.get(wallet) or trade_names.get(wallet, "") or str(metrics.get("profile_name") or "")
+            display_name = trade_names.get(wallet, "") or str(metrics.get("profile_name") or "")
             if display_name and isinstance(metrics, dict):
                 metrics.setdefault("name", display_name)
             item = _normalize_candidate(
@@ -216,8 +203,7 @@ def _normalize_candidate(row: dict[str, Any]) -> dict[str, Any]:
 def _score_state(metrics: dict[str, Any], row: dict[str, Any]) -> str:
     if "score_error" in metrics or "score_error" in row:
         return "score_error"
-    required = ("pnl_7d", "pnl_30d", "wins_7d", "losses_7d")
-    if any(key not in metrics for key in required):
+    if not _SCORE_REQUIRED.issubset(metrics):
         return "pending"
     return "ready"
 
@@ -535,60 +521,6 @@ def _wallet_local_metrics(conn: sqlite3.Connection, wallet: str, *, now: dt.date
     return metrics
 
 
-def _seed_watchlist(data_dir: Path, scored_by_wallet: dict[str, dict[str, Any]], *, now: dt.datetime | None = None) -> list[dict[str, Any]]:
-    conn = _sqlite_connect(data_dir / "state" / "observer.sqlite")
-    if conn is None:
-        return []
-    try:
-        rows = conn.execute("SELECT wallet, label FROM seeds ORDER BY label ASC, wallet ASC").fetchall()
-        watchlist: list[dict[str, Any]] = []
-        for row in rows:
-            wallet = str(row["wallet"]).lower()
-            scored = scored_by_wallet.get(wallet)
-            if scored is None:
-                score_row = conn.execute("SELECT * FROM candidate_scores WHERE wallet=?", (wallet,)).fetchone()
-                if score_row is not None:
-                    metrics = _safe_json_loads(score_row["metrics_json"], {})
-                    metrics = metrics if isinstance(metrics, dict) else {}
-                    metrics.setdefault("name", row["label"])
-                    scored = _normalize_candidate(
-                        {
-                            "wallet": wallet,
-                            "status": score_row["status"],
-                            "rank_score": score_row["rank_score"],
-                            "metrics": metrics,
-                            "reasons": _safe_json_loads(score_row["reasons_json"], []),
-                            "updated_at": score_row["updated_at"],
-                            "name": row["label"],
-                        }
-                    )
-            if scored:
-                metrics = dict(scored.get("metrics") or {})
-                metrics.setdefault("name", row["label"])
-                watchlist.append({**scored, "name": row["label"], "metrics": metrics})
-            else:
-                metrics = _wallet_local_metrics(conn, wallet, now=now)
-                metrics["name"] = row["label"]
-                watchlist.append(
-                    {
-                        "wallet": wallet,
-                        "wallet_short": compact_wallet(wallet),
-                        "name": row["label"],
-                        "status": "seed_watchlist",
-                        "rank_score": None,
-                        "metrics": metrics,
-                        "reasons": ["manual_seed_pending_score"],
-                        "updated_at": "",
-                        "score_state": "pending",
-                    }
-                )
-        return watchlist
-    except sqlite3.Error:
-        return []
-    finally:
-        conn.close()
-
-
 def build_dashboard_status(data_dir: Path, *, now: dt.datetime | None = None, recent_limit: int = 100) -> dict[str, Any]:
     now = now or utc_now()
     data_dir = data_dir.expanduser().resolve()
@@ -596,20 +528,6 @@ def build_dashboard_status(data_dir: Path, *, now: dt.datetime | None = None, re
     sqlite_candidates = _sqlite_candidates(data_dir)
     has_sqlite_scores = any(sqlite_candidates.get(group) for group in SCORED_GROUPS)
     candidates = sqlite_candidates if has_sqlite_scores else report_candidates
-    labels = _seed_labels(data_dir)
-    for group in SCORED_GROUPS:
-        for row in candidates.get(group, []):
-            label = labels.get(str(row.get("wallet") or "").lower())
-            if label:
-                row["name"] = label
-                if isinstance(row.get("metrics"), dict):
-                    row["metrics"].setdefault("name", label)
-    scored_by_wallet = {
-        str(row.get("wallet") or "").lower(): row
-        for group in SCORED_GROUPS
-        for row in candidates.get(group, [])
-    }
-    candidates["seed_watchlist"] = _seed_watchlist(data_dir, scored_by_wallet, now=now)
     sqlite = _sqlite_summary(data_dir)
     events = _tail_raw_events(data_dir / "raw")
     event_summary = _event_summary_from_events(events, now=now)
@@ -648,7 +566,6 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
         return None
     try:
         score_row = conn.execute("SELECT * FROM candidate_scores WHERE wallet=?", (wallet,)).fetchone()
-        seed_row = conn.execute("SELECT * FROM seeds WHERE wallet=?", (wallet,)).fetchone()
         name_row = conn.execute(
             """
             SELECT name FROM trades
@@ -667,10 +584,10 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
             """,
             (wallet, trade_limit),
         ).fetchall()
-        if score_row is None and seed_row is None and not trade_rows:
+        if score_row is None and not trade_rows:
             return None
         metrics = _safe_json_loads(score_row["metrics_json"], {}) if score_row else _wallet_local_metrics(conn, wallet)
-        display_name = seed_row["label"] if seed_row else (name_row["name"] if name_row else "")
+        display_name = name_row["name"] if name_row else ""
         if display_name and "name" not in metrics:
             metrics["name"] = display_name
         reasons = _safe_json_loads(score_row["reasons_json"], []) if score_row else []
@@ -693,12 +610,12 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
         return {
             "wallet": wallet,
             "wallet_short": compact_wallet(wallet),
-            "status": score_row["status"] if score_row else ("seed_watchlist" if seed_row else "unscored"),
+            "status": score_row["status"] if score_row else "unscored",
             "rank_score": score_row["rank_score"] if score_row else None,
             "updated_at": score_row["updated_at"] if score_row else None,
             "score_state": _score_state(metrics, dict(score_row) if score_row else {}),
             "metrics": metrics,
-            "reasons": reasons if isinstance(reasons, list) and reasons else (["manual_seed_pending_score"] if seed_row and score_row is None else []),
+            "reasons": reasons if isinstance(reasons, list) else [],
             "behavior": behavior,
             "market_distribution": markets,
             "recent_trades": trades,

@@ -102,7 +102,14 @@ class AsyncDataApiClient:
             raise RuntimeError("aiohttp package is required for async Data API requests")
         if self._session is None:
             timeout = aiohttp.ClientTimeout(total=self.timeout)
+            connector = aiohttp.TCPConnector(
+                limit=10,
+                limit_per_host=5,
+                ttl_dns_cache=300,
+                keepalive_timeout=30,
+            )
             self._session = aiohttp.ClientSession(
+                connector=connector,
                 timeout=timeout,
                 headers={"User-Agent": "poly-monitor/0.1", "Accept": "application/json"},
             )

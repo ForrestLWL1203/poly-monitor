@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
+from unittest import mock
 
 from poly_monitor.clob_stream import ClobBookStream
 
@@ -38,6 +40,37 @@ class ClobStreamTests(unittest.TestCase):
 
         self.assertEqual(bids, [(0.49, 3.0)])
         self.assertEqual(asks, [(0.51, 4.0), (0.53, 6.0)])
+
+    def test_connect_uses_protocol_ping_without_extra_ping_task(self):
+        class FakeWebSocket:
+            async def send(self, _payload):
+                return None
+
+            async def close(self):
+                return None
+
+        async def run_case():
+            stream = ClobBookStream()
+
+            async def fake_recv_loop():
+                await asyncio.Event().wait()
+
+            async def fake_connect(*_args, **kwargs):
+                return FakeWebSocket()
+
+            stream._recv_loop = fake_recv_loop
+            with mock.patch("poly_monitor.clob_stream.websockets.connect", side_effect=fake_connect) as connect:
+                await stream.connect(["token"])
+                recv_task = stream._recv_task
+                try:
+                    self.assertIsNotNone(recv_task)
+                    self.assertFalse(hasattr(stream, "_ping_task"))
+                    self.assertEqual(connect.call_args.kwargs["ping_interval"], 10)
+                    self.assertEqual(connect.call_args.kwargs["ping_timeout"], 15)
+                finally:
+                    await stream.close()
+
+        asyncio.run(run_case())
 
 
 if __name__ == "__main__":

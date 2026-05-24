@@ -28,7 +28,7 @@ python3 scripts/run_crypto_wallet_observer.py \
 ## Outputs
 
 - `data/raw/YYYY-MM-DD/events.jsonl`: compact raw events, 3-day rolling retention by default.
-- `data/state/observer.sqlite`: dedupe state, seeds, trades, candidate scores.
+- `data/state/observer.sqlite`: dedupe state, trades, candidate scores.
 - `data/reports/latest_candidates.json`: active and dormant candidate lists.
 
 ## Dashboard
@@ -53,16 +53,6 @@ Optional environment variables:
 
 - `POLY_MONITOR_DASH_USER`: login username, default `admin`.
 - `POLY_MONITOR_DASH_COOKIE_SECRET`: required cookie signing secret.
-
-## Optional Seeds
-
-The observer defaults to no pinned seed wallets. Add temporary manual watch
-addresses only when needed:
-
-```bash
-python3 scripts/run_crypto_wallet_observer.py \
-  --seed-wallet label=0xwallet,other=0xwallet
-```
 
 ## Candidate Thresholds
 

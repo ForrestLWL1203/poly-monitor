@@ -105,10 +105,6 @@ class ObserverStore:
                 reasons_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS seeds (
-                wallet TEXT PRIMARY KEY,
-                label TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS market_windows (
                 symbol TEXT PRIMARY KEY,
                 market_slug TEXT NOT NULL,
@@ -157,6 +153,8 @@ class ObserverStore:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self.conn.execute("PRAGMA mmap_size=268435456")
+        self.conn.execute("PRAGMA cache_size=-32000")
+        self.conn.execute("PRAGMA wal_autocheckpoint=2000")
         self.conn.executescript(
             """
             CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts ON trades(wallet, exchange_ts);
@@ -164,6 +162,7 @@ class ObserverStore:
             CREATE INDEX IF NOT EXISTS idx_trades_condition_ts ON trades(condition_id, exchange_ts);
             CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(exchange_ts);
             CREATE INDEX IF NOT EXISTS idx_scores_status_rank ON candidate_scores(status, rank_score DESC);
+            CREATE INDEX IF NOT EXISTS idx_scores_status_updated ON candidate_scores(status, updated_at);
             CREATE INDEX IF NOT EXISTS idx_market_windows_slug ON market_windows(market_slug);
             """
         )
@@ -194,14 +193,6 @@ class ObserverStore:
             ),
         )
         self.conn.commit()
-
-    def add_seed(self, wallet: str, label: str) -> None:
-        self.conn.execute("INSERT OR REPLACE INTO seeds(wallet, label) VALUES(?, ?)", (wallet.lower(), label))
-        self.conn.commit()
-
-    def seed_wallets(self) -> set[str]:
-        rows = self.conn.execute("SELECT wallet FROM seeds").fetchall()
-        return {str(row["wallet"]).lower() for row in rows}
 
     def candidate_status(self, wallet: str) -> str | None:
         row = self.conn.execute("SELECT status FROM candidate_scores WHERE wallet=?", (wallet.lower(),)).fetchone()
@@ -261,8 +252,35 @@ class ObserverStore:
         return int(row["last_ts"] or 0) if row else 0
 
     def wallet_trade_metrics(self, wallet: str, *, now_ts: int | None = None) -> dict[str, Any]:
-        now_value = now_ts or int(dt.datetime.now(dt.timezone.utc).timestamp())
-        rows = self.conn.execute("SELECT * FROM trades WHERE wallet=?", (wallet.lower(),)).fetchall()
+        now_value = now_ts if now_ts is not None else int(dt.datetime.now(dt.timezone.utc).timestamp())
+        cutoff_7d = now_value - 7 * 86400
+        cutoff_30d = now_value - 30 * 86400
+        cutoff_24h = now_value - 86400
+        row = self.conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN exchange_ts >= ? THEN 1 ELSE 0 END) AS trades_24h,
+                COUNT(DISTINCT CASE WHEN exchange_ts >= ? THEN market_slug END) AS markets_24h,
+                SUM(CASE WHEN exchange_ts >= ? THEN 1 ELSE 0 END) AS trades_7d,
+                COUNT(DISTINCT CASE WHEN exchange_ts >= ? THEN market_slug END) AS markets_7d,
+                SUM(CASE WHEN exchange_ts >= ? THEN 1 ELSE 0 END) AS trades_30d,
+                COUNT(DISTINCT CASE WHEN exchange_ts >= ? THEN market_slug END) AS markets_30d,
+                COUNT(*) AS historical_trades,
+                COUNT(DISTINCT market_slug) AS historical_markets,
+                MAX(exchange_ts) AS last_ts
+            FROM trades
+            WHERE wallet=?
+            """,
+            (
+                cutoff_24h,
+                cutoff_24h,
+                cutoff_7d,
+                cutoff_7d,
+                cutoff_30d,
+                cutoff_30d,
+                wallet.lower(),
+            ),
+        ).fetchone()
         metrics: dict[str, Any] = {
             "wallet": wallet.lower(),
             "trades_24h": 0,
@@ -280,29 +298,43 @@ class ObserverStore:
             "top3_concentration": 1.0,
             "longshot_profit_share": 0.0,
             "last_active_age_hours": 999999.0,
-            "historical_trades": len(rows),
-            "historical_markets": len({row["market_slug"] for row in rows}),
+            "historical_trades": 0,
+            "historical_markets": 0,
             "historical_pnl": 0.0,
         }
-        if not rows:
+        if not row or not int(row["historical_trades"] or 0):
             return metrics
-        last_ts = max(int(row["exchange_ts"]) for row in rows)
+        metrics["trades_24h"] = int(row["trades_24h"] or 0)
+        metrics["markets_24h"] = int(row["markets_24h"] or 0)
+        metrics["trades_7d"] = int(row["trades_7d"] or 0)
+        metrics["markets_7d"] = int(row["markets_7d"] or 0)
+        metrics["trades_30d"] = int(row["trades_30d"] or 0)
+        metrics["markets_30d"] = int(row["markets_30d"] or 0)
+        metrics["historical_trades"] = int(row["historical_trades"] or 0)
+        metrics["historical_markets"] = int(row["historical_markets"] or 0)
+        last_ts = int(row["last_ts"] or 0)
         metrics["last_active_age_hours"] = round((now_value - last_ts) / 3600.0, 3)
-        cutoff_7d = now_value - 7 * 86400
-        cutoff_30d = now_value - 30 * 86400
-        cutoff_24h = now_value - 86400
-        rows_24h = [row for row in rows if int(row["exchange_ts"]) >= cutoff_24h]
-        rows_7d = [row for row in rows if int(row["exchange_ts"]) >= cutoff_7d]
-        rows_30d = [row for row in rows if int(row["exchange_ts"]) >= cutoff_30d]
-        metrics["trades_24h"] = len(rows_24h)
-        metrics["markets_24h"] = len({row["market_slug"] for row in rows_24h})
-        metrics["trades_7d"] = len(rows_7d)
-        metrics["markets_7d"] = len({row["market_slug"] for row in rows_7d})
-        metrics["trades_30d"] = len(rows_30d)
-        metrics["markets_30d"] = len({row["market_slug"] for row in rows_30d})
         # Realized PnL requires settlement. Until closed-position refresh is added,
         # use zero so wallets discovered from live-only flow do not get promoted prematurely.
         return metrics
+
+    def wallet_24h_counts(self, wallet: str, *, now_ts: int | None = None) -> dict[str, int]:
+        now_value = now_ts if now_ts is not None else int(dt.datetime.now(dt.timezone.utc).timestamp())
+        cutoff_24h = now_value - 86400
+        row = self.conn.execute(
+            """
+            SELECT
+                COUNT(*) AS trades_24h,
+                COUNT(DISTINCT market_slug) AS markets_24h
+            FROM trades
+            WHERE wallet=? AND exchange_ts >= ?
+            """,
+            (wallet.lower(), cutoff_24h),
+        ).fetchone()
+        return {
+            "trades_24h": int(row["trades_24h"] or 0) if row else 0,
+            "markets_24h": int(row["markets_24h"] or 0) if row else 0,
+        }
 
     def upsert_score(self, score) -> None:
         self.conn.execute(
@@ -394,34 +426,83 @@ class ObserverStore:
         ).fetchall()
         return {str(row["wallet"]).lower(): str(row["status"]) for row in rows}
 
-    def prune_candidate_scores(self, status: str, *, max_rows: int, keep_wallets: set[str] | None = None) -> int:
-        keep = {wallet.lower() for wallet in (keep_wallets or set())}
+    def reactivatable_archive_wallets(
+        self,
+        *,
+        limit: int,
+        now: dt.datetime | None = None,
+        min_trades_24h: int,
+        min_markets_24h: int,
+        min_age_seconds: float,
+    ) -> list[str]:
+        now_value = now or utc_now()
+        now_ts = int(now_value.timestamp())
+        cutoff_24h = now_ts - 86400
+        updated_at_cutoff = now_value - dt.timedelta(seconds=max(0.0, min_age_seconds))
         rows = self.conn.execute(
             """
-            SELECT wallet
+            SELECT
+                trades.wallet AS wallet,
+                COUNT(*) AS trades_24h,
+                COUNT(DISTINCT trades.market_slug) AS markets_24h,
+                MAX(trades.exchange_ts) AS last_ts
+            FROM trades
+            JOIN candidate_scores AS scores ON scores.wallet = trades.wallet
+            WHERE scores.status='archive_candidate'
+              AND scores.updated_at <= ?
+              AND trades.exchange_ts >= ?
+            GROUP BY trades.wallet
+            HAVING trades_24h >= ? OR markets_24h >= ?
+            ORDER BY last_ts DESC, trades.wallet ASC
+            LIMIT ?
+            """,
+            (updated_at_cutoff.isoformat(), cutoff_24h, min_trades_24h, min_markets_24h, limit),
+        ).fetchall()
+        return [str(row["wallet"]).lower() for row in rows]
+
+    def prune_candidate_scores(
+        self,
+        status: str,
+        *,
+        max_rows: int,
+        min_age_seconds: float = 0.0,
+        now: dt.datetime | None = None,
+    ) -> int:
+        cutoff = (now or utc_now()) - dt.timedelta(seconds=max(0.0, min_age_seconds))
+        rows = self.conn.execute(
+            """
+            SELECT wallet, updated_at
             FROM candidate_scores
             WHERE status=?
             ORDER BY rank_score DESC, updated_at DESC, wallet ASC
             """,
             (status,),
         ).fetchall()
-        removable = [str(row["wallet"]) for row in rows if str(row["wallet"]).lower() not in keep]
-        doomed = removable[max_rows:]
+        protected = [row for row in rows if str(row["updated_at"]) > cutoff.isoformat()]
+        removable = [row for row in rows if str(row["updated_at"]) <= cutoff.isoformat()]
+        # Cooldown rows are protected even if that temporarily lets archive rows exceed max_rows.
+        keep_removable = max(0, max_rows - len(protected))
+        doomed = [str(row["wallet"]) for row in removable][keep_removable:]
         if not doomed:
             return 0
         self.conn.executemany("DELETE FROM candidate_scores WHERE wallet=?", [(wallet,) for wallet in doomed])
         self.conn.commit()
         return len(doomed)
 
-    def prune_low_sample_archives(self, *, keep_wallets: set[str] | None = None) -> int:
-        keep = {wallet.lower() for wallet in (keep_wallets or set())}
+    def prune_low_sample_archives(
+        self,
+        *,
+        min_age_seconds: float = 0.0,
+        now: dt.datetime | None = None,
+    ) -> int:
+        cutoff = (now or utc_now()) - dt.timedelta(seconds=max(0.0, min_age_seconds))
         rows = self.conn.execute(
-            "SELECT wallet, metrics_json FROM candidate_scores WHERE status='archive_candidate'"
+            "SELECT wallet, metrics_json, updated_at FROM candidate_scores WHERE status='archive_candidate'"
         ).fetchall()
         doomed: list[str] = []
         for row in rows:
             wallet = str(row["wallet"]).lower()
-            if wallet in keep:
+            if str(row["updated_at"]) > cutoff.isoformat():
                 continue
             try:
                 metrics = json.loads(row["metrics_json"])
@@ -441,27 +522,25 @@ class ObserverStore:
         self.conn.commit()
         return len(doomed)
 
-    def prune_archive_scores(self, *, max_archive: int = 50, keep_wallets: set[str] | None = None) -> int:
-        return self.prune_candidate_scores("archive_candidate", max_rows=max_archive, keep_wallets=keep_wallets)
+    def prune_archive_scores(self, *, max_archive: int = 50, min_age_seconds: float = 0.0) -> int:
+        return self.prune_candidate_scores(
+            "archive_candidate",
+            max_rows=max_archive,
+            min_age_seconds=min_age_seconds,
+        )
 
     def cleanup_inactive_wallet_data(
         self,
         *,
         inactive_cutoff_ts: int,
-        keep_wallets: set[str] | None = None,
         max_non_candidate_wallets: int | None = None,
     ) -> dict[str, int]:
-        keep = {wallet.lower() for wallet in (keep_wallets or set())}
         self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS cleanup_keep(wallet TEXT PRIMARY KEY)")
         self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS cleanup_delete_wallets(wallet TEXT PRIMARY KEY)")
         self.conn.execute("DELETE FROM cleanup_keep")
         self.conn.execute("DELETE FROM cleanup_delete_wallets")
-        if keep:
-            self.conn.executemany("INSERT OR IGNORE INTO cleanup_keep(wallet) VALUES(?)", [(wallet,) for wallet in keep])
         self.conn.executescript(
             """
-            INSERT OR IGNORE INTO cleanup_keep(wallet)
-            SELECT wallet FROM seeds;
             INSERT OR IGNORE INTO cleanup_keep(wallet)
             SELECT wallet FROM candidate_scores WHERE status IN ('active_candidate','dormant_candidate');
             """

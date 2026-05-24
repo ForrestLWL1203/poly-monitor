@@ -35,8 +35,8 @@ class WalletMetricsTests(unittest.TestCase):
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
-                {"amount": 12.5, "name": "seed"},
-                {"amount": 34.5, "name": "seed"},
+                {"amount": 12.5, "name": "profile"},
+                {"amount": 34.5, "name": "profile"},
             ],
         ):
             metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=2, closed_pages=2)
@@ -66,8 +66,8 @@ class WalletMetricsTests(unittest.TestCase):
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
-                {"amount": 1, "name": "seed"},
-                {"amount": 1, "name": "seed"},
+                {"amount": 1, "name": "profile"},
+                {"amount": 1, "name": "profile"},
             ],
         ):
             metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=1, closed_pages=2)

@@ -10,9 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from poly_monitor.observer import CryptoWalletObserver, ObserverConfig, parse_seed_wallets
-
-DEFAULT_SEEDS = ""
+from poly_monitor.observer import CryptoWalletObserver, ObserverConfig
 
 
 def parse_symbols(raw: str) -> tuple[str, ...]:
@@ -51,7 +49,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-active-candidates", type=int, default=15)
     parser.add_argument("--max-dormant-candidates", type=int, default=10)
     parser.add_argument("--max-archive-candidates", type=int, default=0)
-    parser.add_argument("--seed-wallet", default=DEFAULT_SEEDS, help="Comma-separated label=0xwallet entries.")
     return parser
 
 
@@ -85,7 +82,7 @@ async def async_main() -> int:
         max_dormant_candidates=args.max_dormant_candidates,
         max_archive_candidates=args.max_archive_candidates,
     )
-    observer = CryptoWalletObserver(config, parse_seed_wallets(args.seed_wallet))
+    observer = CryptoWalletObserver(config)
     return await observer.run()
 
 

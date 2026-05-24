@@ -1,7 +1,8 @@
+import asyncio
 import unittest
 from unittest.mock import patch
 
-from poly_monitor.data_api import fetch_market_trades, normalize_trade
+from poly_monitor.data_api import AsyncDataApiClient, fetch_market_trades, normalize_trade
 
 
 class DataApiTests(unittest.TestCase):
@@ -70,6 +71,64 @@ class DataApiTests(unittest.TestCase):
             "tx_hash": "0xtx",
             "fill_id": "7",
         })
+
+    def test_async_client_uses_tuned_tcp_connector(self):
+        async def run_case():
+            connector_kwargs = {}
+            session_kwargs = {}
+
+            class FakeResponse:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+                def raise_for_status(self):
+                    return None
+
+                async def json(self, content_type=None):
+                    return []
+
+            class FakeSession:
+                def __init__(self, **kwargs):
+                    session_kwargs.update(kwargs)
+
+                def get(self, *_args, **_kwargs):
+                    return FakeResponse()
+
+                async def close(self):
+                    return None
+
+            class FakeTimeout:
+                def __init__(self, **kwargs):
+                    self.kwargs = kwargs
+
+            class FakeConnector:
+                def __init__(self, **kwargs):
+                    connector_kwargs.update(kwargs)
+
+            class FakeAiohttp:
+                ClientTimeout = FakeTimeout
+                TCPConnector = FakeConnector
+                ClientSession = FakeSession
+
+            with patch("poly_monitor.data_api.aiohttp", FakeAiohttp):
+                client = AsyncDataApiClient(base_url="https://example.test", timeout=7)
+                await client._get_json("/trades", {})
+                await client.close()
+
+            return connector_kwargs, session_kwargs
+
+        connector_kwargs, session_kwargs = asyncio.run(run_case())
+
+        self.assertEqual(connector_kwargs, {
+            "limit": 10,
+            "limit_per_host": 5,
+            "ttl_dns_cache": 300,
+            "keepalive_timeout": 30,
+        })
+        self.assertIn("connector", session_kwargs)
 
 
 if __name__ == "__main__":

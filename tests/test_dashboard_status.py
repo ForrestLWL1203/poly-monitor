@@ -20,31 +20,9 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertTrue(status["health"]["ok"])
         self.assertEqual(status["sqlite"]["trade_count"], 0)
         self.assertEqual(status["events"]["counts"], {})
-        self.assertEqual(status["candidates"]["seed_watchlist"], [])
+        self.assertEqual(set(status["candidates"]), {"active_candidate", "dormant_candidate", "archive_candidate"})
         self.assertEqual(status["candidates"]["active_candidate"], [])
         self.assertEqual(status["recent_trades"], [])
-
-    def test_seed_wallets_show_as_pending_watchlist(self):
-        from poly_monitor.dashboard.status import build_dashboard_status, wallet_detail
-
-        with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp)
-            wallet = "0x2222222222222222222222222222222222222222"
-            store = ObserverStore(data_dir / "state" / "observer.sqlite")
-            store.add_seed(wallet, "manual-seed")
-            store.close()
-
-            status = build_dashboard_status(data_dir, now=dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc))
-            detail = wallet_detail(data_dir, wallet)
-
-        self.assertEqual(len(status["candidates"]["seed_watchlist"]), 1)
-        seed = status["candidates"]["seed_watchlist"][0]
-        self.assertEqual(seed["wallet"], wallet)
-        self.assertEqual(seed["name"], "manual-seed")
-        self.assertEqual(seed["score_state"], "pending")
-        self.assertEqual(seed["metrics"]["trades_7d"], 0)
-        self.assertEqual(detail["status"], "seed_watchlist")
-        self.assertEqual(detail["score_state"], "pending")
 
     def test_sqlite_scores_are_used_even_without_latest_report(self):
         from poly_monitor.dashboard.status import build_dashboard_status
@@ -53,7 +31,6 @@ class DashboardStatusTests(unittest.TestCase):
             data_dir = Path(tmp)
             wallet = "0x3333333333333333333333333333333333333333"
             store = ObserverStore(data_dir / "state" / "observer.sqlite")
-            store.add_seed(wallet, "scored-seed")
             store.upsert_score(
                 CandidateScore(
                     wallet=wallet,
@@ -70,6 +47,7 @@ class DashboardStatusTests(unittest.TestCase):
                         "pnl_30d": 45.6,
                         "wins_7d": 12,
                         "losses_7d": 3,
+                        "profile_name": "scored-wallet",
                     },
                 )
             )
@@ -79,10 +57,8 @@ class DashboardStatusTests(unittest.TestCase):
 
         self.assertEqual(status["candidate_counts"]["dormant_candidate"], 1)
         dormant = status["candidates"]["dormant_candidate"][0]
-        self.assertEqual(dormant["name"], "scored-seed")
+        self.assertEqual(dormant["name"], "scored-wallet")
         self.assertEqual(dormant["metrics"]["trades_30d"], 1777)
-        self.assertEqual(status["candidates"]["seed_watchlist"][0]["metrics"]["trades_30d"], 1777)
-        self.assertEqual(status["candidates"]["seed_watchlist"][0]["score_state"], "ready")
 
     def test_candidate_names_fall_back_to_latest_trade_name(self):
         from poly_monitor.dashboard.status import build_dashboard_status, wallet_detail
@@ -182,52 +158,6 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(status["candidate_counts"]["dormant_candidate"], 10)
         self.assertEqual(status["candidates"]["active_candidate"][0]["rank_score"], 34.0)
         self.assertEqual(status["candidates"]["dormant_candidate"][0]["rank_score"], 34.0)
-
-    def test_seed_watchlist_uses_score_even_when_scored_row_is_hidden_by_display_cap(self):
-        from poly_monitor.dashboard.status import build_dashboard_status
-
-        with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp)
-            seed_wallet = "0x9999999999999999999999999999999999999999"
-            store = ObserverStore(data_dir / "state" / "observer.sqlite")
-            store.add_seed(seed_wallet, "older-seed")
-            for idx in range(35):
-                wallet = f"0x{idx:040x}"
-                store.upsert_score(
-                    CandidateScore(
-                        wallet=wallet,
-                        status="active_candidate",
-                        rank_score=1000.0 + idx,
-                        reasons=[],
-                        metrics={"wallet": wallet, "pnl_7d": idx, "pnl_30d": idx, "wins_7d": 1, "losses_7d": 0},
-                    )
-                )
-            store.upsert_score(
-                CandidateScore(
-                    wallet=seed_wallet,
-                    status="active_candidate",
-                    rank_score=1.0,
-                    reasons=[],
-                    metrics={
-                        "wallet": seed_wallet,
-                        "trades_7d": 806,
-                        "pnl_7d": 82005.7,
-                        "pnl_30d": 242963.9,
-                        "wins_7d": 24,
-                        "losses_7d": 0,
-                    },
-                )
-            )
-            store.close()
-
-            status = build_dashboard_status(data_dir, now=dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc))
-
-        self.assertEqual(len(status["candidates"]["active_candidate"]), 15)
-        seed = status["candidates"]["seed_watchlist"][0]
-        self.assertEqual(seed["wallet"], seed_wallet)
-        self.assertEqual(seed["name"], "older-seed")
-        self.assertEqual(seed["score_state"], "ready")
-        self.assertEqual(seed["metrics"]["trades_7d"], 806)
 
     def test_candidate_score_raw_event_is_compact(self):
         from poly_monitor.observer import compact_score_event

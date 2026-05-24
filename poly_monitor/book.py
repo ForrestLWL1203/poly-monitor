@@ -4,6 +4,9 @@ import math
 from typing import Any, Iterable
 
 
+TOP_DEPTH_LEVELS = 20
+
+
 def compact_float(value: float | None, digits: int = 6) -> float | None:
     if value is None:
         return None
@@ -44,7 +47,7 @@ def token_book_summary(
     asks: list[tuple[float, float]],
     book_age_ms: int | None,
     targets: Iterable[float] = (5.0, 25.0, 100.0),
-    depth_levels: int = 20,
+    depth_levels: int = TOP_DEPTH_LEVELS,
 ) -> dict[str, Any]:
     best_bid = bids[0][0] if bids else None
     best_ask = asks[0][0] if asks else None
@@ -60,6 +63,6 @@ def token_book_summary(
         "depth_levels": depth_levels,
         "ask_depth_usdc": compact_float(sum(price * size for price, size in depth_asks), 4),
         "bid_depth_usdc": compact_float(sum(price * size for price, size in depth_bids), 4),
-        "ask_targets": {f"{target:g}": fill_for_notional(asks, float(target)) for target in targets},
-        "bid_targets": {f"{target:g}": fill_for_notional([(1 - price, size) for price, size in bids], float(target)) for target in targets},
+        "ask_targets": {f"{target:g}": fill_for_notional(depth_asks, float(target)) for target in targets},
+        "bid_targets": {f"{target:g}": fill_for_notional(depth_bids, float(target)) for target in targets},
     }

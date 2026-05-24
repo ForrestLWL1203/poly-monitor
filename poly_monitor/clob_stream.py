@@ -22,7 +22,6 @@ class ClobBookStream:
         self._running = False
         self._ws = None
         self._recv_task: asyncio.Task | None = None
-        self._ping_task: asyncio.Task | None = None
         self._last_message_at = 0.0
         self._event_counts: Counter[str] = Counter()
 
@@ -33,7 +32,6 @@ class ClobBookStream:
         self._running = True
         await self._connect_once()
         self._recv_task = asyncio.create_task(self._recv_loop())
-        self._ping_task = asyncio.create_task(self._ping_loop())
 
     async def switch_tokens(self, token_ids: list[str]) -> None:
         self._tokens = list(token_ids)
@@ -43,11 +41,10 @@ class ClobBookStream:
 
     async def close(self) -> None:
         self._running = False
-        tasks = [task for task in (self._recv_task, self._ping_task) if task is not None]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if self._recv_task is not None:
+            self._recv_task.cancel()
+            await asyncio.gather(self._recv_task, return_exceptions=True)
+            self._recv_task = None
         if self._ws is not None:
             try:
                 await asyncio.wait_for(self._ws.close(), timeout=3.0)
@@ -74,7 +71,7 @@ class ClobBookStream:
         return row
 
     async def _connect_once(self) -> None:
-        self._ws = await websockets.connect(CLOB_MARKET_WS_URL)
+        self._ws = await websockets.connect(CLOB_MARKET_WS_URL, ping_interval=10, ping_timeout=15)
         await self._subscribe()
         self._last_message_at = time.monotonic()
 
@@ -95,16 +92,6 @@ class ClobBookStream:
             self._ws = None
         self._books.clear()
         await self._connect_once()
-
-    async def _ping_loop(self) -> None:
-        while self._running:
-            await asyncio.sleep(10.0)
-            if self._ws is None:
-                continue
-            try:
-                await self._ws.send("{}")
-            except Exception:
-                await self._reconnect()
 
     async def _recv_loop(self) -> None:
         backoff = 1.0

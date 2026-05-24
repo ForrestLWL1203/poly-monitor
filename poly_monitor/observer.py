@@ -12,7 +12,7 @@ from .clob_stream import ClobBookStream
 from .crypto_price import fetch_crypto_price_api
 from .data_api import AsyncDataApiClient, normalize_trade
 from .market import MarketSeries, MarketWindow, find_current_or_next_window
-from .price_feed import ChainlinkPriceFeed
+from .price_feed import ChainlinkPriceFeed, ChainlinkPriceHub
 from .scoring import CandidateThresholds, score_wallet
 from .storage import JsonlEventWriter, ObserverStore, cleanup_raw_retention, write_latest_candidates
 from .wallet_metrics import build_metrics_from_api
@@ -45,9 +45,12 @@ class ObserverConfig:
     settlement_retry_sec: float = 30.0
     max_active_candidates: int = 15
     max_dormant_candidates: int = 10
-    max_archive_candidates: int = 0
+    max_archive_candidates: int = 100
     active_metrics_ttl_sec: float = 60.0
     dormant_metrics_ttl_sec: float = 600.0
+    archive_revival_min_trades_24h: int = 100
+    archive_revival_min_markets_24h: int = 20
+    archive_revival_cooldown_sec: float = 300.0
 
 
 @dataclass
@@ -56,14 +59,8 @@ class _MetricsCacheEntry:
     fetched_at: float
 
 
-def should_persist_score(score, *, is_seed: bool = False, previous_status: str | None = None) -> bool:
-    if score.status != "archive_candidate":
-        return True
-    if is_seed:
-        return True
-    if previous_status in {"active_candidate", "dormant_candidate"}:
-        return True
-    return False
+def should_persist_score(score, *, previous_status: str | None = None) -> bool:
+    return True
 
 
 def compact_score_event(score) -> dict[str, Any]:
@@ -75,22 +72,6 @@ def compact_score_event(score) -> dict[str, Any]:
         "rank_score": score.rank_score if hasattr(score, "rank_score") else score["rank_score"],
         "reason_count": len(score.reasons if hasattr(score, "reasons") else score.get("reasons", [])),
     }
-
-
-def parse_seed_wallets(raw: str | None) -> dict[str, str]:
-    if not raw:
-        return {}
-    seeds: dict[str, str] = {}
-    for item in raw.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        if "=" in item:
-            label, wallet = item.split("=", 1)
-        else:
-            label, wallet = item, item
-        seeds[wallet.strip().lower()] = label.strip()
-    return seeds
 
 
 def context_snapshot(
@@ -135,17 +116,15 @@ def context_snapshot(
 
 
 class CryptoWalletObserver:
-    def __init__(self, config: ObserverConfig, seeds: dict[str, str]) -> None:
+    def __init__(self, config: ObserverConfig) -> None:
         self.config = config
-        self.seeds = seeds
         self.store = ObserverStore(config.data_dir / "state" / "observer.sqlite")
-        for wallet, label in seeds.items():
-            self.store.add_seed(wallet, label)
         self.writer = JsonlEventWriter(config.data_dir)
         self.data_api = AsyncDataApiClient()
         self.windows: dict[str, MarketWindow] = {}
         self.stream = ClobBookStream()
-        self.feeds = {symbol: ChainlinkPriceFeed(f"{symbol.lower()}/usd") for symbol in config.symbols}
+        self.price_hub = ChainlinkPriceHub([f"{symbol.lower()}/usd" for symbol in config.symbols])
+        self.feeds = {symbol: self.price_hub.feed(f"{symbol.lower()}/usd") for symbol in config.symbols}
         self.window_reference_prices: dict[str, dict[str, float | None]] = {}
         self.pending_settlements: dict[str, tuple[MarketWindow, dt.datetime]] = {}
         self._last_score_refresh = 0.0
@@ -158,6 +137,8 @@ class CryptoWalletObserver:
         self._last_trade_poll = 0.0
         self._active_score_cursor = 0
         self._discovery_score_cursor = 0
+        self._single_score_discovery_turn = True
+        self._score_cycles_since_prune = 0
         self._active_snapshot_wallets: set[str] = set()
         self._metrics_cache: dict[str, _MetricsCacheEntry] = {}
         self._last_context_snapshot: dict[tuple[str, str], float] = {}
@@ -166,8 +147,7 @@ class CryptoWalletObserver:
     async def run(self) -> int:
         started = time.monotonic()
         try:
-            for feed in self.feeds.values():
-                await feed.start()
+            await self.price_hub.start()
             await self._refresh_windows(initial=True)
             self._last_window_refresh = time.monotonic()
             await self.stream.connect(self._all_tokens())
@@ -190,7 +170,7 @@ class CryptoWalletObserver:
             self.store.close()
             await self.data_api.close()
             await self.stream.close()
-            await asyncio.gather(*(feed.stop() for feed in self.feeds.values()), return_exceptions=True)
+            await self.price_hub.stop()
 
     async def _refresh_windows_if_due(self) -> None:
         if time.monotonic() - self._last_window_refresh < self.config.window_refresh_sec:
@@ -404,8 +384,6 @@ class CryptoWalletObserver:
 
     def _should_snapshot(self, trade: dict[str, Any]) -> bool:
         wallet = trade["wallet"]
-        if wallet in self.seeds:
-            return True
         return wallet in self._active_snapshot_wallets
 
     def _should_write_context_snapshot(self, trade: dict[str, Any]) -> bool:
@@ -427,10 +405,7 @@ class CryptoWalletObserver:
         batch = self._score_batch()
         if not batch:
             return
-        for wallet in batch:
-            previous_status = self.store.candidate_status(wallet)
-            if previous_status == "archive_candidate":
-                continue
+        for wallet, previous_status in batch:
             try:
                 metrics = await self._metrics_for_wallet(wallet, previous_status)
             except Exception as exc:
@@ -442,7 +417,7 @@ class CryptoWalletObserver:
                 })
                 continue
             else:
-                local_metrics = self.store.wallet_trade_metrics(wallet)
+                local_metrics = self.store.wallet_24h_counts(wallet)
                 if float(local_metrics.get("markets_24h") or 0) > float(metrics.get("markets_24h") or 0):
                     metrics["markets_24h"] = local_metrics["markets_24h"]
                     metrics["trades_24h"] = local_metrics["trades_24h"]
@@ -453,20 +428,28 @@ class CryptoWalletObserver:
                 score = score_wallet(metrics, CandidateThresholds())
             if should_persist_score(
                 score,
-                is_seed=wallet in self.seeds or wallet in self.store.seed_wallets(),
                 previous_status=previous_status,
             ):
                 self.store.upsert_score(score)
                 self.writer.write(compact_score_event(score))
-        keep = self.store.seed_wallets()
-        removed = 0
-        removed += self.store.prune_low_sample_archives(keep_wallets=keep)
-        removed += self.store.prune_candidate_scores("active_candidate", max_rows=self.config.max_active_candidates, keep_wallets=keep)
-        removed += self.store.prune_candidate_scores("dormant_candidate", max_rows=self.config.max_dormant_candidates, keep_wallets=keep)
-        removed += self.store.prune_archive_scores(max_archive=self.config.max_archive_candidates, keep_wallets=keep)
-        if removed:
-            self.writer.write({"event": "archive_pruned", "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "removed": removed})
+        self._score_cycles_since_prune += 1
+        if self._score_cycles_since_prune >= 5:
+            self._score_cycles_since_prune = 0
+            removed = self._prune_candidate_tables()
+            if removed:
+                self.writer.write({"event": "archive_pruned", "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "removed": removed})
         self._refresh_candidate_caches()
+
+    def _prune_candidate_tables(self) -> int:
+        removed = 0
+        removed += self.store.prune_low_sample_archives(min_age_seconds=self.config.archive_revival_cooldown_sec)
+        removed += self.store.prune_candidate_scores("active_candidate", max_rows=self.config.max_active_candidates)
+        removed += self.store.prune_candidate_scores("dormant_candidate", max_rows=self.config.max_dormant_candidates)
+        removed += self.store.prune_archive_scores(
+            max_archive=self.config.max_archive_candidates,
+            min_age_seconds=self.config.archive_revival_cooldown_sec,
+        )
+        return removed
 
     async def _metrics_for_wallet(self, wallet: str, previous_status: str | None) -> dict[str, Any]:
         ttl = self._metrics_cache_ttl(previous_status)
@@ -479,21 +462,30 @@ class CryptoWalletObserver:
         return metrics
 
     def _metrics_cache_ttl(self, previous_status: str | None) -> float:
-        if previous_status == "dormant_candidate":
+        if previous_status in {"dormant_candidate", "archive_candidate"}:
             return self.config.dormant_metrics_ttl_sec
         return self.config.active_metrics_ttl_sec
 
-    def _score_batch(self) -> list[str]:
+    def _score_batch(self, *, now: dt.datetime | None = None) -> list[tuple[str, str | None]]:
+        now = now or dt.datetime.now(dt.timezone.utc)
         budget = max(1, self.config.score_wallets_per_cycle)
         active_wallets = self.store.candidate_wallets("active_candidate", limit=self.config.max_active_candidates)
+        if budget == 1:
+            use_discovery = self._single_score_discovery_turn or not active_wallets
+            self._single_score_discovery_turn = not self._single_score_discovery_turn
+            discovery_budget = 1 if use_discovery else 0
+            active_budget = 0 if use_discovery else 1
+        else:
+            discovery_budget = max(1, budget // 2)
+            active_budget = budget - discovery_budget
         batch: list[str] = []
-        if active_wallets:
+        if active_wallets and active_budget > 0:
             start = self._active_score_cursor % len(active_wallets)
-            take = min(budget, len(active_wallets))
+            take = min(active_budget, len(active_wallets))
             batch.extend(active_wallets[(start + idx) % len(active_wallets)] for idx in range(take))
             self._active_score_cursor = (start + take) % len(active_wallets)
 
-        if len(batch) < budget:
+        if discovery_budget > 0:
             due_dormant = set(
                 self.store.candidate_wallets_due(
                     "dormant_candidate",
@@ -501,11 +493,20 @@ class CryptoWalletObserver:
                     min_age_seconds=self.config.dormant_metrics_ttl_sec,
                 )
             )
+            reactivatable_archives = set(
+                self.store.reactivatable_archive_wallets(
+                    limit=self.config.score_wallet_pool_limit,
+                    now=now,
+                    min_trades_24h=self.config.archive_revival_min_trades_24h,
+                    min_markets_24h=self.config.archive_revival_min_markets_24h,
+                    min_age_seconds=self.config.archive_revival_cooldown_sec,
+                )
+            )
             discovery_wallets = list(
                 dict.fromkeys(
-                    list(self.seeds)
-                    + list(due_dormant)
+                    list(due_dormant)
                     + self.store.recent_wallets(limit=self.config.score_wallet_pool_limit)
+                    + list(reactivatable_archives)
                 )
             )
             discovery_wallets = [wallet for wallet in discovery_wallets if wallet not in set(batch)]
@@ -513,15 +514,24 @@ class CryptoWalletObserver:
             discovery_wallets = [
                 wallet
                 for wallet in discovery_wallets
-                if statuses.get(wallet) != "archive_candidate"
-                and (statuses.get(wallet) != "dormant_candidate" or wallet in due_dormant or wallet in self.seeds)
+                if (
+                    statuses.get(wallet) != "archive_candidate"
+                    or wallet in reactivatable_archives
+                )
+                and (statuses.get(wallet) != "dormant_candidate" or wallet in due_dormant)
             ]
             if discovery_wallets:
                 start = self._discovery_score_cursor % len(discovery_wallets)
-                take = min(budget - len(batch), len(discovery_wallets))
+                take = min(len(discovery_wallets), budget - len(batch))
                 batch.extend(discovery_wallets[(start + idx) % len(discovery_wallets)] for idx in range(take))
                 self._discovery_score_cursor = (start + take) % len(discovery_wallets)
-        return batch
+        if not batch and active_wallets:
+            start = self._active_score_cursor % len(active_wallets)
+            take = min(budget, len(active_wallets))
+            batch.extend(active_wallets[(start + idx) % len(active_wallets)] for idx in range(take))
+            self._active_score_cursor = (start + take) % len(active_wallets)
+        statuses = self.store.candidate_statuses(batch)
+        return [(wallet, statuses.get(wallet)) for wallet in batch]
 
     def _cleanup_stale_data_if_due(self) -> None:
         interval_sec = max(0.0, self.config.cleanup_interval_hours) * 3600.0
@@ -532,10 +542,8 @@ class CryptoWalletObserver:
         self._last_data_cleanup = time.monotonic()
         now = dt.datetime.now(dt.timezone.utc)
         cutoff_ts = int((now - dt.timedelta(hours=self.config.inactive_wallet_ttl_hours)).timestamp())
-        keep = self.store.seed_wallets()
         result = self.store.cleanup_inactive_wallet_data(
             inactive_cutoff_ts=cutoff_ts,
-            keep_wallets=keep,
             max_non_candidate_wallets=self.config.max_non_candidate_wallets,
         )
         if any(result.values()):
@@ -547,6 +555,21 @@ class CryptoWalletObserver:
                 "inactive_cutoff_ts": cutoff_ts,
                 **result,
             })
+        context_cutoff = time.monotonic() - 600.0
+        self._last_context_snapshot = {
+            key: last_seen
+            for key, last_seen in self._last_context_snapshot.items()
+            if last_seen > context_cutoff
+        }
+        metrics_cutoff = time.monotonic() - max(
+            self.config.active_metrics_ttl_sec,
+            self.config.dormant_metrics_ttl_sec,
+        ) * 10.0
+        self._metrics_cache = {
+            wallet: entry
+            for wallet, entry in self._metrics_cache.items()
+            if entry.fetched_at > metrics_cutoff
+        }
 
     def _cleanup_raw_retention_if_due(self) -> None:
         interval_sec = max(0.0, self.config.raw_cleanup_interval_hours) * 3600.0
@@ -565,11 +588,6 @@ class CryptoWalletObserver:
         if not force:
             return
         self._last_report_refresh = time.monotonic()
-        keep = self.store.seed_wallets()
-        self.store.prune_low_sample_archives(keep_wallets=keep)
-        self.store.prune_candidate_scores("active_candidate", max_rows=self.config.max_active_candidates, keep_wallets=keep)
-        self.store.prune_candidate_scores("dormant_candidate", max_rows=self.config.max_dormant_candidates, keep_wallets=keep)
-        self.store.prune_archive_scores(max_archive=self.config.max_archive_candidates, keep_wallets=keep)
         self._refresh_candidate_caches()
         write_latest_candidates(
             self.config.data_dir / "reports" / "latest_candidates.json",

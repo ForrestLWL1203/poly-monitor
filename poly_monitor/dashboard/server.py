@@ -6,6 +6,7 @@ import hmac
 import json
 import mimetypes
 import os
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -19,6 +20,9 @@ from .status import build_dashboard_status, recent_trades, wallet_detail
 
 COOKIE_NAME = "poly_monitor_session"
 FAILED_LOGINS: dict[str, list[float]] = {}
+_STATUS_TTL = 2.0
+_status_cache: tuple[str, float, dict[str, Any]] | None = None
+_status_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -94,10 +98,26 @@ def create_server(config: DashboardConfig) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((resolved.host, resolved.port), Handler)
 
 
+def _cached_status(data_dir: Path, *, ttl: float = _STATUS_TTL) -> dict[str, Any]:
+    global _status_cache
+    ttl = max(0.0, float(ttl))
+    if ttl <= 0:
+        return build_dashboard_status(data_dir)
+    data_dir_key = str(data_dir.expanduser().resolve())
+    now = time.monotonic()
+    if _status_cache and _status_cache[0] == data_dir_key and now - _status_cache[1] < ttl:
+        return _status_cache[2]
+    with _status_lock:
+        now = time.monotonic()
+        if _status_cache and _status_cache[0] == data_dir_key and now - _status_cache[1] < ttl:
+            return _status_cache[2]
+        payload = build_dashboard_status(data_dir)
+        _status_cache = (data_dir_key, now, payload)
+        return payload
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     dashboard_config: DashboardConfig
-    _status_cache_payload: dict[str, Any] | None = None
-    _status_cache_until: float = 0.0
 
     server_version = "PolyMonitorDashboard/0.1"
 
@@ -144,15 +164,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
     def _cached_status(self) -> dict[str, Any]:
-        now = time.monotonic()
-        cls = type(self)
-        ttl = max(0.0, float(self.dashboard_config.status_cache_ttl_seconds))
-        if cls._status_cache_payload is not None and now < cls._status_cache_until:
-            return cls._status_cache_payload
-        payload = build_dashboard_status(self.dashboard_config.data_dir)
-        cls._status_cache_payload = payload
-        cls._status_cache_until = now + ttl
-        return payload
+        return _cached_status(self.dashboard_config.data_dir, ttl=self.dashboard_config.status_cache_ttl_seconds)
 
     def _login(self) -> None:
         body = self.rfile.read(_int_param(self.headers.get("Content-Length"), default=0, minimum=0, maximum=16384))

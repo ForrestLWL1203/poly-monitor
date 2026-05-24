@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from poly_monitor.observer import should_persist_score
 
 
 class ArchiveRetentionTests(unittest.TestCase):
-    def test_new_low_sample_archive_candidate_is_not_persisted(self):
+    def test_new_low_sample_archive_candidate_is_persisted_for_cooldown(self):
         score = CandidateScore(
             wallet="0xabc",
             status="archive_candidate",
@@ -19,7 +20,7 @@ class ArchiveRetentionTests(unittest.TestCase):
             metrics={"wallet": "0xabc", "trades_7d": 3, "markets_24h": 1, "historical_trades": 3},
         )
 
-        self.assertFalse(should_persist_score(score, previous_status=None))
+        self.assertTrue(should_persist_score(score, previous_status=None))
 
     def test_previous_candidate_can_move_to_archive(self):
         score = CandidateScore(
@@ -32,7 +33,7 @@ class ArchiveRetentionTests(unittest.TestCase):
 
         self.assertTrue(should_persist_score(score, previous_status="dormant_candidate"))
 
-    def test_new_high_sample_archive_candidate_is_not_persisted_without_prior_quality_state(self):
+    def test_new_high_sample_archive_candidate_is_persisted_for_cooldown(self):
         score = CandidateScore(
             wallet="0xabc",
             status="archive_candidate",
@@ -41,15 +42,13 @@ class ArchiveRetentionTests(unittest.TestCase):
             metrics={"wallet": "0xabc", "trades_7d": 150, "markets_24h": 4, "historical_trades": 150},
         )
 
-        self.assertFalse(should_persist_score(score, previous_status=None))
+        self.assertTrue(should_persist_score(score, previous_status=None))
 
-    def test_prune_archive_scores_keeps_seeds_and_recent_limit(self):
+    def test_prune_archive_scores_keeps_recent_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
-            seed_wallet = "0xseed"
-            store.add_seed(seed_wallet, "seed")
             for idx in range(8):
-                wallet = seed_wallet if idx == 0 else f"0x{idx:040x}"
+                wallet = f"0x{idx:040x}"
                 store.upsert_score(
                     CandidateScore(
                         wallet=wallet,
@@ -60,22 +59,35 @@ class ArchiveRetentionTests(unittest.TestCase):
                     )
                 )
 
-            removed = store.prune_archive_scores(max_archive=3, keep_wallets={seed_wallet})
+            removed = store.prune_archive_scores(max_archive=3)
             rows = store.candidate_rows(limit=30)["archive_candidate"]
             store.close()
 
-        wallets = {row["wallet"] for row in rows}
-        self.assertEqual(removed, 4)
-        self.assertIn(seed_wallet, wallets)
-        self.assertEqual(len(rows), 4)
+        self.assertEqual(removed, 5)
+        self.assertEqual(len(rows), 3)
+
+    def test_prune_archive_scores_preserves_cooldown_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            fresh = "0xfresh"
+            old = "0xold"
+            store.upsert_score(CandidateScore(fresh, "archive_candidate", 0, [], {"wallet": fresh}))
+            store.upsert_score(CandidateScore(old, "archive_candidate", 0, [], {"wallet": old}))
+            stale_updated_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)).isoformat()
+            store.conn.execute("UPDATE candidate_scores SET updated_at=? WHERE wallet=?", (stale_updated_at, old))
+            store.conn.commit()
+
+            removed = store.prune_archive_scores(max_archive=0, min_age_seconds=300)
+            wallets = {row["wallet"] for row in store.candidate_rows(limit=30)["archive_candidate"]}
+            store.close()
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(wallets, {fresh})
 
     def test_prune_low_sample_archives_removes_route_through_wallets(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
-            seed_wallet = "0xseed"
-            store.add_seed(seed_wallet, "seed")
             rows = [
-                (seed_wallet, {"wallet": seed_wallet, "trades_7d": 1, "markets_24h": 1, "historical_trades": 1}),
                 ("0xlow", {"wallet": "0xlow", "trades_7d": 2, "markets_24h": 1, "historical_trades": 2}),
                 ("0xbusy", {"wallet": "0xbusy", "trades_7d": 120, "markets_24h": 2, "historical_trades": 120}),
                 ("0xwindow", {"wallet": "0xwindow", "trades_7d": 20, "markets_24h": 3, "historical_trades": 20}),
@@ -91,13 +103,32 @@ class ArchiveRetentionTests(unittest.TestCase):
                     )
                 )
 
-            removed = store.prune_low_sample_archives(keep_wallets={seed_wallet})
+            removed = store.prune_low_sample_archives()
             archived = store.candidate_rows(limit=30)["archive_candidate"]
             store.close()
 
         wallets = {row["wallet"] for row in archived}
         self.assertEqual(removed, 1)
-        self.assertEqual(wallets, {seed_wallet, "0xbusy", "0xwindow"})
+        self.assertEqual(wallets, {"0xbusy", "0xwindow"})
+
+    def test_prune_low_sample_archives_preserves_cooldown_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            fresh = "0xfresh"
+            old = "0xold"
+            metrics = {"trades_7d": 1, "markets_24h": 1, "historical_trades": 1}
+            store.upsert_score(CandidateScore(fresh, "archive_candidate", 0.0, ["test"], {"wallet": fresh, **metrics}))
+            store.upsert_score(CandidateScore(old, "archive_candidate", 0.0, ["test"], {"wallet": old, **metrics}))
+            stale_updated_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)).isoformat()
+            store.conn.execute("UPDATE candidate_scores SET updated_at=? WHERE wallet=?", (stale_updated_at, old))
+            store.conn.commit()
+
+            removed = store.prune_low_sample_archives(min_age_seconds=300)
+            wallets = {row["wallet"] for row in store.candidate_rows(limit=30)["archive_candidate"]}
+            store.close()
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(wallets, {fresh})
 
     def test_prune_candidate_scores_caps_active_and_dormant_by_rank(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -160,17 +191,14 @@ class ArchiveRetentionTests(unittest.TestCase):
             store = ObserverStore(Path(tmp) / "observer.sqlite")
             active = "0xactive"
             dormant = "0xdormant"
-            seed = "0xseed"
             stale = "0xstale"
             fresh = "0xfresh"
-            store.add_seed(seed, "seed")
             store.upsert_score(CandidateScore(active, "active_candidate", 10, [], {"wallet": active}))
             store.upsert_score(CandidateScore(dormant, "dormant_candidate", 5, [], {"wallet": dormant}))
             store.upsert_score(CandidateScore(stale, "archive_candidate", 0, ["test"], {"wallet": stale}))
             for wallet, tx, ts in [
                 (active, "0xa", 100),
                 (dormant, "0xd", 100),
-                (seed, "0xs", 100),
                 (stale, "0xold", 100),
                 (fresh, "0xf", 990),
             ]:
@@ -187,7 +215,7 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(result["removed_wallets"], 1)
         self.assertEqual(result["removed_trades"], 1)
         self.assertEqual(result["removed_score_rows"], 1)
-        self.assertEqual(remaining_wallets, {active, dormant, seed, fresh})
+        self.assertEqual(remaining_wallets, {active, dormant, fresh})
         self.assertIsNone(stale_score)
 
     def test_cleanup_inactive_wallet_data_caps_recent_non_candidate_wallets(self):
@@ -253,7 +281,18 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertIn("idx_trades_market_ts", indexes)
         self.assertIn("idx_trades_condition_ts", indexes)
         self.assertIn("idx_scores_status_rank", indexes)
+        self.assertIn("idx_scores_status_updated", indexes)
         self.assertEqual(last_ts, 123)
+
+    def test_storage_applies_runtime_pragmas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            cache_size = store.conn.execute("PRAGMA cache_size").fetchone()[0]
+            wal_autocheckpoint = store.conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+            store.close()
+
+        self.assertEqual(cache_size, -32000)
+        self.assertEqual(wal_autocheckpoint, 2000)
 
 
 if __name__ == "__main__":
