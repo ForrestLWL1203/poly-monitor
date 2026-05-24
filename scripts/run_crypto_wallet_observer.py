@@ -48,7 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settlement-retry-sec", type=float, default=30.0)
     parser.add_argument("--max-active-candidates", type=int, default=15)
     parser.add_argument("--max-dormant-candidates", type=int, default=10)
-    parser.add_argument("--max-archive-candidates", type=int, default=0)
+    parser.add_argument("--max-archive-candidates", type=int, default=100)
+    parser.add_argument("--archive-revival-min-trades-24h", type=int, default=100)
+    parser.add_argument("--archive-revival-min-markets-24h", type=int, default=20)
+    parser.add_argument("--archive-revival-cooldown-sec", type=float, default=300.0)
     return parser
 
 
@@ -81,6 +84,9 @@ async def async_main() -> int:
         max_active_candidates=args.max_active_candidates,
         max_dormant_candidates=args.max_dormant_candidates,
         max_archive_candidates=args.max_archive_candidates,
+        archive_revival_min_trades_24h=args.archive_revival_min_trades_24h,
+        archive_revival_min_markets_24h=args.archive_revival_min_markets_24h,
+        archive_revival_cooldown_sec=args.archive_revival_cooldown_sec,
     )
     observer = CryptoWalletObserver(config)
     return await observer.run()
