@@ -84,7 +84,7 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["pnl_source"], "profile_profit")
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 100_000)
 
-    def test_activity_metrics_mark_24h_windows_as_lower_bound_when_page_cap_hit(self):
+    def test_activity_metrics_saturate_24h_windows_for_high_frequency_page_cap(self):
         first_page = [
             {"type": "TRADE", "slug": f"btc-updown-5m-{100 + idx}", "timestamp": 1000 + idx, "outcome": "Up", "usdcSize": 1}
             for idx in range(500)
@@ -102,7 +102,33 @@ class WalletMetricsTests(unittest.TestCase):
         ):
             metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=1, closed_pages=2)
 
-        self.assertEqual(metrics["markets_24h"], 500)
+        self.assertEqual(metrics["markets_24h"], 288)
+        self.assertTrue(metrics["markets_24h_lower_bound"])
+
+    def test_default_activity_paging_marks_high_frequency_wallets_as_saturated(self):
+        pages = [
+            [
+                {"type": "TRADE", "slug": f"btc-updown-5m-{page}", "timestamp": 2000 - page, "outcome": "Up", "usdcSize": 1}
+                for idx in range(500)
+            ]
+            for page in range(3)
+        ]
+        closed = [{"slug": "btc-updown-5m-0-0", "endDate": "1970-01-01T00:16:40+00:00", "realizedPnl": 1, "avgPrice": 0.5, "outcome": "Up"}]
+
+        with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=pages) as activity, patch(
+            "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_profit",
+            side_effect=[
+                {"amount": 1, "name": "profile"},
+                {"amount": 1, "name": "profile"},
+            ],
+        ):
+            metrics = build_metrics_from_api("0xabc", now_ts=2000, closed_pages=2)
+
+        self.assertEqual(activity.call_count, 3)
+        self.assertEqual(metrics["trades_24h"], 1500)
+        self.assertEqual(metrics["markets_24h"], 288)
         self.assertTrue(metrics["markets_24h_lower_bound"])
 
 

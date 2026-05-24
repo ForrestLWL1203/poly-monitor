@@ -6,6 +6,10 @@ from typing import Any
 
 from .data_api import fetch_closed_positions, fetch_user_activity, fetch_user_profit
 
+DEFAULT_ACTIVITY_PAGES = 3
+SATURATED_MARKETS_24H = 288
+SATURATED_MARKETS_MIN_TRADES_24H = 500
+
 
 def is_crypto_5m_row(row: dict[str, Any]) -> bool:
     slug = str(row.get("slug") or row.get("eventSlug") or "")
@@ -95,7 +99,13 @@ def _profile_profit(wallet: str, window: str) -> tuple[float | None, str | None,
     return amount, name, None
 
 
-def build_metrics_from_api(wallet: str, *, now_ts: int | None = None, activity_pages: int = 3, closed_pages: int = 4) -> dict[str, Any]:
+def build_metrics_from_api(
+    wallet: str,
+    *,
+    now_ts: int | None = None,
+    activity_pages: int = DEFAULT_ACTIVITY_PAGES,
+    closed_pages: int = 4,
+) -> dict[str, Any]:
     now = now_ts or int(dt.datetime.now(dt.timezone.utc).timestamp())
     activity: list[dict[str, Any]] = []
     activity_page_cap_hit = False
@@ -164,11 +174,18 @@ def build_metrics_from_api(wallet: str, *, now_ts: int | None = None, activity_p
     trade_markets_7d = {row_slug(row) for row in trades_7d if row_slug(row)}
     trade_markets_30d = {row_slug(row) for row in trades_30d if row_slug(row)}
     all_trade_markets = {row_slug(row) for row in trades if row_slug(row)}
+    markets_24h_lower_bound = activity_page_cap_hit and bool(trades_24h)
+    markets_24h = len(trade_markets_24h)
+    if activity_page_cap_hit and len(trades_24h) >= SATURATED_MARKETS_MIN_TRADES_24H:
+        markets_24h = SATURATED_MARKETS_24H
+        markets_24h_lower_bound = True
     metrics = {
         "wallet": wallet.lower(),
         "trades_24h": len(trades_24h),
-        "markets_24h": len(trade_markets_24h),
-        "markets_24h_lower_bound": activity_page_cap_hit and bool(trades_24h),
+        "markets_24h": markets_24h,
+        "markets_24h_lower_bound": markets_24h_lower_bound,
+        "activity_page_cap_hit": activity_page_cap_hit,
+        "activity_rows_sampled": len(activity),
         "trades_7d": len(trades_7d),
         "markets_7d": len(trade_markets_7d),
         "trades_30d": len(trades_30d),
