@@ -8,7 +8,7 @@ from typing import Any
 @dataclass(frozen=True)
 class CandidateThresholds:
     min_trades_7d: int = 500
-    min_markets_24h: int = 5
+    min_markets_24h: int = 100
     min_trades_30d: int = 800
     max_top1_concentration: float = 0.25
     max_top3_concentration: float = 0.50

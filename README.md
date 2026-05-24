@@ -60,8 +60,10 @@ Active candidates require high recent BTC/ETH 5m activity and stable positive Pn
 Scoring is hybrid so a fresh deployment is not forced to wait for a full local
 observation window:
 
-- 7d trades >= 500 and 7d markets >= 5.
-- 30d trades >= 800 and 30d markets >= 5.
+- 7d trades >= 500.
+- 24h BTC/ETH 5m windows >= 100, so previously active wallets that only trade
+  around 20 windows today do not remain active candidates.
+- 30d trades >= 800.
 - 7d and 30d PnL positive.
 - top1 profit concentration <= 25%, top3 <= 50%.
 - low-odds longshot profit is not rejected if it repeats across multiple markets;

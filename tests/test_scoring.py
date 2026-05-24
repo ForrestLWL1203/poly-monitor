@@ -9,10 +9,10 @@ class ScoringTests(unittest.TestCase):
         metrics = {
             "wallet": "0xabc",
             "trades_7d": 500,
-            "markets_24h": 5,
-            "markets_7d": 5,
+            "markets_24h": 100,
+            "markets_7d": 100,
             "trades_30d": 800,
-            "markets_30d": 5,
+            "markets_30d": 100,
             "pnl_7d": 10.0,
             "pnl_30d": 100.0,
             "wins_7d": 51,
@@ -23,7 +23,7 @@ class ScoringTests(unittest.TestCase):
             "longshot_profit_markets": 6,
             "last_active_age_hours": 48,
             "historical_trades": 800,
-            "historical_markets": 5,
+            "historical_markets": 100,
             "historical_pnl": 100.0,
         }
 
@@ -36,7 +36,7 @@ class ScoringTests(unittest.TestCase):
         metrics = {
             "wallet": "0xabc",
             "trades_7d": 1047,
-            "markets_24h": 6,
+            "markets_24h": 100,
             "markets_7d": 32,
             "trades_30d": 1047,
             "markets_30d": 32,
@@ -62,7 +62,7 @@ class ScoringTests(unittest.TestCase):
         quality_small_bankroll = {
             "wallet": "0xquality",
             "trades_7d": 1800,
-            "markets_24h": 80,
+            "markets_24h": 120,
             "trades_30d": 3000,
             "pnl_7d": 120.0,
             "pnl_30d": 300.0,
@@ -81,7 +81,7 @@ class ScoringTests(unittest.TestCase):
             **quality_small_bankroll,
             "wallet": "0xbigger",
             "trades_7d": 500,
-            "markets_24h": 5,
+            "markets_24h": 100,
             "trades_30d": 800,
             "pnl_7d": 10_000.0,
             "pnl_30d": 30_000.0,
@@ -144,7 +144,7 @@ class ScoringTests(unittest.TestCase):
         metrics = {
             "wallet": "0xabc",
             "trades_7d": 500,
-            "markets_24h": 5,
+            "markets_24h": 100,
             "trades_30d": 800,
             "pnl_7d": 10.0,
             "pnl_30d": 100.0,
@@ -156,7 +156,7 @@ class ScoringTests(unittest.TestCase):
             "longshot_profit_markets": 1,
             "last_active_age_hours": 1,
             "historical_trades": 800,
-            "historical_markets": 5,
+            "historical_markets": 100,
             "historical_pnl": 100.0,
         }
 
@@ -185,6 +185,33 @@ class ScoringTests(unittest.TestCase):
         }
 
         self.assertEqual(score_wallet(metrics, CandidateThresholds()).status, "active_candidate")
+
+    def test_score_wallet_requires_high_24h_market_activity_for_active(self):
+        metrics = {
+            "wallet": "0xabc",
+            "trades_7d": 1000,
+            "markets_24h": 20,
+            "trades_30d": 1500,
+            "markets_30d": 200,
+            "pnl_7d": 100.0,
+            "pnl_30d": 500.0,
+            "pnl_source": "crypto_closed_positions",
+            "wins_7d": 30,
+            "losses_7d": 0,
+            "top1_concentration": 0.1,
+            "top3_concentration": 0.2,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 1500,
+            "historical_markets": 200,
+            "historical_pnl": 500.0,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "dormant_candidate")
+        self.assertIn("markets_24h_below_threshold", score.reasons)
 
     def test_score_wallet_rejects_negative_7d_pnl_on_api_metrics(self):
         metrics = {

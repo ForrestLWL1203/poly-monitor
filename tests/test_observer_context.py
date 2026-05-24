@@ -228,7 +228,7 @@ class ObserverContextTests(unittest.TestCase):
                 api_metrics = {
                     "wallet": wallet,
                     "trades_24h": 600,
-                    "markets_24h": 60,
+                    "markets_24h": 100,
                     "trades_7d": 1200,
                     "markets_7d": 200,
                     "trades_30d": 2400,
@@ -362,7 +362,7 @@ class ObserverContextTests(unittest.TestCase):
                 metrics = {
                     "wallet": "0xactive",
                     "trades_24h": 100,
-                    "markets_24h": 30,
+                    "markets_24h": 100,
                     "trades_7d": 500,
                     "markets_7d": 90,
                     "trades_30d": 1500,
@@ -492,7 +492,7 @@ class ObserverContextTests(unittest.TestCase):
                 metrics = {
                     "wallet": "0xactive",
                     "trades_24h": 100,
-                    "markets_24h": 30,
+                    "markets_24h": 100,
                     "trades_7d": 500,
                     "markets_7d": 90,
                     "trades_30d": 1500,
