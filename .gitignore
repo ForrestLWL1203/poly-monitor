@@ -6,3 +6,4 @@ data/
 logs/
 reports/
 .DS_Store
+.claude/
