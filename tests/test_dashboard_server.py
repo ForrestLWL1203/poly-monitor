@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 
 class DashboardServerTests(unittest.TestCase):
@@ -75,6 +76,46 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(verify_session_token(token, "secret", max_age_seconds=60, now=1010), "admin")
         self.assertIsNone(verify_session_token(token, "other-secret", max_age_seconds=60, now=1010))
         self.assertIsNone(verify_session_token(token, "secret", max_age_seconds=60, now=2000))
+
+    def test_status_api_uses_short_ttl_cache(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = 0
+
+            def fake_status(_data_dir: Path) -> dict:
+                nonlocal calls
+                calls += 1
+                return {"health": {"ok": True}, "calls": calls}
+
+            with mock.patch("poly_monitor.dashboard.server.build_dashboard_status", side_effect=fake_status):
+                server = create_server(
+                    DashboardConfig(
+                        data_dir=Path(tmp),
+                        host="127.0.0.1",
+                        port=0,
+                        username="admin",
+                        password="secret",
+                        cookie_secret="test-secret",
+                        status_cache_ttl_seconds=5.0,
+                    )
+                )
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base = f"http://127.0.0.1:{server.server_address[1]}"
+                    cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                    req1 = urllib.request.Request(f"{base}/api/status", headers={"Cookie": cookie})
+                    req2 = urllib.request.Request(f"{base}/api/status", headers={"Cookie": cookie})
+                    first = json.loads(urllib.request.urlopen(req1, timeout=3).read().decode())
+                    second = json.loads(urllib.request.urlopen(req2, timeout=3).read().decode())
+                    self.assertEqual(first["calls"], 1)
+                    self.assertEqual(second["calls"], 1)
+                    self.assertEqual(calls, 1)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
 
 
 if __name__ == "__main__":

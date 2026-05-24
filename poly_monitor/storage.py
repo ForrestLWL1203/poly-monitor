@@ -98,6 +98,14 @@ class ObserverStore:
                 wallet TEXT PRIMARY KEY,
                 label TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS market_windows (
+                symbol TEXT PRIMARY KEY,
+                market_slug TEXT NOT NULL,
+                condition_id TEXT NOT NULL,
+                window_start TEXT NOT NULL,
+                window_end TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         table_info = self.conn.execute("PRAGMA table_info(trades)").fetchall()
@@ -145,7 +153,34 @@ class ObserverStore:
             CREATE INDEX IF NOT EXISTS idx_trades_condition_ts ON trades(condition_id, exchange_ts);
             CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(exchange_ts);
             CREATE INDEX IF NOT EXISTS idx_scores_status_rank ON candidate_scores(status, rank_score DESC);
+            CREATE INDEX IF NOT EXISTS idx_market_windows_slug ON market_windows(market_slug);
             """
+        )
+        self.conn.commit()
+
+    def upsert_market_window(
+        self,
+        *,
+        symbol: str,
+        market_slug: str,
+        condition_id: str,
+        window_start: str,
+        window_end: str,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO market_windows(
+                symbol, market_slug, condition_id, window_start, window_end, updated_at
+            ) VALUES(?,?,?,?,?,?)
+            """,
+            (
+                symbol.upper(),
+                market_slug,
+                condition_id,
+                window_start,
+                window_end,
+                utc_now().isoformat(),
+            ),
         )
         self.conn.commit()
 

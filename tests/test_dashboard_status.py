@@ -325,6 +325,29 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(len(status["events"]["recent"]), 1)
         self.assertEqual(status["events"]["recent"][0]["event_label"], "数据清理")
 
+    def test_tail_raw_events_reads_only_recent_lines(self):
+        from poly_monitor.dashboard.status import _tail_raw_events
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            old_dir = data_dir / "raw" / "2026-05-23"
+            new_dir = data_dir / "raw" / "2026-05-24"
+            old_dir.mkdir(parents=True)
+            new_dir.mkdir(parents=True)
+            (old_dir / "events.jsonl").write_text(
+                "\n".join(json.dumps({"event": "old", "observed_at": f"2026-05-23T00:00:0{idx}+00:00"}) for idx in range(3)) + "\n",
+                encoding="utf-8",
+            )
+            (new_dir / "events.jsonl").write_text(
+                "\n".join(json.dumps({"event": "new", "observed_at": f"2026-05-24T00:00:0{idx}+00:00", "idx": idx}) for idx in range(5)) + "\n",
+                encoding="utf-8",
+            )
+
+            events = _tail_raw_events(data_dir / "raw", max_lines=3)
+
+        self.assertEqual([row["idx"] for row in events], [2, 3, 4])
+        self.assertEqual({row["event"] for row in events}, {"new"})
+
     def test_status_summarizes_sqlite_report_and_raw_jsonl(self):
         from poly_monitor.dashboard.status import build_dashboard_status
 
@@ -409,6 +432,39 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(status["markets"]["current"]["BTC"]["trade_count"], 1)
         self.assertEqual(len(status["candidates"]["active_candidate"]), 1)
         self.assertEqual(status["recent_trades"][0]["tx_hash"], "0xabc")
+
+    def test_current_market_can_come_from_sqlite_window_snapshot(self):
+        from poly_monitor.dashboard.status import build_dashboard_status
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            store.upsert_market_window(
+                symbol="BTC",
+                market_slug="btc-updown-5m-1770000000",
+                condition_id="0xcond",
+                window_start="2026-02-02T02:40:00+00:00",
+                window_end="2026-02-02T02:45:00+00:00",
+            )
+            base_trade = {
+                "tx_hash": "0xwin",
+                "wallet": "0x1111111111111111111111111111111111111111",
+                "market_slug": "btc-updown-5m-1770000000",
+                "condition_id": "0xcond",
+                "symbol": "BTC",
+                "exchange_ts": 1770000010,
+                "outcome": "Up",
+                "price": 0.5,
+                "size": 2,
+                "usdc": 1,
+            }
+            store.insert_trade(base_trade)
+            store.close()
+
+            status = build_dashboard_status(data_dir, now=dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc))
+
+        self.assertEqual(status["markets"]["current"]["BTC"]["market_slug"], "btc-updown-5m-1770000000")
+        self.assertEqual(status["markets"]["current"]["BTC"]["trade_count"], 1)
 
     def test_current_market_trade_count_excludes_pre_window_trades(self):
         from poly_monitor.dashboard.status import build_dashboard_status

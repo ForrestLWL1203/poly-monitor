@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import sqlite3
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -68,16 +68,39 @@ def _raw_files(raw_dir: Path) -> list[Path]:
     return sorted(files, key=lambda path: path.stat().st_mtime)
 
 
+def _tail_lines(path: Path, *, max_lines: int, block_size: int = 65536) -> list[str]:
+    if max_lines <= 0:
+        return []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            position = handle.tell()
+            chunks: list[bytes] = []
+            line_count = 0
+            while position > 0 and line_count <= max_lines:
+                read_size = min(block_size, position)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                chunks.append(chunk)
+                line_count += chunk.count(b"\n")
+    except OSError:
+        return []
+    data = b"".join(reversed(chunks))
+    return [line.decode("utf-8", errors="replace") for line in data.splitlines()[-max_lines:] if line.strip()]
+
+
 def _tail_raw_events(raw_dir: Path, *, max_lines: int = 2500) -> list[dict[str, Any]]:
-    lines: deque[str] = deque(maxlen=max_lines)
-    for path in _raw_files(raw_dir):
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if line.strip():
-                        lines.append(line)
-        except OSError:
+    lines: list[str] = []
+    remaining = max_lines
+    for path in reversed(_raw_files(raw_dir)):
+        if remaining <= 0:
+            break
+        file_lines = _tail_lines(path, max_lines=remaining)
+        if not file_lines:
             continue
+        lines = file_lines + lines
+        remaining = max_lines - len(lines)
     events: list[dict[str, Any]] = []
     for line in lines:
         try:
@@ -235,18 +258,24 @@ def _market_trade_counts(data_dir: Path, windows: dict[str, tuple[int | None, in
     if conn is None:
         return {}
     try:
-        rows = conn.execute("SELECT market_slug, exchange_ts FROM trades").fetchall()
         counts: Counter[str] = Counter()
         windows = windows or {}
+        for slug, (start_ts, end_ts) in windows.items():
+            clauses = ["market_slug=?"]
+            params: list[Any] = [slug]
+            if start_ts is not None:
+                clauses.append("exchange_ts>=?")
+                params.append(start_ts)
+            if end_ts is not None:
+                clauses.append("exchange_ts<?")
+                params.append(end_ts)
+            row = conn.execute(f"SELECT COUNT(*) AS n FROM trades WHERE {' AND '.join(clauses)}", params).fetchone()
+            counts[slug] = int(row["n"] or 0) if row else 0
+        if windows:
+            return dict(counts)
+        rows = conn.execute("SELECT market_slug, COUNT(*) AS n FROM trades GROUP BY market_slug").fetchall()
         for row in rows:
-            slug = str(row["market_slug"])
-            start_ts, end_ts = windows.get(slug, (None, None))
-            exchange_ts = int(row["exchange_ts"])
-            if start_ts is not None and exchange_ts < start_ts:
-                continue
-            if end_ts is not None and exchange_ts >= end_ts:
-                continue
-            counts[slug] += 1
+            counts[str(row["market_slug"])] = int(row["n"] or 0)
         return dict(counts)
     except sqlite3.Error:
         return {}
@@ -311,8 +340,7 @@ def recent_trades(data_dir: Path, *, limit: int = 100) -> list[dict[str, Any]]:
     return _recent_trades_from_sqlite(data_dir, limit=limit)
 
 
-def _event_summary(data_dir: Path, *, now: dt.datetime) -> dict[str, Any]:
-    events = _tail_raw_events(data_dir / "raw")
+def _event_summary_from_events(events: list[dict[str, Any]], *, now: dt.datetime) -> dict[str, Any]:
     counts = Counter(str(row.get("event") or "unknown") for row in events)
     last_event = max((parse_dt(row.get("observed_at")) for row in events), default=None)
     age = None
@@ -326,6 +354,10 @@ def _event_summary(data_dir: Path, *, now: dt.datetime) -> dict[str, Any]:
         "last_event_age_seconds": age,
         "recent": [_compact_event(row) for row in recent],
     }
+
+
+def _event_summary(data_dir: Path, *, now: dt.datetime) -> dict[str, Any]:
+    return _event_summary_from_events(_tail_raw_events(data_dir / "raw"), now=now)
 
 
 def _compact_event(row: dict[str, Any]) -> dict[str, Any]:
@@ -384,10 +416,58 @@ def _event_label(event: str) -> str:
     return labels.get(event, event)
 
 
+def _current_markets_from_sqlite(data_dir: Path) -> dict[str, dict[str, Any]]:
+    conn = _sqlite_connect(data_dir / "state" / "observer.sqlite")
+    if conn is None:
+        return {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT symbol, market_slug, condition_id, window_start, window_end, updated_at
+            FROM market_windows
+            ORDER BY symbol ASC
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+    current: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        symbol = str(row["symbol"] or "").upper()
+        if not symbol:
+            continue
+        current[symbol] = {
+            "symbol": symbol,
+            "market_slug": row["market_slug"],
+            "condition_id": row["condition_id"],
+            "window_start": row["window_start"],
+            "window_end": row["window_end"],
+            "observed_at": row["updated_at"],
+            "trade_count": 0,
+        }
+    return current
+
+
 def _current_markets(events: list[dict[str, Any]], data_dir: Path) -> dict[str, Any]:
+    current = _current_markets_from_sqlite(data_dir)
+    if current:
+        windows: dict[str, tuple[int | None, int | None]] = {}
+        for row in current.values():
+            start = parse_dt(row.get("window_start"))
+            end = parse_dt(row.get("window_end"))
+            windows[str(row.get("market_slug") or "")] = (
+                int(start.timestamp()) if start else None,
+                int(end.timestamp()) if end else None,
+            )
+        counts = _market_trade_counts(data_dir, windows)
+        for row in current.values():
+            row["trade_count"] = counts.get(str(row.get("market_slug") or ""), 0)
+        return {"current": current}
+
     selected = [row for row in events if row.get("event") == "market_selected"]
     selected.sort(key=_event_sort_key)
-    current: dict[str, dict[str, Any]] = {}
+    current = {}
     for row in selected:
         symbol = str(row.get("symbol") or "").upper()
         if not symbol:
@@ -531,9 +611,9 @@ def build_dashboard_status(data_dir: Path, *, now: dt.datetime | None = None, re
     }
     candidates["seed_watchlist"] = _seed_watchlist(data_dir, scored_by_wallet, now=now)
     sqlite = _sqlite_summary(data_dir)
-    event_summary = _event_summary(data_dir, now=now)
-    raw_summary = _raw_size_summary(data_dir, now=now)
     events = _tail_raw_events(data_dir / "raw")
+    event_summary = _event_summary_from_events(events, now=now)
+    raw_summary = _raw_size_summary(data_dir, now=now)
     health = {
         "ok": True,
         "data_dir": str(data_dir),

@@ -187,6 +187,13 @@ class CryptoWalletObserver:
                 self.windows[symbol] = window
                 self.window_reference_prices[window.slug] = {"open": None, "close": None}
                 changed = True
+                self.store.upsert_market_window(
+                    symbol=symbol,
+                    market_slug=window.slug,
+                    condition_id=window.condition_id,
+                    window_start=window.start_time.isoformat(),
+                    window_end=window.end_time.isoformat(),
+                )
                 self.writer.write({
                     "event": "market_selected",
                     "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),

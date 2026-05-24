@@ -30,6 +30,7 @@ class DashboardConfig:
     password: str = ""
     cookie_secret: str = ""
     session_ttl_seconds: int = 12 * 3600
+    status_cache_ttl_seconds: float = 2.0
     static_dir: Path | None = None
 
 
@@ -83,6 +84,7 @@ def create_server(config: DashboardConfig) -> ThreadingHTTPServer:
         password=config.password,
         cookie_secret=cookie_secret,
         session_ttl_seconds=config.session_ttl_seconds,
+        status_cache_ttl_seconds=config.status_cache_ttl_seconds,
         static_dir=static_dir,
     )
 
@@ -94,6 +96,8 @@ def create_server(config: DashboardConfig) -> ThreadingHTTPServer:
 
 class DashboardHandler(BaseHTTPRequestHandler):
     dashboard_config: DashboardConfig
+    _status_cache_payload: dict[str, Any] | None = None
+    _status_cache_until: float = 0.0
 
     server_version = "PolyMonitorDashboard/0.1"
 
@@ -123,7 +127,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _handle_api_get(self, parsed: urllib.parse.ParseResult) -> None:
         query = urllib.parse.parse_qs(parsed.query)
         if parsed.path == "/api/status":
-            self._json(build_dashboard_status(self.dashboard_config.data_dir))
+            self._json(self._cached_status())
             return
         if parsed.path == "/api/recent-trades":
             limit = _int_param(query.get("limit", ["100"])[0], default=100, minimum=1, maximum=500)
@@ -138,6 +142,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json(detail)
             return
         self._json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+
+    def _cached_status(self) -> dict[str, Any]:
+        now = time.monotonic()
+        cls = type(self)
+        ttl = max(0.0, float(self.dashboard_config.status_cache_ttl_seconds))
+        if cls._status_cache_payload is not None and now < cls._status_cache_until:
+            return cls._status_cache_payload
+        payload = build_dashboard_status(self.dashboard_config.data_dir)
+        cls._status_cache_payload = payload
+        cls._status_cache_until = now + ttl
+        return payload
 
     def _login(self) -> None:
         body = self.rfile.read(_int_param(self.headers.get("Content-Length"), default=0, minimum=0, maximum=16384))
