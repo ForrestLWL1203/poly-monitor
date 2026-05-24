@@ -123,6 +123,47 @@ class ObserverContextTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run_case()), "active_candidate")
 
+    def test_score_metrics_are_cached_within_ttl(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(
+                    ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1, active_metrics_ttl_sec=60),
+                    {},
+                )
+                observer.store.upsert_score(CandidateScore("0xactive", "active_candidate", 1.0, [], {"wallet": "0xactive", "pnl_7d": 10, "pnl_30d": 10, "wins_7d": 1, "losses_7d": 0}))
+                metrics = {
+                    "wallet": "0xactive",
+                    "trades_24h": 100,
+                    "markets_24h": 30,
+                    "trades_7d": 500,
+                    "markets_7d": 90,
+                    "trades_30d": 1500,
+                    "markets_30d": 250,
+                    "pnl_7d": 10,
+                    "pnl_30d": 20,
+                    "wins_7d": 30,
+                    "losses_7d": 10,
+                    "resolved_markets_7d": 40,
+                    "top1_concentration": 0.1,
+                    "top3_concentration": 0.2,
+                    "longshot_profit_share": 0.1,
+                    "last_active_age_hours": 0,
+                    "historical_trades": 1500,
+                    "historical_markets": 250,
+                    "dual_side_rate": 0,
+                    "late_bias_shift": 0,
+                    "winner_add_rate": 0,
+                }
+                with patch("poly_monitor.observer.build_metrics_from_api", return_value=metrics) as fetch:
+                    await observer._refresh_scores_if_due()
+                    await observer._refresh_scores_if_due()
+                    calls = fetch.call_count
+                observer.store.close()
+                observer.writer.close()
+                return calls
+
+        self.assertEqual(asyncio.run(run_case()), 1)
+
     def test_poll_trades_skips_rows_older_than_market_last_seen_ts(self):
         async def run_case():
             now = dt.datetime.now(dt.timezone.utc)

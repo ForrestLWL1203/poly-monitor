@@ -41,6 +41,14 @@ class ObserverConfig:
     max_active_candidates: int = 15
     max_dormant_candidates: int = 10
     max_archive_candidates: int = 0
+    active_metrics_ttl_sec: float = 60.0
+    dormant_metrics_ttl_sec: float = 600.0
+
+
+@dataclass
+class _MetricsCacheEntry:
+    metrics: dict[str, Any]
+    fetched_at: float
 
 
 def should_persist_score(score, *, is_seed: bool = False, previous_status: str | None = None) -> bool:
@@ -140,6 +148,7 @@ class CryptoWalletObserver:
         self._active_score_cursor = 0
         self._discovery_score_cursor = 0
         self._active_snapshot_wallets: set[str] = set()
+        self._metrics_cache: dict[str, _MetricsCacheEntry] = {}
         self._refresh_candidate_caches()
 
     async def run(self) -> int:
@@ -339,8 +348,11 @@ class CryptoWalletObserver:
         if not batch:
             return
         for wallet in batch:
+            previous_status = self.store.candidate_status(wallet)
+            if previous_status == "archive_candidate":
+                continue
             try:
-                metrics = await asyncio.to_thread(build_metrics_from_api, wallet)
+                metrics = await self._metrics_for_wallet(wallet, previous_status)
             except Exception as exc:
                 self.writer.write({
                     "event": "score_error",
@@ -359,7 +371,6 @@ class CryptoWalletObserver:
                 else:
                     metrics.setdefault("markets_24h_source", "api_sample")
                 score = score_wallet(metrics, CandidateThresholds())
-            previous_status = self.store.candidate_status(wallet)
             if should_persist_score(
                 score,
                 is_seed=wallet in self.seeds or wallet in self.store.seed_wallets(),
@@ -377,6 +388,21 @@ class CryptoWalletObserver:
             self.writer.write({"event": "archive_pruned", "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "removed": removed})
         self._refresh_candidate_caches()
 
+    async def _metrics_for_wallet(self, wallet: str, previous_status: str | None) -> dict[str, Any]:
+        ttl = self._metrics_cache_ttl(previous_status)
+        now = time.monotonic()
+        entry = self._metrics_cache.get(wallet)
+        if entry is not None and now - entry.fetched_at < ttl:
+            return dict(entry.metrics)
+        metrics = await asyncio.to_thread(build_metrics_from_api, wallet)
+        self._metrics_cache[wallet] = _MetricsCacheEntry(dict(metrics), now)
+        return metrics
+
+    def _metrics_cache_ttl(self, previous_status: str | None) -> float:
+        if previous_status == "dormant_candidate":
+            return self.config.dormant_metrics_ttl_sec
+        return self.config.active_metrics_ttl_sec
+
     def _score_batch(self) -> list[str]:
         budget = max(1, self.config.score_wallets_per_cycle)
         active_wallets = self.store.candidate_wallets("active_candidate", limit=self.config.max_active_candidates)
@@ -388,14 +414,28 @@ class CryptoWalletObserver:
             self._active_score_cursor = (start + take) % len(active_wallets)
 
         if len(batch) < budget:
+            due_dormant = set(
+                self.store.candidate_wallets_due(
+                    "dormant_candidate",
+                    limit=self.config.max_dormant_candidates,
+                    min_age_seconds=self.config.dormant_metrics_ttl_sec,
+                )
+            )
             discovery_wallets = list(
                 dict.fromkeys(
                     list(self.seeds)
-                    + self.store.candidate_wallets("dormant_candidate", limit=self.config.max_dormant_candidates)
+                    + list(due_dormant)
                     + self.store.recent_wallets(limit=self.config.score_wallet_pool_limit)
                 )
             )
             discovery_wallets = [wallet for wallet in discovery_wallets if wallet not in set(batch)]
+            statuses = self.store.candidate_statuses(discovery_wallets)
+            discovery_wallets = [
+                wallet
+                for wallet in discovery_wallets
+                if statuses.get(wallet) != "archive_candidate"
+                and (statuses.get(wallet) != "dormant_candidate" or wallet in due_dormant or wallet in self.seeds)
+            ]
             if discovery_wallets:
                 start = self._discovery_score_cursor % len(discovery_wallets)
                 take = min(budget - len(batch), len(discovery_wallets))

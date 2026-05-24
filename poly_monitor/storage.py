@@ -4,6 +4,7 @@ import datetime as dt
 import json
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -17,10 +18,13 @@ def json_dumps(row: dict[str, Any]) -> str:
 
 
 class JsonlEventWriter:
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, *, flush_interval_sec: float = 2.0, buffer_size: int = 65536) -> None:
         self.data_dir = data_dir
+        self.flush_interval_sec = flush_interval_sec
+        self.buffer_size = buffer_size
         self._current_date: str | None = None
         self._handle = None
+        self._last_flush = time.monotonic()
 
     def write(self, row: dict[str, Any], *, now: dt.datetime | None = None) -> None:
         stamp = now or utc_now()
@@ -29,14 +33,21 @@ class JsonlEventWriter:
             self.close()
             path = self.data_dir / "raw" / date_key / "events.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._handle = path.open("a", encoding="utf-8")
+            self._handle = path.open("a", encoding="utf-8", buffering=self.buffer_size)
             self._current_date = date_key
         assert self._handle is not None
         self._handle.write(json_dumps(row) + "\n")
-        self._handle.flush()
+        if time.monotonic() - self._last_flush >= self.flush_interval_sec:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._handle is not None:
+            self._handle.flush()
+            self._last_flush = time.monotonic()
 
     def close(self) -> None:
         if self._handle is not None:
+            self.flush()
             self._handle.close()
             self._handle = None
 
@@ -347,6 +358,31 @@ class ObserverStore:
             (status, limit),
         ).fetchall()
         return [str(row["wallet"]).lower() for row in rows]
+
+    def candidate_wallets_due(self, status: str, *, limit: int, min_age_seconds: float, now: dt.datetime | None = None) -> list[str]:
+        cutoff = (now or utc_now()) - dt.timedelta(seconds=max(0.0, min_age_seconds))
+        rows = self.conn.execute(
+            """
+            SELECT wallet
+            FROM candidate_scores
+            WHERE status=? AND updated_at<=?
+            ORDER BY rank_score DESC, updated_at ASC, wallet ASC
+            LIMIT ?
+            """,
+            (status, cutoff.isoformat(), limit),
+        ).fetchall()
+        return [str(row["wallet"]).lower() for row in rows]
+
+    def candidate_statuses(self, wallets: Iterable[str]) -> dict[str, str]:
+        normalized = [wallet.lower() for wallet in wallets]
+        if not normalized:
+            return {}
+        placeholders = ",".join("?" for _ in normalized)
+        rows = self.conn.execute(
+            f"SELECT wallet, status FROM candidate_scores WHERE wallet IN ({placeholders})",
+            normalized,
+        ).fetchall()
+        return {str(row["wallet"]).lower(): str(row["status"]) for row in rows}
 
     def prune_candidate_scores(self, status: str, *, max_rows: int, keep_wallets: set[str] | None = None) -> int:
         keep = {wallet.lower() for wallet in (keep_wallets or set())}
