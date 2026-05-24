@@ -47,9 +47,11 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["markets_30d"], 1)
         self.assertEqual(metrics["historical_markets"], 1)
         self.assertEqual(metrics["wins_7d"], 2)
-        self.assertEqual(metrics["pnl_7d"], 12.5)
-        self.assertEqual(metrics["pnl_30d"], 34.5)
-        self.assertEqual(metrics["pnl_source"], "lb-api")
+        self.assertEqual(metrics["pnl_7d"], 3)
+        self.assertEqual(metrics["pnl_30d"], 3)
+        self.assertEqual(metrics["pnl_source"], "crypto_closed_positions")
+        self.assertEqual(metrics["profile_pnl_7d"], 12.5)
+        self.assertEqual(metrics["profile_pnl_30d"], 34.5)
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 3)
 
     def test_activity_metrics_mark_24h_windows_as_lower_bound_when_page_cap_hit(self):

@@ -14,6 +14,7 @@ class CandidateThresholds:
     max_top3_concentration: float = 0.50
     max_longshot_profit_share: float = 0.35
     min_repeat_longshot_profit_markets: int = 3
+    min_resolved_markets_for_win_loss_check: int = 20
     active_max_age_hours: float = 48.0
     archive_age_hours: float = 14 * 24.0
     dormant_min_historical_trades: int = 500
@@ -41,13 +42,19 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
     longshot_high = _num(metrics, "longshot_profit_share") > thresholds.max_longshot_profit_share
     repeat_longshot = _num(metrics, "longshot_profit_markets") >= thresholds.min_repeat_longshot_profit_markets
     markets_24h = _num(metrics, "markets_24h", _num(metrics, "markets_7d"))
+    if metrics.get("markets_24h_lower_bound") and markets_24h > 0:
+        markets_24h = max(markets_24h, float(thresholds.min_markets_24h))
+    wins = _num(metrics, "wins_7d")
+    losses = _num(metrics, "losses_7d")
+    resolved_markets = wins + losses
+    win_loss_failed = resolved_markets >= thresholds.min_resolved_markets_for_win_loss_check and wins < losses
     checks = [
         ("trades_7d_below_threshold", _num(metrics, "trades_7d") < thresholds.min_trades_7d),
         ("markets_24h_below_threshold", markets_24h < thresholds.min_markets_24h),
         ("trades_30d_below_threshold", _num(metrics, "trades_30d") < thresholds.min_trades_30d),
         ("pnl_7d_not_positive", _num(metrics, "pnl_7d") <= 0),
         ("pnl_30d_not_positive", _num(metrics, "pnl_30d") <= 0),
-        ("wins_7d_not_above_losses", _num(metrics, "wins_7d") <= _num(metrics, "losses_7d")),
+        ("wins_7d_below_losses", win_loss_failed),
         ("top1_concentration_high", _num(metrics, "top1_concentration") > thresholds.max_top1_concentration),
         ("top3_concentration_high", _num(metrics, "top3_concentration") > thresholds.max_top3_concentration),
         ("longshot_profit_share_high_without_repetition", longshot_high and not repeat_longshot),
@@ -88,6 +95,8 @@ def _active_rank_score(metrics: dict[str, Any]) -> float:
     trades_7d = _num(metrics, "trades_7d")
     trades_30d = _num(metrics, "trades_30d")
     markets_24h = _num(metrics, "markets_24h", _num(metrics, "markets_7d"))
+    if metrics.get("markets_24h_lower_bound") and markets_24h > 0:
+        markets_24h = max(markets_24h, min(120.0, _num(metrics, "trades_24h") / 10.0))
     last_active_age = _num(metrics, "last_active_age_hours", 999999)
 
     quality = win_rate * 360.0

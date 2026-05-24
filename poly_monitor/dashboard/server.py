@@ -18,6 +18,7 @@ from .status import build_dashboard_status, recent_trades, wallet_detail
 
 
 COOKIE_NAME = "poly_monitor_session"
+FAILED_LOGINS: dict[str, list[float]] = {}
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,9 @@ def verify_session_token(token: str, secret: str, *, max_age_seconds: int, now: 
 def create_server(config: DashboardConfig) -> ThreadingHTTPServer:
     if not config.password:
         raise ValueError("POLY_MONITOR_DASH_PASSWORD is required")
-    cookie_secret = config.cookie_secret or os.environ.get("POLY_MONITOR_DASH_COOKIE_SECRET") or config.password
+    cookie_secret = config.cookie_secret or os.environ.get("POLY_MONITOR_DASH_COOKIE_SECRET") or ""
+    if not cookie_secret:
+        raise ValueError("POLY_MONITOR_DASH_COOKIE_SECRET is required")
     static_dir = config.static_dir or Path(__file__).with_name("static")
     resolved = DashboardConfig(
         data_dir=config.data_dir,
@@ -149,9 +152,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         username = str(form.get("username") or "")
         password = str(form.get("password") or "")
         config = self.dashboard_config
+        client = self.client_address[0] if self.client_address else "unknown"
+        failures = [stamp for stamp in FAILED_LOGINS.get(client, []) if time.time() - stamp < 60.0]
+        if len(failures) >= 5:
+            time.sleep(min(2.0, 0.25 * len(failures)))
         if not (hmac.compare_digest(username, config.username) and hmac.compare_digest(password, config.password)):
+            failures.append(time.time())
+            FAILED_LOGINS[client] = failures[-10:]
             self._json({"error": "invalid_login"}, status=HTTPStatus.UNAUTHORIZED)
             return
+        FAILED_LOGINS.pop(client, None)
         token = make_session_token(username, config.cookie_secret)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json; charset=utf-8")

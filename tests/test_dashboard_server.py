@@ -12,6 +12,13 @@ from pathlib import Path
 
 
 class DashboardServerTests(unittest.TestCase):
+    def test_server_requires_explicit_cookie_secret(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                create_server(DashboardConfig(data_dir=Path(tmp), password="secret"))
+
     def test_login_cookie_and_api_auth_flow(self):
         from poly_monitor.dashboard.server import DashboardConfig, create_server
 

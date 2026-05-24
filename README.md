@@ -37,6 +37,7 @@ Run the read-only dashboard separately from the observer process:
 
 ```bash
 export POLY_MONITOR_DASH_PASSWORD='change-me'
+export POLY_MONITOR_DASH_COOKIE_SECRET='change-me-too'
 python3 scripts/run_dashboard.py \
   --data-dir data \
   --host 127.0.0.1 \
@@ -51,8 +52,7 @@ downloads, or submit orders.
 Optional environment variables:
 
 - `POLY_MONITOR_DASH_USER`: login username, default `admin`.
-- `POLY_MONITOR_DASH_COOKIE_SECRET`: cookie signing secret; defaults to the
-  dashboard password when unset.
+- `POLY_MONITOR_DASH_COOKIE_SECRET`: required cookie signing secret.
 
 ## Optional Seeds
 
@@ -81,6 +81,10 @@ inactive wallets are not retained by default. The dashboard focuses on a small
 elite pool: 15 active candidates and 10 dormant candidates by default. Non-core
 wallet trade rows are cleaned periodically and capped to the most recent 100
 wallets.
+
+Scoring PnL uses only BTC/ETH 5m closed-position estimates. Whole-profile
+Polymarket leaderboard PnL is fetched only as display/diagnostic context and is
+not used to decide whether a wallet has crypto 5m edge.
 
 ## Sweden VPS Notes
 

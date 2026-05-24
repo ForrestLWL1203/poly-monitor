@@ -56,5 +56,6 @@ def token_book_summary(
         "ask_levels": len(asks),
         "ask_depth_usdc": compact_float(sum(price * size for price, size in asks), 4),
         "bid_depth_usdc": compact_float(sum(price * size for price, size in bids), 4),
-        "targets": {f"{target:g}": fill_for_notional(asks, float(target)) for target in targets},
+        "ask_targets": {f"{target:g}": fill_for_notional(asks, float(target)) for target in targets},
+        "bid_targets": {f"{target:g}": fill_for_notional([(1 - price, size) for price, size in bids], float(target)) for target in targets},
     }

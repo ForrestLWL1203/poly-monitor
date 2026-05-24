@@ -319,8 +319,8 @@
                   <th title="近 7 天 BTC/ETH 5m 成交笔数">7天交易</th>
                   <th title="近 30 天 BTC/ETH 5m 成交笔数">30天交易</th>
                   <th title="近 24 小时 activity 样本中参与过的 BTC/ETH 5m 窗口数，用来判断近期是否活跃">24h窗口</th>
-                  <th title="Polymarket 网页 leaderboard 同口径近 7 天盈亏；如果接口失败才回退到内部估算">网页7天盈亏</th>
-                  <th title="Polymarket 网页 leaderboard 同口径近 30 天盈亏；如果接口失败才回退到内部估算">网页30天盈亏</th>
+                  <th title="仅统计 BTC/ETH 5m 已结算市场的近 7 天盈亏估算">5m 7天盈亏</th>
+                  <th title="仅统计 BTC/ETH 5m 已结算市场的近 30 天盈亏估算">5m 30天盈亏</th>
                   <th title="近 7 天盈利市场数 / 亏损市场数">7天胜/负</th>
                   <th title="最大单一盈利市场占总正收益比例，越低越不依赖单点暴富">最大单场占比</th>
                   <th title="前三大盈利市场占总正收益比例，越低越分散">前三占比</th>
@@ -608,9 +608,9 @@
         ["分类", zhStatus(detail.status)],
         ["评分状态", zhScoreState(detail.score_state)],
         ["综合分", fmtInt(detail.rank_score)],
-        ["网页7天盈亏", money(m.pnl_7d)],
-        ["网页30天盈亏", money(m.pnl_30d)],
-        ["盈亏来源", m.pnl_source === "lb-api" ? "Polymarket网页口径" : "内部估算"],
+        ["5m 7天盈亏", money(m.pnl_7d)],
+        ["5m 30天盈亏", money(m.pnl_30d)],
+        ["盈亏来源", m.pnl_source === "crypto_closed_positions" ? "Crypto 5m 已结算" : "内部估算"],
         ["7天交易", fmt(m.trades_7d, 0)],
         ["30天交易", fmt(m.trades_30d, 0)],
         ["24h窗口", `${fmt(m.markets_24h ?? m.markets_7d, 0)}${m.markets_24h_lower_bound ? "+" : ""}`],

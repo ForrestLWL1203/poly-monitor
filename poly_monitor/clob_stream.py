@@ -39,10 +39,7 @@ class ClobBookStream:
         self._tokens = list(token_ids)
         self._books.clear()
         if self._ws is not None:
-            try:
-                await self._ws.send(json.dumps({"assets_ids": self._tokens, "operation": "subscribe", "type": "market", "custom_feature_enabled": True}))
-            except Exception:
-                await self._reconnect()
+            await self._reconnect()
 
     async def close(self) -> None:
         self._running = False

@@ -26,17 +26,18 @@ class ObserverConfig:
     max_candidates: int = 15
     min_trade_usdc: float = 1.0
     data_dir: Path = Path("data")
-    raw_retention_days: int = 7
+    raw_retention_days: int = 3
     score_refresh_sec: float = 60.0
     score_wallets_per_cycle: int = 2
     score_wallet_pool_limit: int = 50
     cleanup_interval_hours: float = 6.0
-    inactive_wallet_ttl_hours: float = 12.0
+    inactive_wallet_ttl_hours: float = 48.0
     max_non_candidate_wallets: int = 100
     report_refresh_sec: float = 60.0
     book_max_age_sec: float = 3.0
     open_price_min_age_sec: float = 5.0
-    settlement_delay_sec: float = 90.0
+    settlement_delay_sec: float = 150.0
+    settlement_retry_sec: float = 30.0
     max_active_candidates: int = 15
     max_dormant_candidates: int = 10
     max_archive_candidates: int = 0
@@ -138,6 +139,8 @@ class CryptoWalletObserver:
         self._last_data_cleanup = 0.0
         self._active_score_cursor = 0
         self._discovery_score_cursor = 0
+        self._active_snapshot_wallets: set[str] = set()
+        self._refresh_candidate_caches()
 
     async def run(self) -> int:
         started = time.monotonic()
@@ -154,7 +157,6 @@ class CryptoWalletObserver:
                 await self._refresh_scores_if_due()
                 self._write_report_if_due()
                 self._cleanup_stale_data_if_due()
-                cleanup_raw_retention(self.config.data_dir / "raw", retention_days=self.config.raw_retention_days)
                 if self.config.seconds is not None and time.monotonic() - started >= self.config.seconds:
                     break
                 await asyncio.sleep(self.config.poll_sec)
@@ -208,8 +210,17 @@ class CryptoWalletObserver:
                 continue
             data = await asyncio.to_thread(fetch_crypto_price_api, window)
             if data is None or data.get("openPrice") is None:
-                continue
-            refs["open"] = float(data["openPrice"])
+                feed = self.feeds.get(window.symbol)
+                fallback = feed.latest_price if feed else None
+                if fallback is None:
+                    continue
+                refs["open"] = float(fallback)
+                source = "chainlink_live_fallback"
+                cached = None
+            else:
+                refs["open"] = float(data["openPrice"])
+                source = "polymarket_crypto_price_api"
+                cached = bool(data.get("cached"))
             self.writer.write({
                 "event": "market_open_price",
                 "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -219,8 +230,8 @@ class CryptoWalletObserver:
                 "window_start": window.start_time.isoformat(),
                 "window_end": window.end_time.isoformat(),
                 "reference_open_price": compact_float(refs["open"], 6),
-                "source": "polymarket_crypto_price_api",
-                "cached": bool(data.get("cached")),
+                "source": source,
+                "cached": cached,
             })
 
     async def _write_pending_settlements(self) -> None:
@@ -231,6 +242,13 @@ class CryptoWalletObserver:
             refs = self.window_reference_prices.setdefault(slug, {"open": None, "close": None})
             open_price = data.get("openPrice") if data is not None else refs.get("open")
             close_price = data.get("closePrice") if data is not None else None
+            source = "polymarket_crypto_price_api"
+            if close_price is None:
+                feed = self.feeds.get(window.symbol)
+                fallback = feed.latest_price if feed else None
+                if fallback is not None:
+                    close_price = fallback
+                    source = "chainlink_live_fallback"
             if open_price is not None:
                 refs["open"] = float(open_price)
             if close_price is not None:
@@ -238,6 +256,7 @@ class CryptoWalletObserver:
             winning_side = None
             if refs.get("open") is not None and refs.get("close") is not None:
                 winning_side = "Up" if float(refs["close"]) >= float(refs["open"]) else "Down"
+            completed = bool(data.get("completed")) if data is not None else False
             self.writer.write({
                 "event": "window_settlement",
                 "observed_at": now.isoformat(),
@@ -249,11 +268,14 @@ class CryptoWalletObserver:
                 "settlement_open_price": compact_float(refs.get("open"), 6),
                 "settlement_close_price": compact_float(refs.get("close"), 6),
                 "winning_side": winning_side,
-                "settlement_completed": bool(data.get("completed")) if data is not None else None,
+                "settlement_completed": completed,
                 "settlement_cached": bool(data.get("cached")) if data is not None else None,
-                "settlement_source": "polymarket_crypto_price_api",
+                "settlement_source": source,
             })
-            self.pending_settlements.pop(slug, None)
+            if completed:
+                self.pending_settlements.pop(slug, None)
+            else:
+                self.pending_settlements[slug] = (window, now + dt.timedelta(seconds=self.config.settlement_retry_sec))
 
     def _all_tokens(self) -> list[str]:
         tokens: list[str] = []
@@ -269,12 +291,13 @@ class CryptoWalletObserver:
                 self.writer.write({"event": "api_error", "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "source": "market_trades", "symbol": symbol, "error": str(exc)})
                 continue
             observed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+            normalized: list[dict[str, Any]] = []
             for raw in raw_trades:
                 trade = normalize_trade(raw, symbol=symbol, observed_at=observed_at)
                 if trade["usdc"] < self.config.min_trade_usdc:
                     continue
-                if not self.store.insert_trade(trade):
-                    continue
+                normalized.append(trade)
+            for trade in self.store.insert_trades(normalized):
                 should_snapshot = self._should_snapshot(trade)
                 if self._should_write_raw_trade(trade):
                     self.writer.write(trade)
@@ -291,11 +314,9 @@ class CryptoWalletObserver:
 
     def _should_snapshot(self, trade: dict[str, Any]) -> bool:
         wallet = trade["wallet"]
-        if wallet in self.seeds or wallet in self.store.seed_wallets():
+        if wallet in self.seeds:
             return True
-        candidates = self.store.candidate_rows(limit=self.config.max_candidates)
-        active = {row["wallet"] for row in candidates.get("active_candidate", [])}
-        return wallet in active
+        return wallet in self._active_snapshot_wallets
 
     def _should_write_raw_trade(self, trade: dict[str, Any]) -> bool:
         return self._should_snapshot(trade)
@@ -311,9 +332,13 @@ class CryptoWalletObserver:
             try:
                 metrics = await asyncio.to_thread(build_metrics_from_api, wallet)
             except Exception as exc:
-                local_metrics = self.store.wallet_trade_metrics(wallet)
-                local_metrics["score_error"] = str(exc)
-                score = score_wallet(local_metrics, CandidateThresholds())
+                self.writer.write({
+                    "event": "score_error",
+                    "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "wallet": wallet,
+                    "error": str(exc),
+                })
+                continue
             else:
                 local_metrics = self.store.wallet_trade_metrics(wallet)
                 if float(local_metrics.get("markets_24h") or 0) > float(metrics.get("markets_24h") or 0):
@@ -340,6 +365,7 @@ class CryptoWalletObserver:
         removed += self.store.prune_archive_scores(max_archive=self.config.max_archive_candidates, keep_wallets=keep)
         if removed:
             self.writer.write({"event": "archive_pruned", "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "removed": removed})
+        self._refresh_candidate_caches()
 
     def _score_batch(self) -> list[str]:
         budget = max(1, self.config.score_wallets_per_cycle)
@@ -391,6 +417,7 @@ class CryptoWalletObserver:
                 "inactive_cutoff_ts": cutoff_ts,
                 **result,
             })
+        cleanup_raw_retention(self.config.data_dir / "raw", retention_days=self.config.raw_retention_days)
 
     def _write_report_if_due(self) -> None:
         if time.monotonic() - self._last_report_refresh >= self.config.report_refresh_sec:
@@ -405,6 +432,7 @@ class CryptoWalletObserver:
         self.store.prune_candidate_scores("active_candidate", max_rows=self.config.max_active_candidates, keep_wallets=keep)
         self.store.prune_candidate_scores("dormant_candidate", max_rows=self.config.max_dormant_candidates, keep_wallets=keep)
         self.store.prune_archive_scores(max_archive=self.config.max_archive_candidates, keep_wallets=keep)
+        self._refresh_candidate_caches()
         write_latest_candidates(
             self.config.data_dir / "reports" / "latest_candidates.json",
             {
@@ -413,4 +441,9 @@ class CryptoWalletObserver:
                 "symbols": list(self.config.symbols),
                 "candidates": self.store.candidate_rows(limit=self.config.max_candidates),
             },
+        )
+
+    def _refresh_candidate_caches(self) -> None:
+        self._active_snapshot_wallets = set(
+            self.store.candidate_wallets("active_candidate", limit=self.config.max_active_candidates)
         )

@@ -30,8 +30,9 @@ class BookTests(unittest.TestCase):
         self.assertEqual(row["bid"], 0.49)
         self.assertEqual(row["ask"], 0.51)
         self.assertEqual(row["book_age_ms"], 150)
-        self.assertTrue(row["targets"]["5"]["ok"])
-        self.assertEqual(row["targets"]["25"]["limit"], 0.52)
+        self.assertTrue(row["ask_targets"]["5"]["ok"])
+        self.assertEqual(row["ask_targets"]["25"]["limit"], 0.52)
+        self.assertIn("bid_targets", row)
         self.assertNotIn("bids", row)
         self.assertNotIn("asks", row)
 

@@ -36,12 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--score-wallets-per-cycle", type=int, default=2)
     parser.add_argument("--score-wallet-pool-limit", type=int, default=50)
     parser.add_argument("--cleanup-interval-hours", type=float, default=6.0)
-    parser.add_argument("--inactive-wallet-ttl-hours", type=float, default=12.0)
+    parser.add_argument("--inactive-wallet-ttl-hours", type=float, default=48.0)
     parser.add_argument("--max-non-candidate-wallets", type=int, default=100)
     parser.add_argument("--report-refresh-sec", type=float, default=60.0)
     parser.add_argument("--book-max-age-sec", type=float, default=3.0)
     parser.add_argument("--open-price-min-age-sec", type=float, default=5.0)
-    parser.add_argument("--settlement-delay-sec", type=float, default=90.0)
+    parser.add_argument("--settlement-delay-sec", type=float, default=150.0)
+    parser.add_argument("--settlement-retry-sec", type=float, default=30.0)
     parser.add_argument("--max-active-candidates", type=int, default=15)
     parser.add_argument("--max-dormant-candidates", type=int, default=10)
     parser.add_argument("--max-archive-candidates", type=int, default=0)
@@ -69,6 +70,7 @@ async def async_main() -> int:
         book_max_age_sec=args.book_max_age_sec,
         open_price_min_age_sec=args.open_price_min_age_sec,
         settlement_delay_sec=args.settlement_delay_sec,
+        settlement_retry_sec=args.settlement_retry_sec,
         max_active_candidates=args.max_active_candidates,
         max_dormant_candidates=args.max_dormant_candidates,
         max_archive_candidates=args.max_archive_candidates,

@@ -47,6 +47,7 @@ def normalize_trade(raw: dict[str, Any], *, symbol: str, observed_at: str) -> di
         "size": size,
         "usdc": round(price * size, 6),
         "tx_hash": str(raw.get("transactionHash") or ""),
+        "fill_id": str(raw.get("id") or raw.get("fillId") or raw.get("logIndex") or raw.get("transactionIndex") or ""),
     }
 
 
@@ -54,7 +55,8 @@ def fetch_market_trades(condition_id: str, *, limit: int = 100, offset: int = 0,
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
     page_size = min(limit, 100)
-    for page in range(max(1, pages)):
+    page_count = max(max(1, pages), (max(1, limit) + page_size - 1) // page_size)
+    for page in range(page_count):
         data = _get_json("/trades", {"market": condition_id, "limit": page_size, "offset": offset + page * page_size})
         if not isinstance(data, list):
             break

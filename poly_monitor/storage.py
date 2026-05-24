@@ -72,6 +72,7 @@ class ObserverStore:
             """
             CREATE TABLE IF NOT EXISTS trades (
                 tx_hash TEXT NOT NULL,
+                fill_id TEXT NOT NULL DEFAULT '',
                 wallet TEXT NOT NULL,
                 market_slug TEXT NOT NULL,
                 condition_id TEXT NOT NULL,
@@ -83,7 +84,7 @@ class ObserverStore:
                 usdc REAL NOT NULL,
                 name TEXT,
                 pseudonym TEXT,
-                PRIMARY KEY (tx_hash, wallet, market_slug, outcome, price, size)
+                PRIMARY KEY (tx_hash, fill_id, wallet, market_slug, outcome, price, size)
             );
             CREATE TABLE IF NOT EXISTS candidate_scores (
                 wallet TEXT PRIMARY KEY,
@@ -99,6 +100,42 @@ class ObserverStore:
             );
             """
         )
+        table_info = self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        columns = {str(row["name"]) for row in table_info}
+        if "fill_id" not in columns:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN fill_id TEXT NOT NULL DEFAULT ''")
+            table_info = self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        fill_id_pk = next((int(row["pk"]) for row in table_info if str(row["name"]) == "fill_id"), 0)
+        if fill_id_pk == 0:
+            self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS trades_new (
+                    tx_hash TEXT NOT NULL,
+                    fill_id TEXT NOT NULL DEFAULT '',
+                    wallet TEXT NOT NULL,
+                    market_slug TEXT NOT NULL,
+                    condition_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    exchange_ts INTEGER NOT NULL,
+                    outcome TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    size REAL NOT NULL,
+                    usdc REAL NOT NULL,
+                    name TEXT,
+                    pseudonym TEXT,
+                    PRIMARY KEY (tx_hash, fill_id, wallet, market_slug, outcome, price, size)
+                );
+                INSERT OR IGNORE INTO trades_new(
+                    tx_hash,fill_id,wallet,market_slug,condition_id,symbol,exchange_ts,outcome,price,size,usdc,name,pseudonym
+                )
+                SELECT tx_hash,fill_id,wallet,market_slug,condition_id,symbol,exchange_ts,outcome,price,size,usdc,name,pseudonym
+                FROM trades;
+                DROP TABLE trades;
+                ALTER TABLE trades_new RENAME TO trades;
+                """
+            )
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.commit()
 
     def add_seed(self, wallet: str, label: str) -> None:
@@ -114,15 +151,20 @@ class ObserverStore:
         return str(row["status"]) if row else None
 
     def insert_trade(self, row: dict[str, Any]) -> bool:
-        before = self.conn.total_changes
-        self.conn.execute(
+        return bool(self.insert_trades([row]))
+
+    def insert_trades(self, rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        inserted: list[dict[str, Any]] = []
+        for row in rows:
+            cursor = self.conn.execute(
             """
             INSERT OR IGNORE INTO trades(
-                tx_hash,wallet,market_slug,condition_id,symbol,exchange_ts,outcome,price,size,usdc,name,pseudonym
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                tx_hash,fill_id,wallet,market_slug,condition_id,symbol,exchange_ts,outcome,price,size,usdc,name,pseudonym
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 row["tx_hash"],
+                row.get("fill_id", ""),
                 row["wallet"],
                 row["market_slug"],
                 row["condition_id"],
@@ -135,9 +177,11 @@ class ObserverStore:
                 row.get("name", ""),
                 row.get("pseudonym", ""),
             ),
-        )
+            )
+            if cursor.rowcount:
+                inserted.append(row)
         self.conn.commit()
-        return self.conn.total_changes > before
+        return inserted
 
     def recent_wallets(self, *, limit: int = 200) -> list[str]:
         rows = self.conn.execute(

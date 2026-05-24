@@ -49,6 +49,7 @@ class DataApiTests(unittest.TestCase):
             "profileImage": "drop-me",
             "profileImageOptimized": "drop-me",
             "transactionHash": "0xtx",
+            "logIndex": 7,
         }
 
         row = normalize_trade(raw, symbol="BTC", observed_at="2026-05-24T05:00:01+00:00")
@@ -67,6 +68,7 @@ class DataApiTests(unittest.TestCase):
             "size": 12.5,
             "usdc": 5.25,
             "tx_hash": "0xtx",
+            "fill_id": "7",
         })
 
 

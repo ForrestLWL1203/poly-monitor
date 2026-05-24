@@ -140,6 +140,52 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual(score_wallet(metrics, CandidateThresholds()).status, "archive_candidate")
 
+    def test_score_wallet_allows_equal_win_loss_after_min_sample(self):
+        metrics = {
+            "wallet": "0xabc",
+            "trades_7d": 500,
+            "markets_24h": 5,
+            "trades_30d": 800,
+            "pnl_7d": 10.0,
+            "pnl_30d": 100.0,
+            "wins_7d": 20,
+            "losses_7d": 20,
+            "top1_concentration": 0.1,
+            "top3_concentration": 0.2,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 1,
+            "historical_trades": 800,
+            "historical_markets": 5,
+            "historical_pnl": 100.0,
+        }
+
+        self.assertEqual(score_wallet(metrics, CandidateThresholds()).status, "active_candidate")
+
+    def test_score_wallet_treats_markets_24h_lower_bound_as_enough_activity(self):
+        metrics = {
+            "wallet": "0xabc",
+            "trades_24h": 1000,
+            "trades_7d": 1000,
+            "markets_24h": 1,
+            "markets_24h_lower_bound": True,
+            "trades_30d": 1000,
+            "pnl_7d": 10.0,
+            "pnl_30d": 100.0,
+            "wins_7d": 2,
+            "losses_7d": 0,
+            "top1_concentration": 0.1,
+            "top3_concentration": 0.2,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 1,
+            "historical_trades": 1000,
+            "historical_markets": 1,
+            "historical_pnl": 100.0,
+        }
+
+        self.assertEqual(score_wallet(metrics, CandidateThresholds()).status, "active_candidate")
+
 
 if __name__ == "__main__":
     unittest.main()
