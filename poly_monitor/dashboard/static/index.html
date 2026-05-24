@@ -333,8 +333,8 @@
                   <th title="近 7 天 BTC/ETH 5m 成交笔数">7天交易</th>
                   <th title="近 30 天 BTC/ETH 5m 成交笔数">30天交易</th>
                   <th title="近 24 小时 activity 样本中参与过的 BTC/ETH 5m 窗口数，用来判断近期是否活跃">24h窗口</th>
-                  <th title="仅统计 BTC/ETH 5m 已结算市场的近 7 天盈亏估算">5m 7天盈亏</th>
-                  <th title="仅统计 BTC/ETH 5m 已结算市场的近 30 天盈亏估算">5m 30天盈亏</th>
+                  <th title="仅统计 observer 启动后本地记录且已结算的 BTC/ETH 5m Ledger 盈亏">观察期7天PnL</th>
+                  <th title="仅统计 observer 启动后本地记录且已结算的 BTC/ETH 5m Ledger 盈亏">观察期30天PnL</th>
                   <th title="近 7 天盈利市场数 / 亏损市场数">7天胜/负</th>
                   <th title="最大单一盈利市场占总正收益比例，越低越不依赖单点暴富">最大单场占比</th>
                   <th title="前三大盈利市场占总正收益比例，越低越分散">前三占比</th>
@@ -441,8 +441,9 @@
         markets_7d_below_threshold: "近 7 天参与市场数低于旧版活跃门槛",
         trades_30d_below_threshold: "近 30 天交易数低于当前活跃门槛",
         markets_30d_below_threshold: "近 30 天参与市场数低于旧版活跃门槛",
-        pnl_7d_not_positive: "近 7 天盈亏未转正",
-        pnl_30d_not_positive: "近 30 天盈亏未转正",
+        settled_markets_7d_below_threshold: "本地观察期已结算窗口数不足，等待更多结算",
+        pnl_7d_not_positive: "观察期近 7 天 Ledger 盈亏未转正",
+        pnl_30d_not_positive: "观察期近 30 天 Ledger 盈亏未转正",
         wins_7d_not_above_losses: "近 7 天盈利市场数没有超过亏损市场数",
         top1_concentration_high: "最大单场利润占比偏高",
         top3_concentration_high: "前三盈利市场利润占比偏高",
@@ -639,13 +640,17 @@
       const detail = await api(`/api/wallet?address=${encodeURIComponent(wallet)}`);
       $("detailTitle").textContent = detail.metrics?.name || detail.wallet_short || "";
       const m = detail.metrics || {};
+      const ledger = detail.ledger_summary || {};
       const kv = [
         ["分类", zhStatus(detail.status)],
         ["评分状态", zhScoreState(detail.score_state)],
         ["综合分", fmtInt(detail.rank_score)],
-        ["5m 7天盈亏", money(m.pnl_7d)],
-        ["5m 30天盈亏", money(m.pnl_30d)],
-        ["盈亏来源", m.pnl_source === "profile_profit" ? "Polymarket 账户盈亏" : (m.pnl_source === "crypto_closed_positions" ? "Crypto 5m 已结算估算" : "内部估算")],
+        ["观察期7天PnL", money(m.pnl_7d)],
+        ["观察期30天PnL", money(m.pnl_30d)],
+        ["已结算窗口", `${fmt(m.settled_markets_7d, 0)} / ${fmt(m.settled_markets_30d, 0)}`],
+        ["盈亏来源", m.pnl_source === "local_observed_ledger" ? "本地观察 Ledger" : "内部估算"],
+        ["明细PnL", money(ledger.realized_pnl)],
+        ["明细胜/负", `${fmt(ledger.wins, 0)} / ${fmt(ledger.losses, 0)}`],
         ["7天交易", fmt(m.trades_7d, 0)],
         ["30天交易", fmt(m.trades_30d, 0)],
         ["24h窗口", `${fmt(m.markets_24h ?? m.markets_7d, 0)}${m.markets_24h_lower_bound ? "+" : ""}`],
@@ -657,11 +662,23 @@
       const trades = (detail.recent_trades || []).slice(0, 8).map((t) =>
         `<div class="event"><div>${shortTime(t.exchange_at || t.observed_at)}</div><div>${t.symbol || ""}</div><div class="addr" title="${t.market_slug || ""}">${t.outcome || ""} @ ${fmt(t.price, 3)}</div><div class="optional">${fmt(t.size)}</div><div class="optional">${fmt(t.usdc)}</div></div>`
       ).join("");
+      const settled = (detail.settled_markets || []).slice(0, 12).map((row) =>
+        `<div class="event">
+          <div>${shortTime(row.settled_at)}</div>
+          <div>${row.symbol || ""}</div>
+          <div class="addr" title="${row.market_slug || ""}">${row.incomplete ? "不完整" : money(row.realized_pnl)} / ${row.winning_side || ""}</div>
+          <div class="optional">${fmt(row.trades, 0)} 笔</div>
+          <div class="optional">买${money(row.buy_usdc)} 卖${money(row.sell_usdc)}</div>
+        </div>`
+      ).join("");
       $("walletDetail").innerHTML = `
         <div title="${detail.metrics?.name || "unnamed"}"><strong class="user-name">${shortName(detail.metrics?.name || "unnamed")}</strong></div>
         <div class="addr" title="${detail.wallet}">${detail.wallet}</div>
         <div class="kv">${kv.map(([k, v]) => `<div><div class="subtle">${k}</div><strong>${v}</strong></div>`).join("")}</div>
         <div class="subtle">${reasonText(detail)}</div>
+        <div class="subtle">已结算窗口 Ledger</div>
+        <div class="events">${settled || '<div class="empty">暂无已结算窗口</div>'}</div>
+        <div class="subtle">最近成交</div>
         <div class="events">${trades || '<div class="empty">暂无最近成交</div>'}</div>`;
     }
 

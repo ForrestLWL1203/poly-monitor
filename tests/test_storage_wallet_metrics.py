@@ -5,7 +5,17 @@ from pathlib import Path
 from poly_monitor.storage import ObserverStore
 
 
-def trade_row(wallet: str, market_slug: str, exchange_ts: int, *, tx_hash: str) -> dict:
+def trade_row(
+    wallet: str,
+    market_slug: str,
+    exchange_ts: int,
+    *,
+    tx_hash: str,
+    outcome: str = "Up",
+    side: str = "BUY",
+    price: float = 0.5,
+    size: float = 10,
+) -> dict:
     return {
         "tx_hash": tx_hash,
         "fill_id": "",
@@ -14,10 +24,11 @@ def trade_row(wallet: str, market_slug: str, exchange_ts: int, *, tx_hash: str) 
         "condition_id": f"cond-{market_slug}",
         "symbol": "BTC",
         "exchange_ts": exchange_ts,
-        "outcome": "Up",
-        "price": 0.5,
-        "size": 10,
-        "usdc": 5,
+        "outcome": outcome,
+        "side": side,
+        "price": price,
+        "size": size,
+        "usdc": round(price * size, 6),
     }
 
 
@@ -69,6 +80,135 @@ class StorageWalletMetricsTests(unittest.TestCase):
                 self.assertEqual(store.wallet_24h_counts("0xABC", now_ts=now_ts), {"trades_24h": 2, "markets_24h": 2})
             finally:
                 store.close()
+
+    def test_market_settlement_recomputes_wallet_market_pnl_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                market = "btc-updown-5m-2000000"
+                condition = f"cond-{market}"
+                store.insert_trades(
+                    [
+                        trade_row("0xabc", market, 100, tx_hash="tx-1", outcome="Up", side="BUY", price=0.40, size=10),
+                        trade_row("0xabc", market, 110, tx_hash="tx-2", outcome="Up", side="SELL", price=0.70, size=4),
+                        trade_row("0xabc", market, 120, tx_hash="tx-3", outcome="Down", side="BUY", price=0.30, size=5),
+                        trade_row("0xdef", market, 130, tx_hash="tx-4", outcome="Down", side="SELL", price=0.20, size=3),
+                    ]
+                )
+
+                changed = store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": condition,
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settlement_open_price": 100.0,
+                        "settlement_close_price": 101.0,
+                        "settled_at": "2026-05-24T12:00:00+00:00",
+                        "completed": True,
+                    }
+                )
+                rows = store.wallet_market_pnl_rows()
+            finally:
+                store.close()
+
+        self.assertTrue(changed)
+        by_wallet = {row["wallet"]: row for row in rows}
+        self.assertAlmostEqual(by_wallet["0xabc"]["realized_pnl"], 3.3)
+        self.assertAlmostEqual(by_wallet["0xabc"]["buy_usdc"], 5.5)
+        self.assertAlmostEqual(by_wallet["0xabc"]["sell_usdc"], 2.8)
+        self.assertAlmostEqual(by_wallet["0xabc"]["settled_value"], 6.0)
+        self.assertAlmostEqual(by_wallet["0xabc"]["net_shares_up"], 6.0)
+        self.assertAlmostEqual(by_wallet["0xabc"]["net_shares_down"], 5.0)
+        self.assertEqual(by_wallet["0xabc"]["trades"], 3)
+        self.assertAlmostEqual(by_wallet["0xdef"]["realized_pnl"], 0.6)
+        self.assertEqual(by_wallet["0xdef"]["incomplete"], 1)
+
+    def test_wallet_metrics_exclude_incomplete_ledger_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                now_ts = 2_000_000
+                market = "btc-updown-5m-short"
+                store.insert_trade(
+                    trade_row(
+                        "0xabc",
+                        market,
+                        now_ts - 100,
+                        tx_hash="tx-short",
+                        outcome="Up",
+                        side="SELL",
+                        price=0.70,
+                        size=100,
+                    )
+                )
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": f"cond-{market}",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-24T12:00:00+00:00",
+                        "completed": True,
+                    }
+                )
+
+                rows = store.wallet_market_pnl_rows("0xabc")
+                metrics = store.wallet_trade_metrics("0xabc", now_ts=now_ts)
+            finally:
+                store.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["incomplete"], 1)
+        self.assertAlmostEqual(rows[0]["realized_pnl"], -30.0)
+        self.assertAlmostEqual(metrics["pnl_7d"], 0.0)
+        self.assertAlmostEqual(metrics["pnl_30d"], 0.0)
+        self.assertEqual(metrics["wins_7d"], 0)
+        self.assertEqual(metrics["losses_7d"], 0)
+        self.assertEqual(metrics["settled_markets_7d"], 0)
+        self.assertEqual(metrics["incomplete_settled_markets_7d"], 1)
+
+    def test_wallet_observed_metrics_use_settled_local_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                now_ts = 2_000_000
+                win_market = "btc-updown-5m-win"
+                loss_market = "btc-updown-5m-loss"
+                store.insert_trade(trade_row("0xabc", win_market, now_ts - 100, tx_hash="tx-win", outcome="Up", side="BUY", price=0.40, size=10))
+                store.insert_trade(trade_row("0xabc", loss_market, now_ts - 200, tx_hash="tx-loss", outcome="Up", side="BUY", price=0.60, size=10))
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": win_market,
+                        "condition_id": f"cond-{win_market}",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-24T12:00:00+00:00",
+                        "completed": True,
+                    }
+                )
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": loss_market,
+                        "condition_id": f"cond-{loss_market}",
+                        "symbol": "BTC",
+                        "winning_side": "Down",
+                        "settled_at": "2026-05-24T12:01:00+00:00",
+                        "completed": True,
+                    }
+                )
+
+                metrics = store.wallet_trade_metrics("0xABC", now_ts=now_ts)
+            finally:
+                store.close()
+
+        self.assertAlmostEqual(metrics["pnl_7d"], 0.0)
+        self.assertAlmostEqual(metrics["pnl_30d"], 0.0)
+        self.assertEqual(metrics["wins_7d"], 1)
+        self.assertEqual(metrics["losses_7d"], 1)
+        self.assertEqual(metrics["settled_markets_7d"], 2)
+        self.assertAlmostEqual(metrics["top1_concentration"], 1.0)
+        self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
 
 
 if __name__ == "__main__":

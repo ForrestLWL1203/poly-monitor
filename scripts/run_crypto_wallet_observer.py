@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--open-price-refresh-sec", type=float, default=5.0)
     parser.add_argument("--settlement-check-sec", type=float, default=30.0)
     parser.add_argument("--raw-cleanup-interval-hours", type=float, default=1.0)
-    parser.add_argument("--context-snapshot-cooldown-sec", type=float, default=5.0)
+    parser.add_argument("--context-snapshot-cooldown-sec", type=float, default=15.0)
     parser.add_argument("--open-price-min-age-sec", type=float, default=5.0)
     parser.add_argument("--settlement-delay-sec", type=float, default=150.0)
     parser.add_argument("--settlement-retry-sec", type=float, default=30.0)

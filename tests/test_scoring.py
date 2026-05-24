@@ -186,6 +186,33 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual(score_wallet(metrics, CandidateThresholds()).status, "active_candidate")
 
+    def test_score_wallet_waits_for_local_settled_ledger_before_active(self):
+        metrics = {
+            "wallet": "0xabc",
+            "trades_7d": 1000,
+            "markets_24h": 20,
+            "trades_30d": 1000,
+            "pnl_7d": 0.0,
+            "pnl_30d": 0.0,
+            "pnl_source": "local_observed_ledger",
+            "wins_7d": 0,
+            "losses_7d": 0,
+            "settled_markets_7d": 0,
+            "settled_markets_30d": 0,
+            "top1_concentration": 1.0,
+            "top3_concentration": 1.0,
+            "longshot_profit_share": 0.0,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 1000,
+            "historical_markets": 20,
+            "historical_pnl": 0.0,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "dormant_candidate")
+        self.assertIn("settled_markets_7d_below_threshold", score.reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

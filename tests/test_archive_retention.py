@@ -235,6 +235,7 @@ class ArchiveRetentionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
+            store.upsert_score(CandidateScore("0xanchor", "active_candidate", 1, [], {"wallet": "0xanchor"}))
             for idx in range(5):
                 wallet = f"0xnoise{idx}"
                 store.insert_trade(trade(wallet, f"0x{idx}", 1000 + idx))
@@ -252,6 +253,67 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(result["removed_wallets"], 3)
         self.assertEqual(result["removed_trades"], 3)
         self.assertEqual(remaining_wallets, ["0xnoise3", "0xnoise4"])
+
+    def test_cleanup_inactive_wallet_data_skips_when_score_table_empty(self):
+        def trade(wallet: str, tx: str, ts: int) -> dict:
+            return {
+                "tx_hash": tx,
+                "wallet": wallet,
+                "market_slug": "btc-updown-5m-1",
+                "condition_id": "0xcond",
+                "symbol": "BTC",
+                "exchange_ts": ts,
+                "outcome": "Up",
+                "price": 0.5,
+                "size": 2,
+                "usdc": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            for idx in range(5):
+                store.insert_trade(trade(f"0xnoise{idx}", f"0x{idx}", 1000 + idx))
+
+            result = store.cleanup_inactive_wallet_data(
+                inactive_cutoff_ts=2_000,
+                max_non_candidate_wallets=2,
+            )
+            remaining = store.conn.execute("SELECT COUNT(*) AS n FROM trades").fetchone()["n"]
+            store.close()
+
+        self.assertEqual(result, {"removed_wallets": 0, "removed_trades": 0, "removed_score_rows": 0})
+        self.assertEqual(remaining, 5)
+
+    def test_cleanup_inactive_wallet_data_skips_without_core_candidates(self):
+        def trade(wallet: str, tx: str, ts: int) -> dict:
+            return {
+                "tx_hash": tx,
+                "wallet": wallet,
+                "market_slug": "btc-updown-5m-1",
+                "condition_id": "0xcond",
+                "symbol": "BTC",
+                "exchange_ts": ts,
+                "outcome": "Up",
+                "price": 0.5,
+                "size": 2,
+                "usdc": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            store.upsert_score(CandidateScore("0xarchive", "archive_candidate", 1, [], {"wallet": "0xarchive"}))
+            for idx in range(5):
+                store.insert_trade(trade(f"0xnoise{idx}", f"0x{idx}", 1000 + idx))
+
+            result = store.cleanup_inactive_wallet_data(
+                inactive_cutoff_ts=2_000,
+                max_non_candidate_wallets=2,
+            )
+            remaining = store.conn.execute("SELECT COUNT(*) AS n FROM trades").fetchone()["n"]
+            store.close()
+
+        self.assertEqual(result, {"removed_wallets": 0, "removed_trades": 0, "removed_score_rows": 0})
+        self.assertEqual(remaining, 5)
 
     def test_storage_adds_query_indexes_and_market_last_exchange_ts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -283,6 +345,29 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertIn("idx_scores_status_rank", indexes)
         self.assertIn("idx_scores_status_updated", indexes)
         self.assertEqual(last_ts, 123)
+
+    def test_trades_table_stores_trade_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            store.insert_trade(
+                {
+                    "tx_hash": "0xside",
+                    "wallet": "0xabc",
+                    "market_slug": "btc-updown-5m-1",
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "exchange_ts": 123,
+                    "outcome": "Up",
+                    "side": "SELL",
+                    "price": 0.5,
+                    "size": 2,
+                    "usdc": 1,
+                }
+            )
+            row = store.conn.execute("SELECT side FROM trades WHERE tx_hash='0xside'").fetchone()
+            store.close()
+
+        self.assertEqual(row["side"], "SELL")
 
     def test_storage_applies_runtime_pragmas(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import json
 import sqlite3
 from collections import Counter, defaultdict
@@ -65,13 +66,24 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection | None:
 def _raw_files(raw_dir: Path) -> list[Path]:
     if not raw_dir.exists():
         return []
-    files = [path for path in raw_dir.glob("*/events.jsonl") if path.is_file()]
+    files = [
+        path
+        for pattern in ("*/events.jsonl", "*/events.jsonl.gz")
+        for path in raw_dir.glob(pattern)
+        if path.is_file()
+    ]
     return sorted(files, key=lambda path: (path.stat().st_mtime, str(path)))
 
 
 def _tail_lines(path: Path, *, max_lines: int, block_size: int = 65536) -> list[str]:
     if max_lines <= 0:
         return []
+    if path.suffix == ".gz":
+        try:
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+                return [line.rstrip("\n") for line in handle.readlines()[-max_lines:] if line.strip()]
+        except OSError:
+            return []
     try:
         with path.open("rb") as handle:
             handle.seek(0, 2)
@@ -314,6 +326,55 @@ def _trade_row(row: dict[str, Any]) -> dict[str, Any]:
         "size": row.get("size"),
         "usdc": row.get("usdc"),
         "tx_hash": row.get("tx_hash"),
+    }
+
+
+def _wallet_ledger_rows(conn: sqlite3.Connection, wallet: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    try:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM wallet_market_pnl
+            WHERE wallet=?
+            ORDER BY settled_at DESC
+            LIMIT ?
+            """,
+            (wallet.lower(), limit),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [
+        {
+            "wallet": row["wallet"],
+            "market_slug": row["market_slug"],
+            "condition_id": row["condition_id"],
+            "symbol": row["symbol"],
+            "realized_pnl": row["realized_pnl"],
+            "buy_usdc": row["buy_usdc"],
+            "sell_usdc": row["sell_usdc"],
+            "settled_value": row["settled_value"],
+            "net_shares_up": row["net_shares_up"],
+            "net_shares_down": row["net_shares_down"],
+            "trades": row["trades"],
+            "winning_side": row["winning_side"],
+            "settled_at": row["settled_at"],
+            "incomplete": bool(row["incomplete"]) if "incomplete" in row.keys() else False,
+        }
+        for row in rows
+    ]
+
+
+def _ledger_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    complete_rows = [row for row in rows if not row.get("incomplete")]
+    pnl = [float(row.get("realized_pnl") or 0.0) for row in complete_rows]
+    return {
+        "settled_markets": len(complete_rows),
+        "realized_pnl": round(sum(pnl), 6),
+        "wins": sum(1 for value in pnl if value > 0),
+        "losses": sum(1 for value in pnl if value < 0),
+        "buy_usdc": round(sum(float(row.get("buy_usdc") or 0.0) for row in complete_rows), 6),
+        "sell_usdc": round(sum(float(row.get("sell_usdc") or 0.0) for row in complete_rows), 6),
+        "incomplete_markets": sum(1 for row in rows if row.get("incomplete")),
     }
 
 
@@ -630,6 +691,7 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
             for key in ("dual_side_rate", "late_bias_shift", "winner_add_rate", "longshot_profit_share", "top1_concentration", "top3_concentration")
             if key in metrics
         }
+        ledger_rows = _wallet_ledger_rows(conn, wallet)
         return {
             "wallet": wallet,
             "wallet_short": compact_wallet(wallet),
@@ -642,6 +704,8 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
             "behavior": behavior,
             "market_distribution": markets,
             "recent_trades": trades,
+            "ledger_summary": _ledger_summary(ledger_rows),
+            "settled_markets": ledger_rows,
         }
     except sqlite3.Error:
         return None

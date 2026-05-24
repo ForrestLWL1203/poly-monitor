@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import json
 import shutil
 import sqlite3
@@ -66,6 +67,29 @@ def cleanup_raw_retention(raw_dir: Path, *, now: dt.date | None = None, retentio
             continue
         if day < cutoff:
             shutil.rmtree(child)
+            continue
+        if day < today:
+            _gzip_raw_events(child / "events.jsonl")
+
+
+def _gzip_raw_events(path: Path) -> None:
+    if not path.exists():
+        return
+    gz_path = path.with_suffix(path.suffix + ".gz")
+    if gz_path.exists():
+        path.unlink()
+        return
+    tmp_path = gz_path.with_suffix(gz_path.suffix + ".tmp")
+    try:
+        with path.open("rb") as src, gzip.open(tmp_path, "wb", compresslevel=6) as dst:
+            shutil.copyfileobj(src, dst)
+        tmp_path.replace(gz_path)
+        path.unlink()
+    except OSError:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
 
 
 class ObserverStore:
@@ -90,6 +114,7 @@ class ObserverStore:
                 symbol TEXT NOT NULL,
                 exchange_ts INTEGER NOT NULL,
                 outcome TEXT NOT NULL,
+                side TEXT NOT NULL DEFAULT '',
                 price REAL NOT NULL,
                 size REAL NOT NULL,
                 usdc REAL NOT NULL,
@@ -113,6 +138,34 @@ class ObserverStore:
                 window_end TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS market_settlements (
+                market_slug TEXT PRIMARY KEY,
+                condition_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                winning_side TEXT NOT NULL,
+                settlement_open_price REAL,
+                settlement_close_price REAL,
+                settled_at TEXT NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS wallet_market_pnl (
+                wallet TEXT NOT NULL,
+                market_slug TEXT NOT NULL,
+                condition_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                realized_pnl REAL NOT NULL,
+                buy_usdc REAL NOT NULL,
+                sell_usdc REAL NOT NULL,
+                settled_value REAL NOT NULL,
+                net_shares_up REAL NOT NULL,
+                net_shares_down REAL NOT NULL,
+                trades INTEGER NOT NULL,
+                winning_side TEXT NOT NULL,
+                settled_at TEXT NOT NULL,
+                incomplete INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(wallet, market_slug)
+            );
             """
         )
         table_info = self.conn.execute("PRAGMA table_info(trades)").fetchall()
@@ -120,6 +173,14 @@ class ObserverStore:
         if "fill_id" not in columns:
             self.conn.execute("ALTER TABLE trades ADD COLUMN fill_id TEXT NOT NULL DEFAULT ''")
             table_info = self.conn.execute("PRAGMA table_info(trades)").fetchall()
+            columns = {str(row["name"]) for row in table_info}
+        if "side" not in columns:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN side TEXT NOT NULL DEFAULT ''")
+            table_info = self.conn.execute("PRAGMA table_info(trades)").fetchall()
+        pnl_table_info = self.conn.execute("PRAGMA table_info(wallet_market_pnl)").fetchall()
+        pnl_columns = {str(row["name"]) for row in pnl_table_info}
+        if "incomplete" not in pnl_columns:
+            self.conn.execute("ALTER TABLE wallet_market_pnl ADD COLUMN incomplete INTEGER NOT NULL DEFAULT 0")
         fill_id_pk = next((int(row["pk"]) for row in table_info if str(row["name"]) == "fill_id"), 0)
         if fill_id_pk == 0:
             self.conn.executescript(
@@ -133,6 +194,7 @@ class ObserverStore:
                     symbol TEXT NOT NULL,
                     exchange_ts INTEGER NOT NULL,
                     outcome TEXT NOT NULL,
+                    side TEXT NOT NULL DEFAULT '',
                     price REAL NOT NULL,
                     size REAL NOT NULL,
                     usdc REAL NOT NULL,
@@ -141,9 +203,9 @@ class ObserverStore:
                     PRIMARY KEY (tx_hash, fill_id, wallet, market_slug, outcome, price, size)
                 );
                 INSERT OR IGNORE INTO trades_new(
-                    tx_hash,fill_id,wallet,market_slug,condition_id,symbol,exchange_ts,outcome,price,size,usdc,name,pseudonym
+                    tx_hash,fill_id,wallet,market_slug,condition_id,symbol,exchange_ts,outcome,side,price,size,usdc,name,pseudonym
                 )
-                SELECT tx_hash,fill_id,wallet,market_slug,condition_id,symbol,exchange_ts,outcome,price,size,usdc,name,pseudonym
+                SELECT tx_hash,fill_id,wallet,market_slug,condition_id,symbol,exchange_ts,outcome,side,price,size,usdc,name,pseudonym
                 FROM trades;
                 DROP TABLE trades;
                 ALTER TABLE trades_new RENAME TO trades;
@@ -164,6 +226,9 @@ class ObserverStore:
             CREATE INDEX IF NOT EXISTS idx_scores_status_rank ON candidate_scores(status, rank_score DESC);
             CREATE INDEX IF NOT EXISTS idx_scores_status_updated ON candidate_scores(status, updated_at);
             CREATE INDEX IF NOT EXISTS idx_market_windows_slug ON market_windows(market_slug);
+            CREATE INDEX IF NOT EXISTS idx_settlements_completed ON market_settlements(completed, settled_at);
+            CREATE INDEX IF NOT EXISTS idx_wallet_market_pnl_wallet_settled ON wallet_market_pnl(wallet, settled_at);
+            CREATE INDEX IF NOT EXISTS idx_wallet_market_pnl_market ON wallet_market_pnl(market_slug);
             """
         )
         self.conn.commit()
@@ -207,8 +272,8 @@ class ObserverStore:
             cursor = self.conn.execute(
             """
             INSERT OR IGNORE INTO trades(
-                tx_hash,fill_id,wallet,market_slug,condition_id,symbol,exchange_ts,outcome,price,size,usdc,name,pseudonym
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                tx_hash,fill_id,wallet,market_slug,condition_id,symbol,exchange_ts,outcome,side,price,size,usdc,name,pseudonym
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 row["tx_hash"],
@@ -219,6 +284,7 @@ class ObserverStore:
                 row["symbol"],
                 row["exchange_ts"],
                 row["outcome"],
+                str(row.get("side") or "").upper(),
                 row["price"],
                 row["size"],
                 row["usdc"],
@@ -314,9 +380,177 @@ class ObserverStore:
         metrics["historical_markets"] = int(row["historical_markets"] or 0)
         last_ts = int(row["last_ts"] or 0)
         metrics["last_active_age_hours"] = round((now_value - last_ts) / 3600.0, 3)
-        # Realized PnL requires settlement. Until closed-position refresh is added,
-        # use zero so wallets discovered from live-only flow do not get promoted prematurely.
+        metrics.update(self.wallet_observed_pnl_metrics(wallet, now_ts=now_value))
         return metrics
+
+    def upsert_market_settlement(self, row: dict[str, Any]) -> bool:
+        market_slug = str(row["market_slug"])
+        completed = 1 if row.get("completed") else 0
+        winning_side = str(row.get("winning_side") or "")
+        existing = self.conn.execute(
+            """
+            SELECT winning_side, settlement_open_price, settlement_close_price, completed
+            FROM market_settlements
+            WHERE market_slug=?
+            """,
+            (market_slug,),
+        ).fetchone()
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO market_settlements(
+                market_slug, condition_id, symbol, winning_side, settlement_open_price,
+                settlement_close_price, settled_at, completed, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                market_slug,
+                str(row.get("condition_id") or ""),
+                str(row.get("symbol") or "").upper(),
+                winning_side,
+                row.get("settlement_open_price"),
+                row.get("settlement_close_price"),
+                str(row.get("settled_at") or utc_now().isoformat()),
+                completed,
+                utc_now().isoformat(),
+            ),
+        )
+        changed = (
+            existing is None
+            or str(existing["winning_side"] or "") != winning_side
+            or float(existing["settlement_open_price"] or 0.0) != float(row.get("settlement_open_price") or 0.0)
+            or float(existing["settlement_close_price"] or 0.0) != float(row.get("settlement_close_price") or 0.0)
+            or int(existing["completed"] or 0) != completed
+        )
+        if completed and winning_side:
+            self._recompute_market_pnl(market_slug)
+        self.conn.commit()
+        return changed
+
+    def _recompute_market_pnl(self, market_slug: str) -> None:
+        settlement = self.conn.execute(
+            """
+            SELECT * FROM market_settlements
+            WHERE market_slug=? AND completed=1 AND winning_side != ''
+            """,
+            (market_slug,),
+        ).fetchone()
+        if settlement is None:
+            return
+        rows = self.conn.execute(
+            "SELECT * FROM trades WHERE market_slug=? ORDER BY exchange_ts ASC",
+            (market_slug,),
+        ).fetchall()
+        by_wallet: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            wallet = str(row["wallet"]).lower()
+            item = by_wallet.setdefault(
+                wallet,
+                {
+                    "cash": 0.0,
+                    "buy_usdc": 0.0,
+                    "sell_usdc": 0.0,
+                    "up": 0.0,
+                    "down": 0.0,
+                    "trades": 0,
+                    "condition_id": str(row["condition_id"]),
+                    "symbol": str(row["symbol"]).upper(),
+                },
+            )
+            side = str(row["side"] or "").upper()
+            outcome = str(row["outcome"] or "")
+            size = float(row["size"] or 0.0)
+            usdc = float(row["usdc"] or 0.0)
+            share_key = "up" if outcome.lower() == "up" else "down"
+            if side == "SELL":
+                item["cash"] += usdc
+                item["sell_usdc"] += usdc
+                item[share_key] -= size
+            else:
+                item["cash"] -= usdc
+                item["buy_usdc"] += usdc
+                item[share_key] += size
+            item["trades"] += 1
+        self.conn.execute("DELETE FROM wallet_market_pnl WHERE market_slug=?", (market_slug,))
+        winning_side = str(settlement["winning_side"])
+        for wallet, item in by_wallet.items():
+            settled_value = float(item["up"] if winning_side.lower() == "up" else item["down"])
+            realized = float(item["cash"]) + settled_value
+            incomplete = int(float(item["up"]) < -1e-6 or float(item["down"]) < -1e-6)
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO wallet_market_pnl(
+                    wallet, market_slug, condition_id, symbol, realized_pnl, buy_usdc, sell_usdc,
+                    settled_value, net_shares_up, net_shares_down, trades, winning_side, settled_at,
+                    incomplete
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    wallet,
+                    market_slug,
+                    item["condition_id"],
+                    item["symbol"],
+                    round(realized, 6),
+                    round(float(item["buy_usdc"]), 6),
+                    round(float(item["sell_usdc"]), 6),
+                    round(settled_value, 6),
+                    round(float(item["up"]), 6),
+                    round(float(item["down"]), 6),
+                    int(item["trades"]),
+                    winning_side,
+                    str(settlement["settled_at"]),
+                    incomplete,
+                ),
+            )
+
+    def wallet_market_pnl_rows(self, wallet: str | None = None) -> list[dict[str, Any]]:
+        if wallet is None:
+            rows = self.conn.execute("SELECT * FROM wallet_market_pnl ORDER BY wallet, market_slug").fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM wallet_market_pnl WHERE wallet=? ORDER BY market_slug", (wallet.lower(),)).fetchall()
+        return [dict(row) for row in rows]
+
+    def wallet_observed_pnl_metrics(self, wallet: str, *, now_ts: int | None = None) -> dict[str, Any]:
+        now_value = now_ts if now_ts is not None else int(dt.datetime.now(dt.timezone.utc).timestamp())
+        cutoff_7d_iso = dt.datetime.fromtimestamp(now_value - 7 * 86400, dt.timezone.utc).isoformat()
+        cutoff_30d_iso = dt.datetime.fromtimestamp(now_value - 30 * 86400, dt.timezone.utc).isoformat()
+        rows_7d = self.conn.execute(
+            "SELECT * FROM wallet_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=0",
+            (wallet.lower(), cutoff_7d_iso),
+        ).fetchall()
+        rows_30d = self.conn.execute(
+            "SELECT * FROM wallet_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=0",
+            (wallet.lower(), cutoff_30d_iso),
+        ).fetchall()
+        incomplete_7d = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM wallet_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=1",
+            (wallet.lower(), cutoff_7d_iso),
+        ).fetchone()
+        incomplete_30d = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM wallet_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=1",
+            (wallet.lower(), cutoff_30d_iso),
+        ).fetchone()
+
+        def pnl(rows: list[sqlite3.Row]) -> float:
+            return round(sum(float(row["realized_pnl"] or 0.0) for row in rows), 6)
+
+        pnl_7d = pnl(rows_7d)
+        pnl_30d = pnl(rows_30d)
+        positive_30d = sorted([float(row["realized_pnl"] or 0.0) for row in rows_30d if float(row["realized_pnl"] or 0.0) > 0], reverse=True)
+        positive_total = sum(positive_30d)
+        return {
+            "pnl_7d": pnl_7d,
+            "pnl_30d": pnl_30d,
+            "pnl_source": "local_observed_ledger",
+            "wins_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) > 0),
+            "losses_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) < 0),
+            "settled_markets_7d": len(rows_7d),
+            "settled_markets_30d": len(rows_30d),
+            "incomplete_settled_markets_7d": int(incomplete_7d["n"] or 0),
+            "incomplete_settled_markets_30d": int(incomplete_30d["n"] or 0),
+            "top1_concentration": round((sum(positive_30d[:1]) / positive_total), 6) if positive_total > 0 else 1.0,
+            "top3_concentration": round((sum(positive_30d[:3]) / positive_total), 6) if positive_total > 0 else 1.0,
+            "historical_pnl": pnl_30d,
+        }
 
     def wallet_24h_counts(self, wallet: str, *, now_ts: int | None = None) -> dict[str, int]:
         now_value = now_ts if now_ts is not None else int(dt.datetime.now(dt.timezone.utc).timestamp())
@@ -535,6 +769,14 @@ class ObserverStore:
         inactive_cutoff_ts: int,
         max_non_candidate_wallets: int | None = None,
     ) -> dict[str, int]:
+        core_score_count = int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS n FROM candidate_scores WHERE status IN ('active_candidate','dormant_candidate')"
+            ).fetchone()["n"]
+            or 0
+        )
+        if core_score_count == 0:
+            return {"removed_wallets": 0, "removed_trades": 0, "removed_score_rows": 0}
         self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS cleanup_keep(wallet TEXT PRIMARY KEY)")
         self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS cleanup_delete_wallets(wallet TEXT PRIMARY KEY)")
         self.conn.execute("DELETE FROM cleanup_keep")

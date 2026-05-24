@@ -64,6 +64,7 @@ class DataApiTests(unittest.TestCase):
             "condition_id": "0xcond",
             "wallet": "0xabc",
             "name": "sample",
+            "side": "BUY",
             "outcome": "Up",
             "price": 0.42,
             "size": 12.5,

@@ -15,6 +15,7 @@ class CandidateThresholds:
     max_longshot_profit_share: float = 0.35
     min_repeat_longshot_profit_markets: int = 3
     min_resolved_markets_for_win_loss_check: int = 20
+    min_settled_markets_for_local_active: int = 5
     active_max_age_hours: float = 48.0
     archive_age_hours: float = 14 * 24.0
     dormant_min_historical_trades: int = 500
@@ -52,6 +53,11 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
         ("trades_7d_below_threshold", _num(metrics, "trades_7d") < thresholds.min_trades_7d),
         ("markets_24h_below_threshold", markets_24h < thresholds.min_markets_24h),
         ("trades_30d_below_threshold", _num(metrics, "trades_30d") < thresholds.min_trades_30d),
+        (
+            "settled_markets_7d_below_threshold",
+            metrics.get("pnl_source") == "local_observed_ledger"
+            and _num(metrics, "settled_markets_7d") < thresholds.min_settled_markets_for_local_active,
+        ),
         ("pnl_7d_not_positive", _num(metrics, "pnl_7d") <= 0),
         ("pnl_30d_not_positive", _num(metrics, "pnl_30d") <= 0),
         ("wins_7d_below_losses", win_loss_failed),
@@ -64,6 +70,13 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
 
 
 def _dormant_ok(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
+    if (
+        metrics.get("pnl_source") == "local_observed_ledger"
+        and _num(metrics, "historical_trades") >= thresholds.dormant_min_historical_trades
+        and _num(metrics, "historical_markets") >= thresholds.dormant_min_historical_markets
+        and _num(metrics, "settled_markets_30d") < thresholds.min_settled_markets_for_local_active
+    ):
+        return True
     return (
         _num(metrics, "historical_trades") >= thresholds.dormant_min_historical_trades
         and _num(metrics, "historical_markets") >= thresholds.dormant_min_historical_markets

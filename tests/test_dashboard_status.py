@@ -108,6 +108,95 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(status["candidates"]["active_candidate"][0]["metrics"]["name"], "frontrow-user")
         self.assertEqual(detail["metrics"]["name"], "frontrow-user")
 
+    def test_wallet_detail_includes_observed_settled_market_pnl_rows(self):
+        from poly_monitor.dashboard.status import wallet_detail
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0x5555555555555555555555555555555555555555"
+            market = "btc-updown-5m-1770000000"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            store.insert_trade(
+                {
+                    "tx_hash": "0xledger",
+                    "wallet": wallet,
+                    "market_slug": market,
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "exchange_ts": 1770000010,
+                    "outcome": "Up",
+                    "side": "BUY",
+                    "price": 0.4,
+                    "size": 10,
+                    "usdc": 4,
+                    "name": "ledger-wallet",
+                }
+            )
+            store.upsert_market_settlement(
+                {
+                    "market_slug": market,
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "winning_side": "Up",
+                    "settled_at": "2026-05-24T12:00:00+00:00",
+                    "completed": True,
+                }
+            )
+            store.close()
+
+            detail = wallet_detail(data_dir, wallet)
+
+        self.assertEqual(detail["ledger_summary"]["settled_markets"], 1)
+        self.assertAlmostEqual(detail["ledger_summary"]["realized_pnl"], 6.0)
+        self.assertEqual(len(detail["settled_markets"]), 1)
+        row = detail["settled_markets"][0]
+        self.assertEqual(row["market_slug"], market)
+        self.assertAlmostEqual(row["realized_pnl"], 6.0)
+        self.assertEqual(row["trades"], 1)
+        self.assertFalse(row["incomplete"])
+
+    def test_wallet_detail_marks_incomplete_ledger_rows(self):
+        from poly_monitor.dashboard.status import wallet_detail
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0x1111111111111111111111111111111111111111"
+            market = "btc-updown-5m-1770000000"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            store.insert_trade(
+                {
+                    "tx_hash": "0xincomplete",
+                    "wallet": wallet,
+                    "market_slug": market,
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "exchange_ts": 1770000010,
+                    "outcome": "Up",
+                    "side": "SELL",
+                    "price": 0.7,
+                    "size": 10,
+                    "usdc": 7,
+                    "name": "ledger-wallet",
+                }
+            )
+            store.upsert_market_settlement(
+                {
+                    "market_slug": market,
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "winning_side": "Up",
+                    "settled_at": "2026-05-24T12:00:00+00:00",
+                    "completed": True,
+                }
+            )
+            store.close()
+
+            detail = wallet_detail(data_dir, wallet)
+
+        self.assertEqual(detail["ledger_summary"]["incomplete_markets"], 1)
+        self.assertAlmostEqual(detail["ledger_summary"]["realized_pnl"], 0.0)
+        self.assertTrue(detail["settled_markets"][0]["incomplete"])
+
     def test_dashboard_caps_archive_candidates(self):
         from poly_monitor.dashboard.status import build_dashboard_status
 

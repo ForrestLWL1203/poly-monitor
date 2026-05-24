@@ -15,7 +15,6 @@ from .market import MarketSeries, MarketWindow, find_current_or_next_window
 from .price_feed import ChainlinkPriceFeed, ChainlinkPriceHub
 from .scoring import CandidateThresholds, score_wallet
 from .storage import JsonlEventWriter, ObserverStore, cleanup_raw_retention, write_latest_candidates
-from .wallet_metrics import build_metrics_from_api
 
 
 @dataclass(frozen=True)
@@ -39,7 +38,7 @@ class ObserverConfig:
     open_price_refresh_sec: float = 5.0
     settlement_check_sec: float = 30.0
     raw_cleanup_interval_hours: float = 1.0
-    context_snapshot_cooldown_sec: float = 5.0
+    context_snapshot_cooldown_sec: float = 15.0
     open_price_min_age_sec: float = 5.0
     settlement_delay_sec: float = 150.0
     settlement_retry_sec: float = 30.0
@@ -142,6 +141,7 @@ class CryptoWalletObserver:
         self._active_snapshot_wallets: set[str] = set()
         self._metrics_cache: dict[str, _MetricsCacheEntry] = {}
         self._last_context_snapshot: dict[tuple[str, str], float] = {}
+        self._last_score_event_state: dict[str, tuple[str, float]] = {}
         self._refresh_candidate_caches()
 
     async def run(self) -> int:
@@ -339,6 +339,18 @@ class CryptoWalletObserver:
                 "settlement_cached": bool(data.get("cached")) if data is not None else None,
                 "settlement_source": source,
             })
+            self.store.upsert_market_settlement(
+                {
+                    "market_slug": window.slug,
+                    "condition_id": window.condition_id,
+                    "symbol": window.symbol,
+                    "winning_side": winning_side or "",
+                    "settlement_open_price": compact_float(refs.get("open"), 6),
+                    "settlement_close_price": compact_float(refs.get("close"), 6),
+                    "settled_at": now.isoformat(),
+                    "completed": completed,
+                }
+            )
             if completed:
                 self.pending_settlements.pop(slug, None)
             else:
@@ -398,6 +410,19 @@ class CryptoWalletObserver:
     def _should_write_raw_trade(self, trade: dict[str, Any]) -> bool:
         return self._should_snapshot(trade)
 
+    def _should_write_score_event(self, score) -> bool:
+        wallet = str(score.wallet if hasattr(score, "wallet") else score["wallet"]).lower()
+        status = str(score.status if hasattr(score, "status") else score["status"])
+        rank_score = float(score.rank_score if hasattr(score, "rank_score") else score["rank_score"])
+        previous = self._last_score_event_state.get(wallet)
+        self._last_score_event_state[wallet] = (status, rank_score)
+        if previous is None:
+            return True
+        previous_status, previous_rank = previous
+        if status != previous_status:
+            return True
+        return abs(rank_score - previous_rank) >= 1.0
+
     async def _refresh_scores_if_due(self) -> None:
         if time.monotonic() - self._last_score_refresh < self.config.score_refresh_sec:
             return
@@ -431,7 +456,8 @@ class CryptoWalletObserver:
                 previous_status=previous_status,
             ):
                 self.store.upsert_score(score)
-                self.writer.write(compact_score_event(score))
+                if self._should_write_score_event(score):
+                    self.writer.write(compact_score_event(score))
         self._score_cycles_since_prune += 1
         if self._score_cycles_since_prune >= 5:
             self._score_cycles_since_prune = 0
@@ -457,7 +483,10 @@ class CryptoWalletObserver:
         entry = self._metrics_cache.get(wallet)
         if entry is not None and now - entry.fetched_at < ttl:
             return dict(entry.metrics)
-        metrics = await asyncio.to_thread(build_metrics_from_api, wallet)
+        local_metrics = self.store.wallet_trade_metrics(wallet)
+        if previous_status is not None and not int(local_metrics.get("historical_trades") or 0):
+            raise RuntimeError("no local observed trades for existing candidate")
+        metrics = dict(local_metrics)
         self._metrics_cache[wallet] = _MetricsCacheEntry(dict(metrics), now)
         return metrics
 

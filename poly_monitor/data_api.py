@@ -48,6 +48,7 @@ def normalize_trade(raw: dict[str, Any], *, symbol: str, observed_at: str) -> di
         "condition_id": str(raw.get("conditionId") or ""),
         "wallet": str(raw.get("proxyWallet") or "").lower(),
         "name": str(raw.get("name") or ""),
+        "side": str(raw.get("side") or "").upper(),
         "outcome": str(raw.get("outcome") or ""),
         "price": price,
         "size": size,

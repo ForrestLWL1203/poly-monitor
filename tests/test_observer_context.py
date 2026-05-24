@@ -1,5 +1,6 @@
 import datetime as dt
 import asyncio
+import json
 import tempfile
 import time
 import unittest
@@ -101,19 +102,97 @@ class ObserverContextTests(unittest.TestCase):
             observer.store.close()
             observer.writer.close()
 
+    def test_completed_settlement_is_persisted_for_local_ledger(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        window = MarketWindow(
+            symbol="BTC",
+            slug="btc-updown-5m-1770000000",
+            condition_id="0xcond",
+            question="Bitcoin Up or Down",
+            up_token="up",
+            down_token="down",
+            start_time=now - dt.timedelta(minutes=5),
+            end_time=now - dt.timedelta(seconds=150),
+        )
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), settlement_retry_sec=30.0))
+                observer.store.insert_trade(
+                    {
+                        "tx_hash": "0xtx",
+                        "wallet": "0xabc",
+                        "market_slug": window.slug,
+                        "condition_id": window.condition_id,
+                        "symbol": "BTC",
+                        "exchange_ts": int(window.start_time.timestamp()) + 10,
+                        "outcome": "Up",
+                        "side": "BUY",
+                        "price": 0.4,
+                        "size": 10,
+                        "usdc": 4,
+                    }
+                )
+                observer.pending_settlements[window.slug] = (window, now - dt.timedelta(seconds=1))
+                with patch("poly_monitor.observer.fetch_crypto_price_api", return_value={"openPrice": 100, "closePrice": 101, "completed": True, "cached": False}):
+                    await observer._write_pending_settlements()
+                rows = observer.store.wallet_market_pnl_rows("0xabc")
+                status = window.slug in observer.pending_settlements
+                observer.store.close()
+                observer.writer.close()
+                return rows, status
+
+        rows, still_pending = asyncio.run(run_case())
+
+        self.assertFalse(still_pending)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["realized_pnl"], 6.0)
+
     def test_score_api_failure_does_not_overwrite_existing_candidate(self):
         async def run_case():
             with tempfile.TemporaryDirectory() as tmp:
                 observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1))
                 observer.store.upsert_score(CandidateScore("0xactive", "active_candidate", 1.0, [], {"wallet": "0xactive", "pnl_7d": 10, "pnl_30d": 10, "wins_7d": 1, "losses_7d": 0}))
-                with patch("poly_monitor.observer.build_metrics_from_api", side_effect=RuntimeError("boom")):
-                    await observer._refresh_scores_if_due()
+                await observer._refresh_scores_if_due()
                 status = observer.store.candidate_status("0xactive")
                 observer.store.close()
                 observer.writer.close()
                 return status
 
         self.assertEqual(asyncio.run(run_case()), "active_candidate")
+
+    def test_scoring_uses_local_observed_ledger_not_profile_profit(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1))
+                observer.store.insert_trade(
+                    {
+                        "tx_hash": "0xtx",
+                        "wallet": "0xrich",
+                        "market_slug": "btc-updown-5m-1",
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": int(time.time()),
+                        "outcome": "Up",
+                        "side": "BUY",
+                        "price": 0.5,
+                        "size": 2000,
+                        "usdc": 1000,
+                    }
+                )
+                await observer._refresh_scores_if_due()
+                status = observer.store.candidate_status("0xrich")
+                row = observer.store.conn.execute("SELECT metrics_json FROM candidate_scores WHERE wallet='0xrich'").fetchone()
+                metrics = json.loads(row["metrics_json"]) if row else {}
+                observer.store.close()
+                observer.writer.close()
+                return status, metrics
+
+        status, metrics = asyncio.run(run_case())
+
+        self.assertEqual(status, "archive_candidate")
+        self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
+        self.assertEqual(metrics["pnl_7d"], 0.0)
 
     def test_reactivated_archive_wallet_is_scored_again(self):
         async def run_case():
@@ -147,38 +226,13 @@ class ObserverContextTests(unittest.TestCase):
                             "usdc": 1,
                         }
                     )
-                metrics = {
-                    "wallet": wallet,
-                    "trades_24h": 0,
-                    "markets_24h": 0,
-                    "trades_7d": 500,
-                    "markets_7d": 90,
-                    "trades_30d": 1500,
-                    "markets_30d": 250,
-                    "pnl_7d": 10,
-                    "pnl_30d": 20,
-                    "wins_7d": 30,
-                    "losses_7d": 10,
-                    "resolved_markets_7d": 40,
-                    "top1_concentration": 0.1,
-                    "top3_concentration": 0.2,
-                    "longshot_profit_share": 0.1,
-                    "last_active_age_hours": 0,
-                    "historical_trades": 1500,
-                    "historical_markets": 250,
-                    "dual_side_rate": 0,
-                    "late_bias_shift": 0,
-                    "winner_add_rate": 0,
-                }
-                with patch("poly_monitor.observer.build_metrics_from_api", return_value=metrics) as fetch:
-                    await observer._refresh_scores_if_due()
-                    calls = fetch.call_count
+                await observer._refresh_scores_if_due()
                 status = observer.store.candidate_status(wallet)
                 observer.store.close()
                 observer.writer.close()
-                return status, calls
+                return status
 
-        self.assertEqual(asyncio.run(run_case()), ("active_candidate", 1))
+        self.assertEqual(asyncio.run(run_case()), "archive_candidate")
 
     def test_archive_to_archive_refresh_uses_persistent_cooldown(self):
         async def run_case():
@@ -215,40 +269,15 @@ class ObserverContextTests(unittest.TestCase):
                             "usdc": 1,
                         }
                     )
-                metrics = {
-                    "wallet": wallet,
-                    "trades_24h": 0,
-                    "markets_24h": 0,
-                    "trades_7d": 0,
-                    "markets_7d": 0,
-                    "trades_30d": 0,
-                    "markets_30d": 0,
-                    "pnl_7d": 0,
-                    "pnl_30d": 0,
-                    "wins_7d": 0,
-                    "losses_7d": 0,
-                    "resolved_markets_7d": 0,
-                    "top1_concentration": 1.0,
-                    "top3_concentration": 1.0,
-                    "longshot_profit_share": 0.0,
-                    "last_active_age_hours": 0,
-                    "historical_trades": 20,
-                    "historical_markets": 20,
-                    "dual_side_rate": 0,
-                    "late_bias_shift": 0,
-                    "winner_add_rate": 0,
-                }
-                with patch("poly_monitor.observer.build_metrics_from_api", return_value=metrics) as fetch:
-                    await observer._refresh_scores_if_due()
-                    observer._metrics_cache.clear()
-                    await observer._refresh_scores_if_due()
-                    calls = fetch.call_count
+                await observer._refresh_scores_if_due()
+                observer._metrics_cache.clear()
+                await observer._refresh_scores_if_due()
                 rows = observer.store.candidate_rows()["archive_candidate"]
                 observer.store.close()
                 observer.writer.close()
-                return rows[0]["updated_at"] > old_updated_at, calls
+                return rows[0]["updated_at"] > old_updated_at
 
-        self.assertEqual(asyncio.run(run_case()), (True, 1))
+        self.assertEqual(asyncio.run(run_case()), True)
 
     def test_score_metrics_are_cached_within_ttl(self):
         async def run_case():
@@ -278,7 +307,7 @@ class ObserverContextTests(unittest.TestCase):
                     "late_bias_shift": 0,
                     "winner_add_rate": 0,
                 }
-                with patch("poly_monitor.observer.build_metrics_from_api", return_value=metrics) as fetch:
+                with patch.object(observer.store, "wallet_trade_metrics", return_value=metrics) as fetch:
                     await observer._refresh_scores_if_due()
                     await observer._refresh_scores_if_due()
                     calls = fetch.call_count
@@ -327,7 +356,7 @@ class ObserverContextTests(unittest.TestCase):
                     "late_bias_shift": 0,
                     "winner_add_rate": 0,
                 }
-                with patch("poly_monitor.observer.build_metrics_from_api", return_value=metrics), patch.object(
+                with patch.object(observer.store, "wallet_trade_metrics", return_value=metrics), patch.object(
                     observer.store, "prune_low_sample_archives", return_value=0
                 ) as low_sample, patch.object(
                     observer.store, "prune_candidate_scores", return_value=0
@@ -484,6 +513,23 @@ class ObserverContextTests(unittest.TestCase):
             try:
                 observer._cleanup_stale_data_if_due()
                 self.assertEqual(set(observer._metrics_cache), {"0xfresh"})
+            finally:
+                observer.store.close()
+                observer.writer.close()
+
+    def test_score_raw_event_is_written_only_for_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp)))
+            try:
+                first = CandidateScore("0xabc", "archive_candidate", 1.0, [], {"wallet": "0xabc"})
+                same = CandidateScore("0xabc", "archive_candidate", 1.0, [], {"wallet": "0xabc"})
+                status_changed = CandidateScore("0xabc", "active_candidate", 1.0, [], {"wallet": "0xabc"})
+                rank_changed = CandidateScore("0xabc", "active_candidate", 2.25, [], {"wallet": "0xabc"})
+
+                self.assertTrue(observer._should_write_score_event(first))
+                self.assertFalse(observer._should_write_score_event(same))
+                self.assertTrue(observer._should_write_score_event(status_changed))
+                self.assertTrue(observer._should_write_score_event(rank_changed))
             finally:
                 observer.store.close()
                 observer.writer.close()
