@@ -56,7 +56,9 @@ Optional environment variables:
 
 ## Candidate Thresholds
 
-Active candidates require high recent BTC/ETH 5m activity and stable positive PnL:
+Active candidates require high recent BTC/ETH 5m activity and stable positive PnL.
+Scoring is hybrid so a fresh deployment is not forced to wait for a full local
+observation window:
 
 - 7d trades >= 500 and 7d markets >= 5.
 - 30d trades >= 800 and 30d markets >= 5.
@@ -72,9 +74,19 @@ elite pool: 15 active candidates and 10 dormant candidates by default. Non-core
 wallet trade rows are cleaned periodically and capped to the most recent 100
 wallets.
 
-Scoring PnL uses only BTC/ETH 5m closed-position estimates. Whole-profile
-Polymarket leaderboard PnL is fetched only as display/diagnostic context and is
-not used to decide whether a wallet has crypto 5m edge.
+- Historical BTC/ETH 5m activity and BTC/ETH 5m closed-position estimates are
+  used for candidate discovery and ranking.
+- Whole-profile leaderboard profit is kept as reference context only; it is not
+  used as scoring PnL because it may come from unrelated markets.
+- The observer also records a separate local-observed Ledger PnL from trades and
+  settlements collected after this script started.
+- Dashboard historical PnL columns are ranking inputs; the local-observed PnL
+  column is the stricter live-monitoring evidence that should drive later
+  copyability decisions.
+- A wallet can become an active candidate soon after it is first observed if the
+  historical API metrics already satisfy the activity and profitability gates.
+  It still needs local follow/replay evidence before any paper or live copy
+  experiment.
 
 ## Sweden VPS Notes
 

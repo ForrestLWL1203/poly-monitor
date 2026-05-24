@@ -333,8 +333,9 @@
                   <th title="近 7 天 BTC/ETH 5m 成交笔数">7天交易</th>
                   <th title="近 30 天 BTC/ETH 5m 成交笔数">30天交易</th>
                   <th title="近 24 小时 activity 样本中参与过的 BTC/ETH 5m 窗口数，用来判断近期是否活跃">24h窗口</th>
-                  <th title="仅统计 observer 启动后本地记录且已结算的 BTC/ETH 5m Ledger 盈亏">观察期7天PnL</th>
-                  <th title="仅统计 observer 启动后本地记录且已结算的 BTC/ETH 5m Ledger 盈亏">观察期30天PnL</th>
+                  <th title="用于评分的 BTC/ETH 5m 历史已关闭仓位近 7 天 PnL">历史7天PnL</th>
+                  <th title="用于评分的 BTC/ETH 5m 历史已关闭仓位近 30 天 PnL">历史30天PnL</th>
+                  <th title="仅统计 observer 启动后本地记录且已结算的 BTC/ETH 5m Ledger 盈亏">本地观测PnL</th>
                   <th title="近 7 天盈利市场数 / 亏损市场数">7天胜/负</th>
                   <th title="最大单一盈利市场占总正收益比例，越低越不依赖单点暴富">最大单场占比</th>
                   <th title="前三大盈利市场占总正收益比例，越低越分散">前三占比</th>
@@ -434,6 +435,15 @@
       return map[value] || value || "待复核";
     }
 
+    function pnlSourceLabel(value) {
+      const map = {
+        profile_profit: "Profile 参考收益",
+        crypto_closed_positions: "BTC/ETH 5m 历史已关闭仓位",
+        local_observed_ledger: "本地观察 Ledger"
+      };
+      return map[value] || value || "未知";
+    }
+
     function zhReason(code) {
       const map = {
         trades_7d_below_threshold: "近 7 天交易数低于当前活跃门槛",
@@ -442,8 +452,8 @@
         trades_30d_below_threshold: "近 30 天交易数低于当前活跃门槛",
         markets_30d_below_threshold: "近 30 天参与市场数低于旧版活跃门槛",
         settled_markets_7d_below_threshold: "本地观察期已结算窗口数不足，等待更多结算",
-        pnl_7d_not_positive: "观察期近 7 天 Ledger 盈亏未转正",
-        pnl_30d_not_positive: "观察期近 30 天 Ledger 盈亏未转正",
+        pnl_7d_not_positive: "近 7 天历史/API 盈亏未转正",
+        pnl_30d_not_positive: "近 30 天历史/API 盈亏未转正",
         wins_7d_not_above_losses: "近 7 天盈利市场数没有超过亏损市场数",
         top1_concentration_high: "最大单场利润占比偏高",
         top3_concentration_high: "前三盈利市场利润占比偏高",
@@ -601,7 +611,7 @@
 
     function renderWallets(rows) {
       if (!rows.length) {
-        $("walletRows").innerHTML = `<tr><td colspan="17" class="empty">暂无 ${labels[currentGroup]} 地址</td></tr>`;
+        $("walletRows").innerHTML = `<tr><td colspan="18" class="empty">暂无 ${labels[currentGroup]} 地址</td></tr>`;
         return;
       }
       $("walletRows").innerHTML = rows.map((row) => {
@@ -621,6 +631,7 @@
           <td>${windowCount(row)}</td>
           <td>${money(metric(row, "pnl_7d"))}</td>
           <td>${money(metric(row, "pnl_30d"))}</td>
+          <td title="7天 / 30天">${money(metric(row, "local_observed_pnl_7d"))} / ${money(metric(row, "local_observed_pnl_30d"))}</td>
           <td>${fmt(metric(row, "wins_7d"), 0)} / ${fmt(metric(row, "losses_7d"), 0)}</td>
           <td>${pct(metric(row, "top1_concentration"))}</td>
           <td>${pct(metric(row, "top3_concentration"))}</td>
@@ -645,10 +656,15 @@
         ["分类", zhStatus(detail.status)],
         ["评分状态", zhScoreState(detail.score_state)],
         ["综合分", fmtInt(detail.rank_score)],
-        ["观察期7天PnL", money(m.pnl_7d)],
-        ["观察期30天PnL", money(m.pnl_30d)],
+        ["历史7天PnL", money(m.pnl_7d)],
+        ["历史30天PnL", money(m.pnl_30d)],
+        ["Profile参考7天PnL", money(m.profile_pnl_7d)],
+        ["Profile参考30天PnL", money(m.profile_pnl_30d)],
+        ["本地观测7天PnL", money(m.local_observed_pnl_7d)],
+        ["本地观测30天PnL", money(m.local_observed_pnl_30d)],
         ["已结算窗口", `${fmt(m.settled_markets_7d, 0)} / ${fmt(m.settled_markets_30d, 0)}`],
-        ["盈亏来源", m.pnl_source === "local_observed_ledger" ? "本地观察 Ledger" : "内部估算"],
+        ["本地已结算窗口", `${fmt(m.local_observed_settled_markets_7d, 0)} / ${fmt(m.local_observed_settled_markets_30d, 0)}`],
+        ["盈亏来源", pnlSourceLabel(m.pnl_source)],
         ["明细PnL", money(ledger.realized_pnl)],
         ["明细胜/负", `${fmt(ledger.wins, 0)} / ${fmt(ledger.losses, 0)}`],
         ["7天交易", fmt(m.trades_7d, 0)],

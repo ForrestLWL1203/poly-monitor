@@ -47,14 +47,14 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["markets_30d"], 1)
         self.assertEqual(metrics["historical_markets"], 1)
         self.assertEqual(metrics["wins_7d"], 2)
-        self.assertEqual(metrics["pnl_7d"], 12.5)
-        self.assertEqual(metrics["pnl_30d"], 34.5)
-        self.assertEqual(metrics["pnl_source"], "profile_profit")
+        self.assertEqual(metrics["pnl_7d"], 3)
+        self.assertEqual(metrics["pnl_30d"], 3)
+        self.assertEqual(metrics["pnl_source"], "crypto_closed_positions")
         self.assertEqual(metrics["profile_pnl_7d"], 12.5)
         self.assertEqual(metrics["profile_pnl_30d"], 34.5)
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 3)
 
-    def test_build_metrics_uses_profile_profit_for_net_pnl_not_closed_position_gross(self):
+    def test_build_metrics_keeps_profile_profit_as_reference_only(self):
         activity = [
             {"type": "TRADE", "slug": "btc-updown-5m-100", "timestamp": 1000, "outcome": "Up", "usdcSize": 10},
         ]
@@ -79,9 +79,11 @@ class WalletMetricsTests(unittest.TestCase):
         ):
             metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=2, closed_pages=2)
 
-        self.assertEqual(metrics["pnl_7d"], 1_234.5)
-        self.assertEqual(metrics["pnl_30d"], 3_456.7)
-        self.assertEqual(metrics["pnl_source"], "profile_profit")
+        self.assertEqual(metrics["pnl_7d"], 100_000)
+        self.assertEqual(metrics["pnl_30d"], 100_000)
+        self.assertEqual(metrics["pnl_source"], "crypto_closed_positions")
+        self.assertEqual(metrics["profile_pnl_7d"], 1_234.5)
+        self.assertEqual(metrics["profile_pnl_30d"], 3_456.7)
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 100_000)
 
     def test_activity_metrics_saturate_24h_windows_for_high_frequency_page_cap(self):

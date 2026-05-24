@@ -4,7 +4,7 @@ import datetime as dt
 import gzip
 import json
 import sqlite3
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +81,8 @@ def _tail_lines(path: Path, *, max_lines: int, block_size: int = 65536) -> list[
     if path.suffix == ".gz":
         try:
             with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
-                return [line.rstrip("\n") for line in handle.readlines()[-max_lines:] if line.strip()]
+                tail = deque(handle, maxlen=max_lines)
+            return [line.rstrip("\n") for line in tail if line.strip()]
         except OSError:
             return []
     try:

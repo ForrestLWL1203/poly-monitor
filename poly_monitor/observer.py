@@ -15,6 +15,7 @@ from .market import MarketSeries, MarketWindow, find_current_or_next_window
 from .price_feed import ChainlinkPriceFeed, ChainlinkPriceHub
 from .scoring import CandidateThresholds, score_wallet
 from .storage import JsonlEventWriter, ObserverStore, cleanup_raw_retention, write_latest_candidates
+from .wallet_metrics import build_metrics_from_api
 
 
 @dataclass(frozen=True)
@@ -410,18 +411,25 @@ class CryptoWalletObserver:
     def _should_write_raw_trade(self, trade: dict[str, Any]) -> bool:
         return self._should_snapshot(trade)
 
-    def _should_write_score_event(self, score) -> bool:
+    def _score_event_state(self, score) -> tuple[str, str, float]:
         wallet = str(score.wallet if hasattr(score, "wallet") else score["wallet"]).lower()
         status = str(score.status if hasattr(score, "status") else score["status"])
         rank_score = float(score.rank_score if hasattr(score, "rank_score") else score["rank_score"])
+        return wallet, status, rank_score
+
+    def _score_event_changed(self, score) -> bool:
+        wallet, status, rank_score = self._score_event_state(score)
         previous = self._last_score_event_state.get(wallet)
-        self._last_score_event_state[wallet] = (status, rank_score)
         if previous is None:
             return True
         previous_status, previous_rank = previous
         if status != previous_status:
             return True
         return abs(rank_score - previous_rank) >= 1.0
+
+    def _record_score_event(self, score) -> None:
+        wallet, status, rank_score = self._score_event_state(score)
+        self._last_score_event_state[wallet] = (status, rank_score)
 
     async def _refresh_scores_if_due(self) -> None:
         if time.monotonic() - self._last_score_refresh < self.config.score_refresh_sec:
@@ -442,22 +450,18 @@ class CryptoWalletObserver:
                 })
                 continue
             else:
-                local_metrics = self.store.wallet_24h_counts(wallet)
-                if float(local_metrics.get("markets_24h") or 0) > float(metrics.get("markets_24h") or 0):
-                    metrics["markets_24h"] = local_metrics["markets_24h"]
-                    metrics["trades_24h"] = local_metrics["trades_24h"]
-                    metrics["markets_24h_source"] = "local_observed"
-                    metrics["markets_24h_lower_bound"] = False
-                else:
-                    metrics.setdefault("markets_24h_source", "api_sample")
+                if metrics is None:
+                    continue
+                self._apply_local_observed_24h_override(metrics)
                 score = score_wallet(metrics, CandidateThresholds())
             if should_persist_score(
                 score,
                 previous_status=previous_status,
             ):
                 self.store.upsert_score(score)
-                if self._should_write_score_event(score):
+                if self._score_event_changed(score):
                     self.writer.write(compact_score_event(score))
+                self._record_score_event(score)
         self._score_cycles_since_prune += 1
         if self._score_cycles_since_prune >= 5:
             self._score_cycles_since_prune = 0
@@ -477,7 +481,7 @@ class CryptoWalletObserver:
         )
         return removed
 
-    async def _metrics_for_wallet(self, wallet: str, previous_status: str | None) -> dict[str, Any]:
+    async def _metrics_for_wallet(self, wallet: str, previous_status: str | None) -> dict[str, Any] | None:
         ttl = self._metrics_cache_ttl(previous_status)
         now = time.monotonic()
         entry = self._metrics_cache.get(wallet)
@@ -485,10 +489,57 @@ class CryptoWalletObserver:
             return dict(entry.metrics)
         local_metrics = self.store.wallet_trade_metrics(wallet)
         if previous_status is not None and not int(local_metrics.get("historical_trades") or 0):
-            raise RuntimeError("no local observed trades for existing candidate")
-        metrics = dict(local_metrics)
+            self.store.delete_candidate_score(wallet)
+            self._metrics_cache.pop(wallet, None)
+            self._last_score_event_state.pop(wallet.lower(), None)
+            return None
+        try:
+            api_metrics = build_metrics_from_api(wallet)
+        except Exception:
+            metrics = dict(local_metrics)
+        else:
+            metrics = self._merge_api_and_local_metrics(api_metrics, local_metrics)
         self._metrics_cache[wallet] = _MetricsCacheEntry(dict(metrics), now)
         return metrics
+
+    def _merge_api_and_local_metrics(self, api_metrics: dict[str, Any], local_metrics: dict[str, Any]) -> dict[str, Any]:
+        metrics = dict(api_metrics)
+        local_fields = {
+            "trades_24h",
+            "markets_24h",
+            "trades_7d",
+            "markets_7d",
+            "trades_30d",
+            "markets_30d",
+            "pnl_7d",
+            "pnl_30d",
+            "wins_7d",
+            "losses_7d",
+            "settled_markets_7d",
+            "settled_markets_30d",
+            "incomplete_settled_markets_7d",
+            "incomplete_settled_markets_30d",
+            "historical_trades",
+            "historical_markets",
+            "historical_pnl",
+            "last_active_age_hours",
+        }
+        for key in local_fields:
+            if key in local_metrics:
+                metrics[f"local_observed_{key}"] = local_metrics[key]
+        metrics["local_observed_pnl_source"] = local_metrics.get("pnl_source", "local_observed")
+        return metrics
+
+    def _apply_local_observed_24h_override(self, metrics: dict[str, Any]) -> None:
+        api_markets = float(metrics.get("markets_24h") or 0)
+        local_markets = float(metrics.get("local_observed_markets_24h") or 0)
+        if local_markets > api_markets:
+            metrics["markets_24h"] = int(local_markets)
+            metrics["trades_24h"] = int(metrics.get("local_observed_trades_24h") or 0)
+            metrics["markets_24h_source"] = "local_observed"
+            metrics["markets_24h_lower_bound"] = False
+        else:
+            metrics.setdefault("markets_24h_source", "api_sample")
 
     def _metrics_cache_ttl(self, previous_status: str | None) -> float:
         if previous_status in {"dormant_candidate", "archive_candidate"}:
@@ -590,6 +641,12 @@ class CryptoWalletObserver:
             for key, last_seen in self._last_context_snapshot.items()
             if last_seen > context_cutoff
         }
+        known_candidate_wallets = self._known_candidate_wallets()
+        self._last_score_event_state = {
+            wallet: state
+            for wallet, state in self._last_score_event_state.items()
+            if wallet in known_candidate_wallets
+        }
         metrics_cutoff = time.monotonic() - max(
             self.config.active_metrics_ttl_sec,
             self.config.dormant_metrics_ttl_sec,
@@ -597,8 +654,12 @@ class CryptoWalletObserver:
         self._metrics_cache = {
             wallet: entry
             for wallet, entry in self._metrics_cache.items()
-            if entry.fetched_at > metrics_cutoff
+            if wallet in known_candidate_wallets and entry.fetched_at > metrics_cutoff
         }
+
+    def _known_candidate_wallets(self) -> set[str]:
+        rows = self.store.conn.execute("SELECT wallet FROM candidate_scores").fetchall()
+        return {str(row["wallet"]).lower() for row in rows}
 
     def _cleanup_raw_retention_if_due(self) -> None:
         interval_sec = max(0.0, self.config.raw_cleanup_interval_hours) * 3600.0
@@ -632,3 +693,9 @@ class CryptoWalletObserver:
         self._active_snapshot_wallets = set(
             self.store.candidate_wallets("active_candidate", limit=self.config.max_active_candidates)
         )
+        if not self._last_score_event_state:
+            rows = self.store.conn.execute("SELECT wallet, status, rank_score FROM candidate_scores").fetchall()
+            self._last_score_event_state = {
+                str(row["wallet"]).lower(): (str(row["status"]), float(row["rank_score"] or 0.0))
+                for row in rows
+            }

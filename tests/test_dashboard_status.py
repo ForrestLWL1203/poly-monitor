@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import json
 import tempfile
 import unittest
@@ -11,6 +12,19 @@ from poly_monitor.storage import JsonlEventWriter, ObserverStore, write_latest_c
 
 
 class DashboardStatusTests(unittest.TestCase):
+    def test_tail_lines_reads_last_lines_from_gzip_file(self):
+        from poly_monitor.dashboard.status import _tail_lines
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as handle:
+                for idx in range(10):
+                    handle.write(json.dumps({"idx": idx}) + "\n")
+
+            lines = _tail_lines(path, max_lines=3)
+
+        self.assertEqual([json.loads(line)["idx"] for line in lines], [7, 8, 9])
+
     def test_empty_data_dir_returns_healthy_empty_status(self):
         from poly_monitor.dashboard.status import build_dashboard_status
 

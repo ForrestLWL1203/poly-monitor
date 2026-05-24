@@ -153,7 +153,8 @@ class ObserverContextTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1))
                 observer.store.upsert_score(CandidateScore("0xactive", "active_candidate", 1.0, [], {"wallet": "0xactive", "pnl_7d": 10, "pnl_30d": 10, "wins_7d": 1, "losses_7d": 0}))
-                await observer._refresh_scores_if_due()
+                with patch.object(observer.store, "wallet_trade_metrics", side_effect=RuntimeError("temporary metrics failure")):
+                    await observer._refresh_scores_if_due()
                 status = observer.store.candidate_status("0xactive")
                 observer.store.close()
                 observer.writer.close()
@@ -161,7 +162,7 @@ class ObserverContextTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run_case()), "active_candidate")
 
-    def test_scoring_uses_local_observed_ledger_not_profile_profit(self):
+    def test_scoring_falls_back_to_local_observed_ledger_when_api_metrics_fail(self):
         async def run_case():
             with tempfile.TemporaryDirectory() as tmp:
                 observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1))
@@ -180,7 +181,8 @@ class ObserverContextTests(unittest.TestCase):
                         "usdc": 1000,
                     }
                 )
-                await observer._refresh_scores_if_due()
+                with patch("poly_monitor.observer.build_metrics_from_api", side_effect=RuntimeError("api unavailable")):
+                    await observer._refresh_scores_if_due()
                 status = observer.store.candidate_status("0xrich")
                 row = observer.store.conn.execute("SELECT metrics_json FROM candidate_scores WHERE wallet='0xrich'").fetchone()
                 metrics = json.loads(row["metrics_json"]) if row else {}
@@ -193,6 +195,77 @@ class ObserverContextTests(unittest.TestCase):
         self.assertEqual(status, "archive_candidate")
         self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
         self.assertEqual(metrics["pnl_7d"], 0.0)
+
+    def test_scoring_uses_historical_api_metrics_and_keeps_local_observed_pnl_separate(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1))
+                wallet = "0xrich"
+                observer.store.insert_trade(
+                    {
+                        "tx_hash": "0xtx",
+                        "wallet": wallet,
+                        "market_slug": "btc-updown-5m-1",
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": int(time.time()),
+                        "outcome": "Up",
+                        "side": "BUY",
+                        "price": 0.4,
+                        "size": 10,
+                        "usdc": 4,
+                    }
+                )
+                observer.store.upsert_market_settlement(
+                    {
+                        "market_slug": "btc-updown-5m-1",
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "winning_side": "Down",
+                        "completed": True,
+                    }
+                )
+                api_metrics = {
+                    "wallet": wallet,
+                    "trades_24h": 600,
+                    "markets_24h": 60,
+                    "trades_7d": 1200,
+                    "markets_7d": 200,
+                    "trades_30d": 2400,
+                    "markets_30d": 600,
+                    "pnl_7d": 100,
+                    "pnl_30d": 300,
+                    "pnl_source": "crypto_closed_positions",
+                    "profile_pnl_7d": 100,
+                    "profile_pnl_30d": 300,
+                    "wins_7d": 80,
+                    "losses_7d": 20,
+                    "top1_concentration": 0.05,
+                    "top3_concentration": 0.15,
+                    "longshot_profit_share": 0.1,
+                    "longshot_profit_markets": 1,
+                    "last_active_age_hours": 0.1,
+                    "historical_trades": 2400,
+                    "historical_markets": 600,
+                    "historical_pnl": 300,
+                    "dual_side_rate": 0,
+                    "late_bias_shift": 0,
+                    "winner_add_rate": 0,
+                }
+                with patch("poly_monitor.observer.build_metrics_from_api", return_value=api_metrics):
+                    await observer._refresh_scores_if_due()
+                row = observer.store.conn.execute("SELECT status, metrics_json FROM candidate_scores WHERE wallet=?", (wallet,)).fetchone()
+                observer.store.close()
+                observer.writer.close()
+                return row["status"], json.loads(row["metrics_json"])
+
+        status, metrics = asyncio.run(run_case())
+
+        self.assertEqual(status, "active_candidate")
+        self.assertEqual(metrics["pnl_source"], "crypto_closed_positions")
+        self.assertEqual(metrics["pnl_7d"], 100)
+        self.assertEqual(metrics["local_observed_pnl_7d"], -4.0)
+        self.assertEqual(metrics["local_observed_settled_markets_7d"], 1)
 
     def test_reactivated_archive_wallet_is_scored_again(self):
         async def run_case():
@@ -226,7 +299,8 @@ class ObserverContextTests(unittest.TestCase):
                             "usdc": 1,
                         }
                     )
-                await observer._refresh_scores_if_due()
+                with patch("poly_monitor.observer.build_metrics_from_api", side_effect=RuntimeError("api unavailable")):
+                    await observer._refresh_scores_if_due()
                 status = observer.store.candidate_status(wallet)
                 observer.store.close()
                 observer.writer.close()
@@ -269,9 +343,10 @@ class ObserverContextTests(unittest.TestCase):
                             "usdc": 1,
                         }
                     )
-                await observer._refresh_scores_if_due()
-                observer._metrics_cache.clear()
-                await observer._refresh_scores_if_due()
+                with patch("poly_monitor.observer.build_metrics_from_api", side_effect=RuntimeError("api unavailable")):
+                    await observer._refresh_scores_if_due()
+                    observer._metrics_cache.clear()
+                    await observer._refresh_scores_if_due()
                 rows = observer.store.candidate_rows()["archive_candidate"]
                 observer.store.close()
                 observer.writer.close()
@@ -307,7 +382,9 @@ class ObserverContextTests(unittest.TestCase):
                     "late_bias_shift": 0,
                     "winner_add_rate": 0,
                 }
-                with patch.object(observer.store, "wallet_trade_metrics", return_value=metrics) as fetch:
+                with patch.object(observer.store, "wallet_trade_metrics", return_value=metrics) as fetch, patch(
+                    "poly_monitor.observer.build_metrics_from_api", side_effect=RuntimeError("api unavailable")
+                ):
                     await observer._refresh_scores_if_due()
                     await observer._refresh_scores_if_due()
                     calls = fetch.call_count
@@ -316,6 +393,85 @@ class ObserverContextTests(unittest.TestCase):
                 return calls
 
         self.assertEqual(asyncio.run(run_case()), 1)
+
+    def test_score_refresh_reuses_local_observed_24h_metrics_without_extra_count_query(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1))
+                wallet = "0xactive"
+                observer.store.insert_trade(
+                    {
+                        "tx_hash": "0xtx",
+                        "wallet": wallet,
+                        "market_slug": "btc-updown-5m-1",
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": int(time.time()),
+                        "outcome": "Up",
+                        "side": "BUY",
+                        "price": 0.5,
+                        "size": 2,
+                        "usdc": 1,
+                    }
+                )
+                api_metrics = {
+                    "wallet": wallet,
+                    "trades_24h": 100,
+                    "markets_24h": 0,
+                    "trades_7d": 1000,
+                    "markets_7d": 100,
+                    "trades_30d": 2000,
+                    "markets_30d": 200,
+                    "pnl_7d": 100,
+                    "pnl_30d": 200,
+                    "pnl_source": "profile_profit",
+                    "wins_7d": 20,
+                    "losses_7d": 1,
+                    "top1_concentration": 0.1,
+                    "top3_concentration": 0.2,
+                    "longshot_profit_share": 0.1,
+                    "longshot_profit_markets": 1,
+                    "last_active_age_hours": 0,
+                    "historical_trades": 2000,
+                    "historical_markets": 200,
+                    "historical_pnl": 200,
+                    "dual_side_rate": 0,
+                    "late_bias_shift": 0,
+                    "winner_add_rate": 0,
+                }
+                with patch("poly_monitor.observer.build_metrics_from_api", return_value=api_metrics), patch.object(
+                    observer.store, "wallet_24h_counts", side_effect=AssertionError("extra 24h count query")
+                ):
+                    await observer._refresh_scores_if_due()
+                row = observer.store.conn.execute("SELECT metrics_json FROM candidate_scores WHERE wallet=?", (wallet,)).fetchone()
+                observer.store.close()
+                observer.writer.close()
+                return json.loads(row["metrics_json"])
+
+        metrics = asyncio.run(run_case())
+
+        self.assertEqual(metrics["markets_24h_source"], "local_observed")
+        self.assertEqual(metrics["markets_24h"], 1)
+        self.assertEqual(metrics["trades_24h"], 1)
+
+    def test_existing_candidate_without_local_trades_is_deleted_and_skipped(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1))
+                wallet = "0xstale"
+                observer.store.upsert_score(CandidateScore(wallet, "archive_candidate", 1.0, [], {"wallet": wallet, "historical_trades": 10}))
+                observer._last_score_event_state[wallet] = ("archive_candidate", 1.0)
+                metrics = await observer._metrics_for_wallet(wallet, "archive_candidate")
+                status = observer.store.candidate_status(wallet)
+                state = dict(observer._last_score_event_state)
+                observer.store.close()
+                observer.writer.close()
+                return metrics, status, state
+
+        metrics, status, state = asyncio.run(run_case())
+        self.assertIsNone(metrics)
+        self.assertIsNone(status)
+        self.assertNotIn("0xstale", state)
 
     def test_archive_metrics_cache_uses_dormant_ttl(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -356,7 +512,9 @@ class ObserverContextTests(unittest.TestCase):
                     "late_bias_shift": 0,
                     "winner_add_rate": 0,
                 }
-                with patch.object(observer.store, "wallet_trade_metrics", return_value=metrics), patch.object(
+                with patch.object(observer.store, "wallet_trade_metrics", return_value=metrics), patch(
+                    "poly_monitor.observer.build_metrics_from_api", side_effect=RuntimeError("api unavailable")
+                ), patch.object(
                     observer.store, "prune_low_sample_archives", return_value=0
                 ) as low_sample, patch.object(
                     observer.store, "prune_candidate_scores", return_value=0
@@ -506,6 +664,8 @@ class ObserverContextTests(unittest.TestCase):
             )
             now = time.monotonic()
             observer._last_data_cleanup = now - 10.0
+            observer.store.upsert_score(CandidateScore("0xold", "active_candidate", 1.0, [], {"wallet": "0xold"}))
+            observer.store.upsert_score(CandidateScore("0xfresh", "active_candidate", 1.0, [], {"wallet": "0xfresh"}))
             observer._metrics_cache = {
                 "0xold": type("_Entry", (), {"fetched_at": now - 6001, "metrics": {}})(),
                 "0xfresh": type("_Entry", (), {"fetched_at": now - 5999, "metrics": {}})(),
@@ -513,6 +673,37 @@ class ObserverContextTests(unittest.TestCase):
             try:
                 observer._cleanup_stale_data_if_due()
                 self.assertEqual(set(observer._metrics_cache), {"0xfresh"})
+            finally:
+                observer.store.close()
+                observer.writer.close()
+
+    def test_cleanup_stale_data_prunes_wallet_caches_to_known_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(
+                ObserverConfig(
+                    data_dir=Path(tmp),
+                    cleanup_interval_hours=0.001,
+                    active_metrics_ttl_sec=60,
+                    dormant_metrics_ttl_sec=600,
+                )
+            )
+            now = time.monotonic()
+            observer._last_data_cleanup = now - 10.0
+            known = "0xknown"
+            stale = "0xstale"
+            observer.store.upsert_score(CandidateScore(known, "active_candidate", 1.0, [], {"wallet": known}))
+            observer._last_score_event_state = {
+                known: ("active_candidate", 1.0),
+                stale: ("archive_candidate", 0.0),
+            }
+            observer._metrics_cache = {
+                known: type("_Entry", (), {"fetched_at": now, "metrics": {}})(),
+                stale: type("_Entry", (), {"fetched_at": now, "metrics": {}})(),
+            }
+            try:
+                observer._cleanup_stale_data_if_due()
+                self.assertEqual(set(observer._last_score_event_state), {known})
+                self.assertEqual(set(observer._metrics_cache), {known})
             finally:
                 observer.store.close()
                 observer.writer.close()
@@ -526,13 +717,51 @@ class ObserverContextTests(unittest.TestCase):
                 status_changed = CandidateScore("0xabc", "active_candidate", 1.0, [], {"wallet": "0xabc"})
                 rank_changed = CandidateScore("0xabc", "active_candidate", 2.25, [], {"wallet": "0xabc"})
 
-                self.assertTrue(observer._should_write_score_event(first))
-                self.assertFalse(observer._should_write_score_event(same))
-                self.assertTrue(observer._should_write_score_event(status_changed))
-                self.assertTrue(observer._should_write_score_event(rank_changed))
+                self.assertTrue(observer._score_event_changed(first))
+                observer._record_score_event(first)
+                self.assertFalse(observer._score_event_changed(same))
+                self.assertTrue(observer._score_event_changed(status_changed))
+                observer._record_score_event(status_changed)
+                self.assertTrue(observer._score_event_changed(rank_changed))
             finally:
                 observer.store.close()
                 observer.writer.close()
+
+    def test_score_event_changed_is_pure_until_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp)))
+            try:
+                first = CandidateScore("0xabc", "archive_candidate", 1.0, [], {"wallet": "0xabc"})
+                same = CandidateScore("0xabc", "archive_candidate", 1.0, [], {"wallet": "0xabc"})
+
+                self.assertTrue(observer._score_event_changed(first))
+                self.assertTrue(observer._score_event_changed(first))
+                self.assertEqual(observer._last_score_event_state, {})
+
+                observer._record_score_event(first)
+                self.assertFalse(observer._score_event_changed(same))
+            finally:
+                observer.store.close()
+                observer.writer.close()
+
+    def test_score_event_state_is_restored_from_candidate_scores_on_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ObserverConfig(data_dir=Path(tmp))
+            first = CryptoWalletObserver(config)
+            first.store.upsert_score(CandidateScore("0xabc", "active_candidate", 2.0, [], {"wallet": "0xabc"}))
+            first.store.close()
+            first.writer.close()
+
+            restarted = CryptoWalletObserver(config)
+            try:
+                same = CandidateScore("0xabc", "active_candidate", 2.0, [], {"wallet": "0xabc"})
+                changed = CandidateScore("0xabc", "active_candidate", 3.25, [], {"wallet": "0xabc"})
+
+                self.assertFalse(restarted._score_event_changed(same))
+                self.assertTrue(restarted._score_event_changed(changed))
+            finally:
+                restarted.store.close()
+                restarted.writer.close()
 
 
 if __name__ == "__main__":

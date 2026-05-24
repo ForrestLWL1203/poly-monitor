@@ -1,3 +1,4 @@
+import datetime as dt
 import tempfile
 import unittest
 from pathlib import Path
@@ -209,6 +210,32 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["settled_markets_7d"], 2)
         self.assertAlmostEqual(metrics["top1_concentration"], 1.0)
         self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
+
+    def test_settlement_z_timestamp_is_normalized_for_ledger_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                now_ts = int(dt.datetime(2026, 5, 24, 12, 0, tzinfo=dt.timezone.utc).timestamp())
+                market = "btc-updown-5m-zulu"
+                store.insert_trade(trade_row("0xabc", market, now_ts - 100, tx_hash="tx-z", outcome="Up", side="BUY", price=0.40, size=10))
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": f"cond-{market}",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-24T12:00:00Z",
+                        "completed": True,
+                    }
+                )
+
+                row = store.wallet_market_pnl_rows("0xabc")[0]
+                metrics = store.wallet_trade_metrics("0xABC", now_ts=now_ts)
+            finally:
+                store.close()
+
+        self.assertEqual(row["settled_at"], "2026-05-24T12:00:00+00:00")
+        self.assertEqual(metrics["settled_markets_7d"], 1)
 
 
 if __name__ == "__main__":

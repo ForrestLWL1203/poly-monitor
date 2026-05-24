@@ -49,6 +49,7 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
     losses = _num(metrics, "losses_7d")
     resolved_markets = wins + losses
     win_loss_failed = resolved_markets >= thresholds.min_resolved_markets_for_win_loss_check and wins < losses
+    check_pnl_7d = metrics.get("pnl_source") != "local_observed_ledger" or _num(metrics, "settled_markets_7d") >= 1
     checks = [
         ("trades_7d_below_threshold", _num(metrics, "trades_7d") < thresholds.min_trades_7d),
         ("markets_24h_below_threshold", markets_24h < thresholds.min_markets_24h),
@@ -58,7 +59,7 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
             metrics.get("pnl_source") == "local_observed_ledger"
             and _num(metrics, "settled_markets_7d") < thresholds.min_settled_markets_for_local_active,
         ),
-        ("pnl_7d_not_positive", _num(metrics, "pnl_7d") <= 0),
+        ("pnl_7d_not_positive", check_pnl_7d and _num(metrics, "pnl_7d") <= 0),
         ("pnl_30d_not_positive", _num(metrics, "pnl_30d") <= 0),
         ("wins_7d_below_losses", win_loss_failed),
         ("top1_concentration_high", _num(metrics, "top1_concentration") > thresholds.max_top1_concentration),

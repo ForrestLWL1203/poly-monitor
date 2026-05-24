@@ -14,6 +14,22 @@ def utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+def utc_iso(value: Any | None = None) -> str:
+    if value is None:
+        stamp = utc_now()
+    elif isinstance(value, dt.datetime):
+        stamp = value
+    else:
+        raw = str(value)
+        try:
+            stamp = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return raw
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    return stamp.astimezone(dt.timezone.utc).isoformat()
+
+
 def json_dumps(row: dict[str, Any]) -> str:
     return json.dumps(row, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
@@ -409,7 +425,7 @@ class ObserverStore:
                 winning_side,
                 row.get("settlement_open_price"),
                 row.get("settlement_close_price"),
-                str(row.get("settled_at") or utc_now().isoformat()),
+                utc_iso(row.get("settled_at")),
                 completed,
                 utc_now().isoformat(),
             ),
@@ -586,6 +602,11 @@ class ObserverStore:
             ),
         )
         self.conn.commit()
+
+    def delete_candidate_score(self, wallet: str) -> int:
+        cursor = self.conn.execute("DELETE FROM candidate_scores WHERE wallet=?", (wallet.lower(),))
+        self.conn.commit()
+        return int(cursor.rowcount or 0)
 
     def candidate_rows(self, *, limit: int = 30) -> dict[str, list[dict[str, Any]]]:
         out: dict[str, list[dict[str, Any]]] = {

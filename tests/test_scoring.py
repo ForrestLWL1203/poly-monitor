@@ -186,6 +186,33 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual(score_wallet(metrics, CandidateThresholds()).status, "active_candidate")
 
+    def test_score_wallet_rejects_negative_7d_pnl_on_api_metrics(self):
+        metrics = {
+            "wallet": "0xabc",
+            "trades_7d": 1000,
+            "markets_24h": 20,
+            "trades_30d": 1500,
+            "markets_30d": 200,
+            "pnl_7d": -100.0,
+            "pnl_30d": 50.0,
+            "pnl_source": "crypto_closed_positions",
+            "wins_7d": 30,
+            "losses_7d": 10,
+            "top1_concentration": 0.1,
+            "top3_concentration": 0.2,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 1500,
+            "historical_markets": 200,
+            "historical_pnl": 50.0,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertNotEqual(score.status, "active_candidate")
+        self.assertIn("pnl_7d_not_positive", score.reasons)
+
     def test_score_wallet_waits_for_local_settled_ledger_before_active(self):
         metrics = {
             "wallet": "0xabc",
@@ -212,6 +239,7 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual(score.status, "dormant_candidate")
         self.assertIn("settled_markets_7d_below_threshold", score.reasons)
+        self.assertNotIn("pnl_7d_not_positive", score.reasons)
 
     def test_score_wallet_archives_lossy_local_ledger_dormant_candidate(self):
         metrics = {
