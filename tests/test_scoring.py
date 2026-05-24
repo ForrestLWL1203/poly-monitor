@@ -213,6 +213,60 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(score.status, "dormant_candidate")
         self.assertIn("settled_markets_7d_below_threshold", score.reasons)
 
+    def test_score_wallet_archives_lossy_local_ledger_dormant_candidate(self):
+        metrics = {
+            "wallet": "0xabc",
+            "trades_7d": 1000,
+            "markets_24h": 20,
+            "trades_30d": 1000,
+            "pnl_7d": -50.0,
+            "pnl_30d": -50.0,
+            "pnl_source": "local_observed_ledger",
+            "wins_7d": 0,
+            "losses_7d": 1,
+            "settled_markets_7d": 1,
+            "settled_markets_30d": 1,
+            "top1_concentration": 0.0,
+            "top3_concentration": 0.0,
+            "longshot_profit_share": 0.0,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 1000,
+            "historical_markets": 20,
+            "historical_pnl": -50.0,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "archive_candidate")
+        self.assertIn("pnl_30d_not_positive", score.reasons)
+
+    def test_score_wallet_archives_concentrated_local_ledger_dormant_candidate(self):
+        metrics = {
+            "wallet": "0xabc",
+            "trades_7d": 1000,
+            "markets_24h": 20,
+            "trades_30d": 1000,
+            "pnl_7d": 10.0,
+            "pnl_30d": 10.0,
+            "pnl_source": "local_observed_ledger",
+            "wins_7d": 1,
+            "losses_7d": 0,
+            "settled_markets_7d": 1,
+            "settled_markets_30d": 1,
+            "top1_concentration": 0.90,
+            "top3_concentration": 0.90,
+            "longshot_profit_share": 0.0,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 1000,
+            "historical_markets": 20,
+            "historical_pnl": 10.0,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "archive_candidate")
+        self.assertIn("top1_concentration_high", score.reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

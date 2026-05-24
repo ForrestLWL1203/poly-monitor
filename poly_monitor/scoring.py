@@ -75,6 +75,11 @@ def _dormant_ok(metrics: dict[str, Any], thresholds: CandidateThresholds) -> boo
         and _num(metrics, "historical_trades") >= thresholds.dormant_min_historical_trades
         and _num(metrics, "historical_markets") >= thresholds.dormant_min_historical_markets
         and _num(metrics, "settled_markets_30d") < thresholds.min_settled_markets_for_local_active
+        and _num(metrics, "pnl_30d") >= 0
+        and (
+            _num(metrics, "settled_markets_30d") <= 0
+            or _num(metrics, "top1_concentration") <= thresholds.max_top1_concentration
+        )
     ):
         return True
     return (
