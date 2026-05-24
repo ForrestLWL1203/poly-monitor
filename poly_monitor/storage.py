@@ -136,6 +136,17 @@ class ObserverStore:
             )
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA temp_store=MEMORY")
+        self.conn.execute("PRAGMA mmap_size=268435456")
+        self.conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts ON trades(wallet, exchange_ts);
+            CREATE INDEX IF NOT EXISTS idx_trades_market_ts ON trades(market_slug, exchange_ts);
+            CREATE INDEX IF NOT EXISTS idx_trades_condition_ts ON trades(condition_id, exchange_ts);
+            CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(exchange_ts);
+            CREATE INDEX IF NOT EXISTS idx_scores_status_rank ON candidate_scores(status, rank_score DESC);
+            """
+        )
         self.conn.commit()
 
     def add_seed(self, wallet: str, label: str) -> None:
@@ -195,6 +206,13 @@ class ObserverStore:
             (limit,),
         ).fetchall()
         return [str(row["wallet"]) for row in rows]
+
+    def market_last_exchange_ts(self, condition_id: str) -> int:
+        row = self.conn.execute(
+            "SELECT MAX(exchange_ts) AS last_ts FROM trades WHERE condition_id=?",
+            (condition_id,),
+        ).fetchone()
+        return int(row["last_ts"] or 0) if row else 0
 
     def wallet_trade_metrics(self, wallet: str, *, now_ts: int | None = None) -> dict[str, Any]:
         now_value = now_ts or int(dt.datetime.now(dt.timezone.utc).timestamp())

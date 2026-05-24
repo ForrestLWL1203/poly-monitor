@@ -210,6 +210,36 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(result["removed_trades"], 3)
         self.assertEqual(remaining_wallets, ["0xnoise3", "0xnoise4"])
 
+    def test_storage_adds_query_indexes_and_market_last_exchange_ts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            store.insert_trade(
+                {
+                    "tx_hash": "0x1",
+                    "wallet": "0xwallet",
+                    "market_slug": "btc-updown-5m-1",
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "exchange_ts": 123,
+                    "outcome": "Up",
+                    "price": 0.5,
+                    "size": 2,
+                    "usdc": 1,
+                }
+            )
+            indexes = {
+                str(row["name"])
+                for row in store.conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+            }
+            last_ts = store.market_last_exchange_ts("0xcond")
+            store.close()
+
+        self.assertIn("idx_trades_wallet_ts", indexes)
+        self.assertIn("idx_trades_market_ts", indexes)
+        self.assertIn("idx_trades_condition_ts", indexes)
+        self.assertIn("idx_scores_status_rank", indexes)
+        self.assertEqual(last_ts, 123)
+
 
 if __name__ == "__main__":
     unittest.main()

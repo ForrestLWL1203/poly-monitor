@@ -291,10 +291,13 @@ class CryptoWalletObserver:
                 self.writer.write({"event": "api_error", "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "source": "market_trades", "symbol": symbol, "error": str(exc)})
                 continue
             observed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+            last_seen_ts = self.store.market_last_exchange_ts(window.condition_id)
             normalized: list[dict[str, Any]] = []
             for raw in raw_trades:
                 trade = normalize_trade(raw, symbol=symbol, observed_at=observed_at)
                 if trade["usdc"] < self.config.min_trade_usdc:
+                    continue
+                if last_seen_ts and int(trade["exchange_ts"]) < last_seen_ts:
                     continue
                 normalized.append(trade)
             for trade in self.store.insert_trades(normalized):

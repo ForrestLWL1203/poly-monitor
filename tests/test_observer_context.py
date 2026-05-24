@@ -123,6 +123,49 @@ class ObserverContextTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run_case()), "active_candidate")
 
+    def test_poll_trades_skips_rows_older_than_market_last_seen_ts(self):
+        async def run_case():
+            now = dt.datetime.now(dt.timezone.utc)
+            window = MarketWindow(
+                symbol="BTC",
+                slug="btc-updown-5m-1",
+                condition_id="0xcond",
+                question="Bitcoin Up or Down",
+                up_token="up",
+                down_token="down",
+                start_time=now,
+                end_time=now + dt.timedelta(minutes=5),
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp)), {})
+                observer.windows["BTC"] = window
+                observer.store.insert_trade(
+                    {
+                        "tx_hash": "0xexisting",
+                        "wallet": "0xold",
+                        "market_slug": window.slug,
+                        "condition_id": window.condition_id,
+                        "symbol": "BTC",
+                        "exchange_ts": 100,
+                        "outcome": "Up",
+                        "price": 0.5,
+                        "size": 2,
+                        "usdc": 1,
+                    }
+                )
+                raw = [
+                    {"transactionHash": "0xolder", "proxyWallet": "0xolder", "conditionId": "0xcond", "slug": window.slug, "timestamp": 99, "outcome": "Up", "price": 0.5, "size": 2},
+                    {"transactionHash": "0xnewer", "proxyWallet": "0xnewer", "conditionId": "0xcond", "slug": window.slug, "timestamp": 101, "outcome": "Down", "price": 0.4, "size": 3},
+                ]
+                with patch("poly_monitor.observer.fetch_market_trades", return_value=raw):
+                    await observer._poll_trades_once()
+                count = observer.store.conn.execute("SELECT COUNT(*) AS n FROM trades").fetchone()["n"]
+                observer.store.close()
+                observer.writer.close()
+                return count
+
+        self.assertEqual(asyncio.run(run_case()), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
