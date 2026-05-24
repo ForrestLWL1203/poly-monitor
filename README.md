@@ -27,9 +27,9 @@ python3 scripts/run_crypto_wallet_observer.py \
 
 ## Outputs
 
-- `data/raw/YYYY-MM-DD/events.jsonl`: compact raw events, 7-day rolling retention.
+- `data/raw/YYYY-MM-DD/events.jsonl`: compact raw events, 3-day rolling retention by default.
 - `data/state/observer.sqlite`: dedupe state, seeds, trades, candidate scores.
-- `data/reports/latest_candidates.json`: active/dormant/archive candidate lists.
+- `data/reports/latest_candidates.json`: active and dormant candidate lists.
 
 ## Dashboard
 
@@ -54,13 +54,10 @@ Optional environment variables:
 - `POLY_MONITOR_DASH_COOKIE_SECRET`: cookie signing secret; defaults to the
   dashboard password when unset.
 
-## Default Seeds
+## Optional Seeds
 
-- `username123123`: `0xd950a1a89f3e61a7a9efc85a46e440ce58c15e86`
-- `bonereaper`: `0xeebde7a0e019a63e6b476eb425505b7b3e6eba30`
-- `pbot-6`: `0x21d0a97aac03917e752857a551bbe5103a00e8d7`
-
-Override seeds with:
+The observer defaults to no pinned seed wallets. Add temporary manual watch
+addresses only when needed:
 
 ```bash
 python3 scripts/run_crypto_wallet_observer.py \
@@ -80,6 +77,40 @@ Active candidates require high recent BTC/ETH 5m activity and stable positive Pn
 - last activity within 48 hours.
 
 Historically strong but inactive wallets become `dormant_candidate`; long
-inactive wallets become `archive_candidate`. Archive storage is capped by
-`--max-archive-candidates` and low-signal wallets are not persisted just because
-they appeared in one live trade.
+inactive wallets are not retained by default. The dashboard focuses on a small
+elite pool: 15 active candidates and 10 dormant candidates by default. Non-core
+wallet trade rows are cleaned periodically and capped to the most recent 100
+wallets.
+
+## Sweden VPS Notes
+
+Sweden is the default VPS when a task says "VPS":
+
+```text
+host: 70.34.207.45
+user: root
+poly-monitor repo: /opt/poly-monitor/repo
+poly-monitor data: /opt/poly-monitor/data
+poly-monitor logs: /opt/poly-monitor/logs
+new-poly legacy repo: /opt/new-poly/repo
+new-poly legacy venv: /opt/new-poly/venv
+new-poly shared config: /opt/new-poly/shared/polymarket_config.json
+```
+
+Access is password-based. Use the ignored local password file with `SSHPASS`;
+never echo the password and never print `/opt/new-poly/shared/polymarket_config.json`.
+
+```bash
+SSHPASS="$(cat /Users/forrestliao/workspace/new-poly/docs/sweden-vps-secret.txt)" \
+  sshpass -e ssh root@70.34.207.45 'uname -a'
+```
+
+Useful read-only checks:
+
+```bash
+SSHPASS="$(cat /Users/forrestliao/workspace/new-poly/docs/sweden-vps-secret.txt)" \
+  sshpass -e ssh root@70.34.207.45 'pgrep -af "run_crypto_wallet_observer|run_dashboard|run_poly_source_bot|collect_poly_source_data" || true'
+
+SSHPASS="$(cat /Users/forrestliao/workspace/new-poly/docs/sweden-vps-secret.txt)" \
+  sshpass -e ssh root@70.34.207.45 'ls -ld /opt/poly-monitor /opt/new-poly 2>/dev/null || true'
+```

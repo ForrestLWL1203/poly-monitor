@@ -221,6 +221,47 @@ Do not commit, print, or log:
 If secrets are needed later, keep them outside tracked files and document only
 the path and required permissions, not the contents.
 
+## Sweden VPS Access
+
+When the user says "VPS" without specifying another host, default to the Sweden
+VPS:
+
+- Public IP: `70.34.207.45`
+- SSH user: `root`
+- Authentication: password-based.
+- Ignored local password file:
+  `/Users/forrestliao/workspace/new-poly/docs/sweden-vps-secret.txt`
+- Do not print, commit, or copy the password. If automation is required, pass it
+  through `SSHPASS` and `sshpass -e`.
+- Do not try the old Ireland/AWS PEM key against this host; public-key auth has
+  been observed failing for this VPS.
+
+Runtime layout for this project:
+
+- Repo: `/opt/poly-monitor/repo`
+- Data: `/opt/poly-monitor/data`
+- Logs: `/opt/poly-monitor/logs`
+
+Legacy `new-poly` layout still present on the same VPS:
+
+- Repo: `/opt/new-poly/repo`
+- Virtualenv: `/opt/new-poly/venv`
+- Shared sensitive account config:
+  `/opt/new-poly/shared/polymarket_config.json`
+
+Never print or copy `/opt/new-poly/shared/polymarket_config.json`; it may contain
+private keys, proxy wallet config, chain ID, and signature type.
+
+Useful read-only status checks:
+
+```bash
+SSHPASS="$(cat /Users/forrestliao/workspace/new-poly/docs/sweden-vps-secret.txt)" \
+  sshpass -e ssh root@70.34.207.45 'pgrep -af "run_crypto_wallet_observer|run_dashboard|run_poly_source_bot|collect_poly_source_data" || true'
+
+SSHPASS="$(cat /Users/forrestliao/workspace/new-poly/docs/sweden-vps-secret.txt)" \
+  sshpass -e ssh root@70.34.207.45 'ls -ld /opt/poly-monitor /opt/new-poly 2>/dev/null || true'
+```
+
 ## Engineering Rules
 
 - Keep this workspace independent from `new-poly` strategy code.
