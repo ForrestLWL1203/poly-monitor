@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import urllib.parse
 import urllib.request
 from typing import Any
+
+try:
+    import aiohttp
+except ImportError:  # pragma: no cover
+    aiohttp = None
 
 DATA_API = "https://data-api.polymarket.com"
 LB_API = "https://lb-api.polymarket.com"
@@ -77,6 +83,69 @@ def fetch_market_trades(condition_id: str, *, limit: int = 100, offset: int = 0,
         if not data:
             break
     return rows
+
+
+class AsyncDataApiClient:
+    def __init__(self, *, base_url: str = DATA_API, timeout: float = 10.0, retries: int = 3) -> None:
+        self.base_url = base_url
+        self.timeout = timeout
+        self.retries = retries
+        self._session = None
+
+    async def close(self) -> None:
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def _get_json(self, path: str, params: dict[str, Any]) -> Any:
+        if aiohttp is None:
+            raise RuntimeError("aiohttp package is required for async Data API requests")
+        if self._session is None:
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            self._session = aiohttp.ClientSession(
+                timeout=timeout,
+                headers={"User-Agent": "poly-monitor/0.1", "Accept": "application/json"},
+            )
+        last_error: Exception | None = None
+        url = self.base_url + path
+        for attempt in range(self.retries):
+            try:
+                async with self._session.get(url, params=params) as resp:
+                    resp.raise_for_status()
+                    return await resp.json(content_type=None)
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < self.retries:
+                    await asyncio.sleep(0.25 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
+
+    async def fetch_market_trades(self, condition_id: str, *, limit: int = 100, offset: int = 0, pages: int = 4) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str, str]] = set()
+        page_size = min(limit, 100)
+        page_count = max(max(1, pages), (max(1, limit) + page_size - 1) // page_size)
+        for page in range(page_count):
+            data = await self._get_json("/trades", {"market": condition_id, "limit": page_size, "offset": offset + page * page_size})
+            if not isinstance(data, list):
+                break
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                key = (
+                    str(row.get("transactionHash") or ""),
+                    str(row.get("proxyWallet") or ""),
+                    str(row.get("outcome") or ""),
+                    str(row.get("price") or ""),
+                    str(row.get("size") or ""),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
+            if not data:
+                break
+        return rows
 
 
 def fetch_user_activity(wallet: str, *, limit: int = 500, offset: int = 0, start: int | None = None, end: int | None = None) -> list[dict[str, Any]]:

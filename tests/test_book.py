@@ -30,11 +30,23 @@ class BookTests(unittest.TestCase):
         self.assertEqual(row["bid"], 0.49)
         self.assertEqual(row["ask"], 0.51)
         self.assertEqual(row["book_age_ms"], 150)
+        self.assertEqual(row["depth_levels"], 20)
         self.assertTrue(row["ask_targets"]["5"]["ok"])
         self.assertEqual(row["ask_targets"]["25"]["limit"], 0.52)
         self.assertIn("bid_targets", row)
         self.assertNotIn("bids", row)
         self.assertNotIn("asks", row)
+
+    def test_token_book_depth_sums_are_limited_to_top_levels(self):
+        row = token_book_summary(
+            bids=[(0.49, 10.0), (0.48, 1000.0)],
+            asks=[(0.51, 10.0), (0.52, 1000.0)],
+            book_age_ms=1,
+            depth_levels=1,
+        )
+
+        self.assertEqual(row["ask_depth_usdc"], 5.1)
+        self.assertEqual(row["bid_depth_usdc"], 4.9)
 
 
 if __name__ == "__main__":

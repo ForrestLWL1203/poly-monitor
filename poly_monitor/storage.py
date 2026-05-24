@@ -328,7 +328,17 @@ class ObserverStore:
             "archive_candidate": [],
         }
         rows = self.conn.execute(
-            "SELECT * FROM candidate_scores ORDER BY status ASC, rank_score DESC"
+            """
+            SELECT * FROM candidate_scores
+            ORDER BY
+                CASE status
+                    WHEN 'active_candidate' THEN 0
+                    WHEN 'dormant_candidate' THEN 1
+                    ELSE 2
+                END,
+                rank_score DESC,
+                updated_at DESC
+            """
         ).fetchall()
         for row in rows:
             status = str(row["status"])

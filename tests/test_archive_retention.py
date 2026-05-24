@@ -126,6 +126,21 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(len(rows["dormant_candidate"]), 30)
         self.assertEqual(rows["active_candidate"][0]["rank_score"], 34.0)
 
+    def test_candidate_rows_use_explicit_status_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            store.upsert_score(CandidateScore("0xarchive", "archive_candidate", 30, [], {"wallet": "0xarchive"}))
+            store.upsert_score(CandidateScore("0xdormant", "dormant_candidate", 20, [], {"wallet": "0xdormant"}))
+            store.upsert_score(CandidateScore("0xactive", "active_candidate", 10, [], {"wallet": "0xactive"}))
+            flat = [
+                row["status"]
+                for rows in store.candidate_rows(limit=30).values()
+                for row in rows
+            ]
+            store.close()
+
+        self.assertEqual(flat, ["active_candidate", "dormant_candidate", "archive_candidate"])
+
     def test_cleanup_inactive_wallet_data_keeps_core_candidates_and_removes_stale_noise(self):
         def trade(wallet: str, tx: str, ts: int) -> dict:
             return {

@@ -3,7 +3,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from poly_monitor.market import MarketWindow
 from poly_monitor.observer import CryptoWalletObserver, ObserverConfig, context_snapshot
@@ -198,14 +198,61 @@ class ObserverContextTests(unittest.TestCase):
                     {"transactionHash": "0xolder", "proxyWallet": "0xolder", "conditionId": "0xcond", "slug": window.slug, "timestamp": 99, "outcome": "Up", "price": 0.5, "size": 2},
                     {"transactionHash": "0xnewer", "proxyWallet": "0xnewer", "conditionId": "0xcond", "slug": window.slug, "timestamp": 101, "outcome": "Down", "price": 0.4, "size": 3},
                 ]
-                with patch("poly_monitor.observer.fetch_market_trades", return_value=raw):
-                    await observer._poll_trades_once()
+                observer.data_api.fetch_market_trades = AsyncMock(return_value=raw)
+                await observer._poll_trades_once()
                 count = observer.store.conn.execute("SELECT COUNT(*) AS n FROM trades").fetchone()["n"]
                 observer.store.close()
                 observer.writer.close()
                 return count
 
         self.assertEqual(asyncio.run(run_case()), 2)
+
+    def test_context_snapshot_cooldown_is_per_wallet_and_market(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(
+                ObserverConfig(data_dir=Path(tmp), context_snapshot_cooldown_sec=5.0),
+                {},
+            )
+            try:
+                trade = {"wallet": "0xabc", "market_slug": "btc-updown-5m-1"}
+                self.assertTrue(observer._should_write_context_snapshot(trade))
+                self.assertFalse(observer._should_write_context_snapshot(trade))
+                self.assertTrue(observer._should_write_context_snapshot({"wallet": "0xabc", "market_slug": "btc-updown-5m-2"}))
+            finally:
+                observer.store.close()
+                observer.writer.close()
+
+    def test_due_wrappers_throttle_noop_tasks(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(
+                    ObserverConfig(
+                        data_dir=Path(tmp),
+                        window_refresh_sec=60.0,
+                        open_price_refresh_sec=60.0,
+                        settlement_check_sec=60.0,
+                        poll_sec=60.0,
+                    ),
+                    {},
+                )
+                observer._last_window_refresh = 10**9
+                observer._last_open_price_refresh = 10**9
+                observer._last_settlement_check = 10**9
+                observer._last_trade_poll = 10**9
+                with patch.object(observer, "_refresh_windows", new=AsyncMock()) as windows, patch.object(
+                    observer, "_refresh_window_open_prices", new=AsyncMock()
+                ) as open_prices, patch.object(observer, "_write_pending_settlements", new=AsyncMock()) as settlements, patch.object(
+                    observer, "_poll_trades_once", new=AsyncMock()
+                ) as trades:
+                    await observer._refresh_windows_if_due()
+                    await observer._refresh_window_open_prices_if_due()
+                    await observer._write_pending_settlements_if_due()
+                    await observer._poll_trades_if_due()
+                observer.store.close()
+                observer.writer.close()
+                return windows.await_count, open_prices.await_count, settlements.await_count, trades.await_count
+
+        self.assertEqual(asyncio.run(run_case()), (0, 0, 0, 0))
 
 
 if __name__ == "__main__":

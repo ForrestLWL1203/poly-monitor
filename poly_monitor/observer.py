@@ -10,7 +10,7 @@ from typing import Any
 from .book import compact_float, token_book_summary
 from .clob_stream import ClobBookStream
 from .crypto_price import fetch_crypto_price_api
-from .data_api import fetch_market_trades, normalize_trade
+from .data_api import AsyncDataApiClient, normalize_trade
 from .market import MarketSeries, MarketWindow, find_current_or_next_window
 from .price_feed import ChainlinkPriceFeed
 from .scoring import CandidateThresholds, score_wallet
@@ -35,6 +35,11 @@ class ObserverConfig:
     max_non_candidate_wallets: int = 100
     report_refresh_sec: float = 60.0
     book_max_age_sec: float = 3.0
+    window_refresh_sec: float = 15.0
+    open_price_refresh_sec: float = 5.0
+    settlement_check_sec: float = 30.0
+    raw_cleanup_interval_hours: float = 1.0
+    context_snapshot_cooldown_sec: float = 5.0
     open_price_min_age_sec: float = 5.0
     settlement_delay_sec: float = 150.0
     settlement_retry_sec: float = 30.0
@@ -137,6 +142,7 @@ class CryptoWalletObserver:
         for wallet, label in seeds.items():
             self.store.add_seed(wallet, label)
         self.writer = JsonlEventWriter(config.data_dir)
+        self.data_api = AsyncDataApiClient()
         self.windows: dict[str, MarketWindow] = {}
         self.stream = ClobBookStream()
         self.feeds = {symbol: ChainlinkPriceFeed(f"{symbol.lower()}/usd") for symbol in config.symbols}
@@ -145,10 +151,16 @@ class CryptoWalletObserver:
         self._last_score_refresh = 0.0
         self._last_report_refresh = 0.0
         self._last_data_cleanup = 0.0
+        self._last_raw_cleanup = 0.0
+        self._last_window_refresh = 0.0
+        self._last_open_price_refresh = 0.0
+        self._last_settlement_check = 0.0
+        self._last_trade_poll = 0.0
         self._active_score_cursor = 0
         self._discovery_score_cursor = 0
         self._active_snapshot_wallets: set[str] = set()
         self._metrics_cache: dict[str, _MetricsCacheEntry] = {}
+        self._last_context_snapshot: dict[tuple[str, str], float] = {}
         self._refresh_candidate_caches()
 
     async def run(self) -> int:
@@ -157,25 +169,84 @@ class CryptoWalletObserver:
             for feed in self.feeds.values():
                 await feed.start()
             await self._refresh_windows(initial=True)
+            self._last_window_refresh = time.monotonic()
             await self.stream.connect(self._all_tokens())
             while True:
-                await self._refresh_windows()
-                await self._refresh_window_open_prices()
-                await self._write_pending_settlements()
-                await self._poll_trades_once()
+                await self._refresh_windows_if_due()
+                await self._refresh_window_open_prices_if_due()
+                await self._write_pending_settlements_if_due()
+                await self._poll_trades_if_due()
                 await self._refresh_scores_if_due()
                 self._write_report_if_due()
                 self._cleanup_stale_data_if_due()
+                self._cleanup_raw_retention_if_due()
                 if self.config.seconds is not None and time.monotonic() - started >= self.config.seconds:
                     break
-                await asyncio.sleep(self.config.poll_sec)
+                await asyncio.sleep(self._next_sleep_delay(started))
             self._write_report(force=True)
             return 0
         finally:
             self.writer.close()
             self.store.close()
+            await self.data_api.close()
             await self.stream.close()
             await asyncio.gather(*(feed.stop() for feed in self.feeds.values()), return_exceptions=True)
+
+    async def _refresh_windows_if_due(self) -> None:
+        if time.monotonic() - self._last_window_refresh < self.config.window_refresh_sec:
+            return
+        self._last_window_refresh = time.monotonic()
+        await self._refresh_windows()
+
+    async def _refresh_window_open_prices_if_due(self) -> None:
+        if not self._has_missing_open_prices():
+            return
+        if time.monotonic() - self._last_open_price_refresh < self.config.open_price_refresh_sec:
+            return
+        self._last_open_price_refresh = time.monotonic()
+        await self._refresh_window_open_prices()
+
+    async def _write_pending_settlements_if_due(self) -> None:
+        if time.monotonic() - self._last_settlement_check < self.config.settlement_check_sec:
+            return
+        self._last_settlement_check = time.monotonic()
+        await self._write_pending_settlements()
+
+    async def _poll_trades_if_due(self) -> None:
+        if time.monotonic() - self._last_trade_poll < self.config.poll_sec:
+            return
+        self._last_trade_poll = time.monotonic()
+        await self._poll_trades_once()
+
+    def _next_sleep_delay(self, started: float) -> float:
+        now = time.monotonic()
+        due_times = [
+            self._last_trade_poll + self.config.poll_sec,
+            self._last_window_refresh + self.config.window_refresh_sec,
+            self._last_score_refresh + self.config.score_refresh_sec,
+            self._last_report_refresh + self.config.report_refresh_sec,
+        ]
+        if self._has_missing_open_prices():
+            due_times.append(self._last_open_price_refresh + self.config.open_price_refresh_sec)
+        if self.pending_settlements:
+            due_times.append(self._last_settlement_check + self.config.settlement_check_sec)
+        cleanup_interval = max(0.0, self.config.cleanup_interval_hours) * 3600.0
+        if cleanup_interval > 0:
+            due_times.append(self._last_data_cleanup + cleanup_interval)
+        raw_cleanup_interval = max(0.0, self.config.raw_cleanup_interval_hours) * 3600.0
+        if raw_cleanup_interval > 0:
+            due_times.append(self._last_raw_cleanup + raw_cleanup_interval)
+        if self.config.seconds is not None:
+            due_times.append(started + self.config.seconds)
+        delay = min(due_times) - now
+        return max(0.05, min(delay, 5.0))
+
+    def _has_missing_open_prices(self) -> bool:
+        return any(
+            refs.get("open") is None
+            for window in self.windows.values()
+            for refs in [self.window_reference_prices.setdefault(window.slug, {"open": None, "close": None})]
+        )
 
     async def _refresh_windows(self, *, initial: bool = False) -> None:
         changed = False
@@ -302,7 +373,7 @@ class CryptoWalletObserver:
     async def _poll_trades_once(self) -> None:
         for symbol, window in list(self.windows.items()):
             try:
-                raw_trades = await asyncio.to_thread(fetch_market_trades, window.condition_id, limit=500, offset=0)
+                raw_trades = await self.data_api.fetch_market_trades(window.condition_id, limit=500, offset=0)
             except Exception as exc:
                 self.writer.write({"event": "api_error", "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "source": "market_trades", "symbol": symbol, "error": str(exc)})
                 continue
@@ -320,7 +391,7 @@ class CryptoWalletObserver:
                 should_snapshot = self._should_snapshot(trade)
                 if self._should_write_raw_trade(trade):
                     self.writer.write(trade)
-                if should_snapshot:
+                if should_snapshot and self._should_write_context_snapshot(trade):
                     self.writer.write(context_snapshot(
                         trade=trade,
                         window=window,
@@ -336,6 +407,15 @@ class CryptoWalletObserver:
         if wallet in self.seeds:
             return True
         return wallet in self._active_snapshot_wallets
+
+    def _should_write_context_snapshot(self, trade: dict[str, Any]) -> bool:
+        key = (str(trade.get("wallet") or "").lower(), str(trade.get("market_slug") or ""))
+        now = time.monotonic()
+        last = self._last_context_snapshot.get(key)
+        if last is not None and now - last < self.config.context_snapshot_cooldown_sec:
+            return False
+        self._last_context_snapshot[key] = now
+        return True
 
     def _should_write_raw_trade(self, trade: dict[str, Any]) -> bool:
         return self._should_snapshot(trade)
@@ -467,6 +547,14 @@ class CryptoWalletObserver:
                 "inactive_cutoff_ts": cutoff_ts,
                 **result,
             })
+
+    def _cleanup_raw_retention_if_due(self) -> None:
+        interval_sec = max(0.0, self.config.raw_cleanup_interval_hours) * 3600.0
+        if interval_sec <= 0:
+            return
+        if time.monotonic() - self._last_raw_cleanup < interval_sec:
+            return
+        self._last_raw_cleanup = time.monotonic()
         cleanup_raw_retention(self.config.data_dir / "raw", retention_days=self.config.raw_retention_days)
 
     def _write_report_if_due(self) -> None:

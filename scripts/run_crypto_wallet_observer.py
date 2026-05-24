@@ -40,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-non-candidate-wallets", type=int, default=100)
     parser.add_argument("--report-refresh-sec", type=float, default=60.0)
     parser.add_argument("--book-max-age-sec", type=float, default=3.0)
+    parser.add_argument("--window-refresh-sec", type=float, default=15.0)
+    parser.add_argument("--open-price-refresh-sec", type=float, default=5.0)
+    parser.add_argument("--settlement-check-sec", type=float, default=30.0)
+    parser.add_argument("--raw-cleanup-interval-hours", type=float, default=1.0)
+    parser.add_argument("--context-snapshot-cooldown-sec", type=float, default=5.0)
     parser.add_argument("--open-price-min-age-sec", type=float, default=5.0)
     parser.add_argument("--settlement-delay-sec", type=float, default=150.0)
     parser.add_argument("--settlement-retry-sec", type=float, default=30.0)
@@ -68,6 +73,11 @@ async def async_main() -> int:
         max_non_candidate_wallets=args.max_non_candidate_wallets,
         report_refresh_sec=args.report_refresh_sec,
         book_max_age_sec=args.book_max_age_sec,
+        window_refresh_sec=args.window_refresh_sec,
+        open_price_refresh_sec=args.open_price_refresh_sec,
+        settlement_check_sec=args.settlement_check_sec,
+        raw_cleanup_interval_hours=args.raw_cleanup_interval_hours,
+        context_snapshot_cooldown_sec=args.context_snapshot_cooldown_sec,
         open_price_min_age_sec=args.open_price_min_age_sec,
         settlement_delay_sec=args.settlement_delay_sec,
         settlement_retry_sec=args.settlement_retry_sec,

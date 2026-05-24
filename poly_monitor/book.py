@@ -44,9 +44,12 @@ def token_book_summary(
     asks: list[tuple[float, float]],
     book_age_ms: int | None,
     targets: Iterable[float] = (5.0, 25.0, 100.0),
+    depth_levels: int = 20,
 ) -> dict[str, Any]:
     best_bid = bids[0][0] if bids else None
     best_ask = asks[0][0] if asks else None
+    depth_bids = bids[:depth_levels]
+    depth_asks = asks[:depth_levels]
     return {
         "bid": compact_float(best_bid),
         "ask": compact_float(best_ask),
@@ -54,8 +57,9 @@ def token_book_summary(
         "book_age_ms": book_age_ms,
         "bid_levels": len(bids),
         "ask_levels": len(asks),
-        "ask_depth_usdc": compact_float(sum(price * size for price, size in asks), 4),
-        "bid_depth_usdc": compact_float(sum(price * size for price, size in bids), 4),
+        "depth_levels": depth_levels,
+        "ask_depth_usdc": compact_float(sum(price * size for price, size in depth_asks), 4),
+        "bid_depth_usdc": compact_float(sum(price * size for price, size in depth_bids), 4),
         "ask_targets": {f"{target:g}": fill_for_notional(asks, float(target)) for target in targets},
         "bid_targets": {f"{target:g}": fill_for_notional([(1 - price, size) for price, size in bids], float(target)) for target in targets},
     }
