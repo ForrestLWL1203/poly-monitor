@@ -6,6 +6,8 @@ import hmac
 import json
 import mimetypes
 import os
+import signal
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -116,6 +118,32 @@ def _cached_status(data_dir: Path, *, ttl: float = _STATUS_TTL) -> dict[str, Any
         return payload
 
 
+def _stop_observer_processes() -> list[int]:
+    try:
+        output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    killed: list[int] = []
+    current_pid = os.getpid()
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, args = stripped.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == current_pid or "run_crypto_wallet_observer.py" not in args:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        killed.append(pid)
+    return killed
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     dashboard_config: DashboardConfig
 
@@ -141,6 +169,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/logout":
             self._logout()
+            return
+        if parsed.path == "/api/stop-observer":
+            if not self._authenticated():
+                self._json({"error": "unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            killed = _stop_observer_processes()
+            self._json({"ok": True, "killed_pids": killed, "count": len(killed)})
             return
         self._json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 

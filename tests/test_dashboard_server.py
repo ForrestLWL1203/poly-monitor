@@ -184,6 +184,46 @@ class DashboardServerTests(unittest.TestCase):
                     self.assertEqual(calls, 2)
                 finally:
                     server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_stop_observer_api_requires_auth_and_stops_processes(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("poly_monitor.dashboard.server._stop_observer_processes", return_value=[1234]) as stop:
+                server = create_server(
+                    DashboardConfig(
+                        data_dir=Path(tmp),
+                        host="127.0.0.1",
+                        port=0,
+                        username="admin",
+                        password="secret",
+                        cookie_secret="test-secret",
+                    )
+                )
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base = f"http://127.0.0.1:{server.server_address[1]}"
+                    unauth_req = urllib.request.Request(f"{base}/api/stop-observer", data=b"", method="POST")
+                    with self.assertRaises(urllib.error.HTTPError) as unauth:
+                        urllib.request.urlopen(unauth_req, timeout=3)
+                    self.assertEqual(unauth.exception.code, 401)
+                    self.assertEqual(stop.call_count, 0)
+
+                    cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                    req = urllib.request.Request(
+                        f"{base}/api/stop-observer",
+                        data=b"",
+                        headers={"Cookie": cookie},
+                        method="POST",
+                    )
+                    payload = json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+                    self.assertEqual(payload, {"ok": True, "killed_pids": [1234], "count": 1})
+                    self.assertEqual(stop.call_count, 1)
+                finally:
+                    server.shutdown()
                     server.server_close()
                     thread.join(timeout=3)
 

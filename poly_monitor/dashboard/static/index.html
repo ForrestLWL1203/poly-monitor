@@ -16,6 +16,7 @@
       --good: #4fc07a;
       --warn: #d9ae4f;
       --bad: #e16868;
+      --bad-bg: #3a2023;
       --accent: #64b5d9;
       --chip: #26313a;
     }
@@ -140,6 +141,18 @@
       min-width: 34px;
       height: 34px;
       padding: 0 9px;
+    }
+    .danger-button {
+      border-color: #794047;
+      background: var(--bad-bg);
+      color: #ffd8dc;
+      min-width: 34px;
+      height: 34px;
+      padding: 0 10px;
+    }
+    .danger-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.65;
     }
     .table-wrap {
       overflow-x: auto;
@@ -293,6 +306,7 @@
         <div id="dataDir" class="subtle"></div>
       </div>
       <div>
+        <button id="stopObserver" class="icon-button danger-button" title="紧急停止数据采集">■</button>
         <button id="refresh" class="icon-button" title="刷新">↻</button>
         <button id="logout" class="icon-button" title="退出">⎋</button>
       </div>
@@ -512,6 +526,28 @@
       showLogin();
     }
 
+    async function stopObserver() {
+      const ok = window.confirm("确定停止数据采集进程？Dashboard 会继续运行。");
+      if (!ok) return;
+      const button = $("stopObserver");
+      button.disabled = true;
+      const previousTitle = button.title;
+      button.title = "正在停止数据采集";
+      try {
+        const result = await api("/api/stop-observer", { method: "POST" });
+        button.title = result.count > 0 ? `已停止 ${result.count} 个采集进程` : "没有正在运行的采集进程";
+        await load();
+      } catch (err) {
+        button.title = "停止失败";
+        throw err;
+      } finally {
+        setTimeout(() => {
+          button.disabled = false;
+          button.title = previousTitle;
+        }, 4000);
+      }
+    }
+
     async function load() {
       statusData = await api("/api/status");
       showApp();
@@ -666,6 +702,7 @@
 
     $("loginButton").addEventListener("click", login);
     $("password").addEventListener("keydown", (event) => { if (event.key === "Enter") login(); });
+    $("stopObserver").addEventListener("click", () => stopObserver().catch(() => alert("停止失败，请检查 dashboard 日志")));
     $("refresh").addEventListener("click", load);
     $("logout").addEventListener("click", logout);
     load().catch(() => showLogin());
