@@ -43,8 +43,6 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
     longshot_high = _num(metrics, "longshot_profit_share") > thresholds.max_longshot_profit_share
     repeat_longshot = _num(metrics, "longshot_profit_markets") >= thresholds.min_repeat_longshot_profit_markets
     markets_24h = _num(metrics, "markets_24h", _num(metrics, "markets_7d"))
-    if metrics.get("markets_24h_lower_bound") and markets_24h > 0:
-        markets_24h = max(markets_24h, float(thresholds.min_markets_24h))
     wins = _num(metrics, "wins_7d")
     losses = _num(metrics, "losses_7d")
     resolved_markets = wins + losses
