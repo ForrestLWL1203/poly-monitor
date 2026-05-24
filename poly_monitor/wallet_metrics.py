@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import datetime as dt
+from collections import defaultdict
+from typing import Any
+
+from .data_api import fetch_closed_positions, fetch_user_activity, fetch_user_profit
+
+
+def is_crypto_5m_row(row: dict[str, Any]) -> bool:
+    slug = str(row.get("slug") or row.get("eventSlug") or "")
+    return slug.startswith(("btc-updown-5m-", "eth-updown-5m-"))
+
+
+def row_slug(row: dict[str, Any]) -> str:
+    return str(row.get("slug") or row.get("eventSlug") or "")
+
+
+def _timestamp_from_end_date(row: dict[str, Any]) -> int | None:
+    raw = row.get("endDate")
+    if not raw:
+        return None
+    try:
+        value = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return int(value.timestamp())
+
+
+def _concentration(values: list[float], top_n: int) -> float:
+    positives = sorted([value for value in values if value > 0], reverse=True)
+    total = sum(positives)
+    if total <= 0:
+        return 1.0
+    return sum(positives[:top_n]) / total
+
+
+def behavior_metrics(trades: list[dict[str, Any]], closed: list[dict[str, Any]]) -> dict[str, Any]:
+    by_market: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in trades:
+        by_market[row_slug(row)].append(row)
+    if not by_market:
+        return {"dual_side_rate": 0.0, "late_bias_shift": 0.0, "winner_add_rate": 0.0}
+
+    dual_count = 0
+    late_bias_count = 0
+    winner_match_count = 0
+    winner_known_count = 0
+    winners = {
+        row_slug(row) or str(row.get("title") or ""): str(row.get("outcome") or "")
+        for row in closed
+        if float(row.get("realizedPnl") or row.get("cashPnl") or 0.0) > 0
+    }
+    for slug, rows in by_market.items():
+        outcomes = {str(row.get("outcome") or "") for row in rows if row.get("outcome")}
+        if len(outcomes) > 1:
+            dual_count += 1
+        ordered = sorted(rows, key=lambda row: int(row.get("timestamp") or 0))
+        cutoff_idx = max(0, len(ordered) // 2)
+        late_rows = ordered[cutoff_idx:]
+        late_by_outcome: dict[str, float] = defaultdict(float)
+        for row in late_rows:
+            late_by_outcome[str(row.get("outcome") or "")] += float(row.get("usdcSize") or 0.0)
+        late_total = sum(late_by_outcome.values())
+        dominant_outcome = None
+        if late_total > 0 and late_by_outcome:
+            dominant_outcome, dominant_usdc = max(late_by_outcome.items(), key=lambda item: item[1])
+            if dominant_usdc / late_total >= 0.60:
+                late_bias_count += 1
+        winner = winners.get(slug)
+        if winner:
+            winner_known_count += 1
+            if dominant_outcome == winner:
+                winner_match_count += 1
+    market_count = len(by_market)
+    return {
+        "dual_side_rate": round(dual_count / market_count, 6),
+        "late_bias_shift": round(late_bias_count / market_count, 6),
+        "winner_add_rate": round(winner_match_count / winner_known_count, 6) if winner_known_count else 0.0,
+    }
+
+
+def _profile_profit(wallet: str, window: str) -> tuple[float | None, str | None, str | None]:
+    try:
+        row = fetch_user_profit(wallet, window=window)
+    except Exception as exc:
+        return None, None, f"{type(exc).__name__}: {exc}"
+    if not row:
+        return None, None, "empty_profit_response"
+    try:
+        amount = float(row.get("amount") or 0.0)
+    except (TypeError, ValueError):
+        return None, None, "invalid_profit_amount"
+    name = str(row.get("name") or row.get("pseudonym") or "")
+    return amount, name, None
+
+
+def build_metrics_from_api(wallet: str, *, now_ts: int | None = None, activity_pages: int = 3, closed_pages: int = 4) -> dict[str, Any]:
+    now = now_ts or int(dt.datetime.now(dt.timezone.utc).timestamp())
+    activity: list[dict[str, Any]] = []
+    activity_page_cap_hit = False
+    for page in range(activity_pages):
+        try:
+            batch = fetch_user_activity(wallet, limit=500, offset=page * 500, start=now - 30 * 86400, end=now)
+        except Exception:
+            if activity:
+                break
+            raise
+        if not batch:
+            break
+        activity.extend(batch)
+        if len(batch) < 500:
+            break
+        if page + 1 == activity_pages:
+            activity_page_cap_hit = True
+    trades = [row for row in activity if row.get("type") == "TRADE" and is_crypto_5m_row(row)]
+    closed_raw: list[dict[str, Any]] = []
+    for page in range(closed_pages):
+        try:
+            batch = fetch_closed_positions(wallet, limit=50, offset=page * 50)
+        except Exception:
+            if closed_raw:
+                break
+            raise
+        if not batch:
+            break
+        closed_raw.extend(batch)
+        if len(batch) < 50:
+            break
+    closed = [row for row in closed_raw if is_crypto_5m_row(row)]
+    cutoff_7d = now - 7 * 86400
+    cutoff_30d = now - 30 * 86400
+    cutoff_24h = now - 86400
+    trades_24h = [row for row in trades if int(row.get("timestamp") or 0) >= cutoff_24h]
+    trades_7d = [row for row in trades if int(row.get("timestamp") or 0) >= cutoff_7d]
+    trades_30d = [row for row in trades if int(row.get("timestamp") or 0) >= cutoff_30d]
+    pnl_by_market_7d: dict[str, float] = defaultdict(float)
+    pnl_by_market_30d: dict[str, float] = defaultdict(float)
+    longshot_profit_30d = 0.0
+    longshot_profit_markets: set[str] = set()
+    for row in closed:
+        end_ts = _timestamp_from_end_date(row) or now
+        pnl = float(row.get("realizedPnl") or row.get("cashPnl") or 0.0)
+        slug = row_slug(row)
+        if end_ts >= cutoff_7d:
+            pnl_by_market_7d[slug] += pnl
+        if end_ts >= cutoff_30d:
+            pnl_by_market_30d[slug] += pnl
+            if pnl > 0 and float(row.get("avgPrice") or 1.0) < 0.15:
+                longshot_profit_30d += pnl
+                longshot_profit_markets.add(slug)
+    market_pnls_7d = list(pnl_by_market_7d.values())
+    market_pnls_30d = list(pnl_by_market_30d.values())
+    crypto_closed_pnl_estimate_7d = round(sum(market_pnls_7d), 6)
+    crypto_closed_pnl_estimate_30d = round(sum(market_pnls_30d), 6)
+    profile_pnl_7d, profile_name_7d, profile_error_7d = _profile_profit(wallet, "7d")
+    profile_pnl_30d, profile_name_30d, profile_error_30d = _profile_profit(wallet, "30d")
+    pnl_7d = profile_pnl_7d if profile_pnl_7d is not None else crypto_closed_pnl_estimate_7d
+    pnl_30d = profile_pnl_30d if profile_pnl_30d is not None else crypto_closed_pnl_estimate_30d
+    pnl_source = "lb-api" if profile_pnl_7d is not None and profile_pnl_30d is not None else "closed_positions_estimate"
+    total_profit_30d = sum(value for value in market_pnls_30d if value > 0)
+    last_ts = max([int(row.get("timestamp") or 0) for row in trades] or [0])
+    trade_markets_24h = {row_slug(row) for row in trades_24h if row_slug(row)}
+    trade_markets_7d = {row_slug(row) for row in trades_7d if row_slug(row)}
+    trade_markets_30d = {row_slug(row) for row in trades_30d if row_slug(row)}
+    all_trade_markets = {row_slug(row) for row in trades if row_slug(row)}
+    metrics = {
+        "wallet": wallet.lower(),
+        "trades_24h": len(trades_24h),
+        "markets_24h": len(trade_markets_24h),
+        "markets_24h_lower_bound": activity_page_cap_hit and bool(trades_24h),
+        "trades_7d": len(trades_7d),
+        "markets_7d": len(trade_markets_7d),
+        "trades_30d": len(trades_30d),
+        "markets_30d": len(trade_markets_30d),
+        "pnl_7d": round(pnl_7d, 6),
+        "pnl_30d": round(pnl_30d, 6),
+        "pnl_source": pnl_source,
+        "profile_pnl_7d": round(profile_pnl_7d, 6) if profile_pnl_7d is not None else None,
+        "profile_pnl_30d": round(profile_pnl_30d, 6) if profile_pnl_30d is not None else None,
+        "profile_name": profile_name_30d or profile_name_7d,
+        "profile_pnl_error": "; ".join(error for error in [profile_error_7d, profile_error_30d] if error),
+        "crypto_closed_pnl_estimate_7d": crypto_closed_pnl_estimate_7d,
+        "crypto_closed_pnl_estimate_30d": crypto_closed_pnl_estimate_30d,
+        "wins_7d": sum(1 for value in market_pnls_7d if value > 0),
+        "losses_7d": sum(1 for value in market_pnls_7d if value < 0),
+        "top1_concentration": round(_concentration(market_pnls_30d, 1), 6),
+        "top3_concentration": round(_concentration(market_pnls_30d, 3), 6),
+        "longshot_profit_share": round(longshot_profit_30d / total_profit_30d, 6) if total_profit_30d > 0 else 0.0,
+        "longshot_profit_markets": len(longshot_profit_markets),
+        "last_active_age_hours": round((now - last_ts) / 3600.0, 3) if last_ts else 999999.0,
+        "historical_trades": len(trades),
+        "historical_markets": len(all_trade_markets),
+        "historical_pnl": round(pnl_30d, 6),
+    }
+    metrics.update(behavior_metrics(trades, closed))
+    return metrics

@@ -1,0 +1,78 @@
+import unittest
+from unittest.mock import patch
+
+from poly_monitor.wallet_metrics import behavior_metrics, build_metrics_from_api
+
+
+class WalletMetricsTests(unittest.TestCase):
+    def test_behavior_metrics_detects_dual_side_and_late_bias(self):
+        trades = [
+            {"slug": "btc-updown-5m-1", "timestamp": 1, "outcome": "Up", "usdcSize": 10},
+            {"slug": "btc-updown-5m-1", "timestamp": 2, "outcome": "Down", "usdcSize": 10},
+            {"slug": "btc-updown-5m-1", "timestamp": 3, "outcome": "Down", "usdcSize": 30},
+            {"slug": "btc-updown-5m-1", "timestamp": 4, "outcome": "Down", "usdcSize": 30},
+        ]
+        closed = [{"slug": "btc-updown-5m-1", "outcome": "Down", "realizedPnl": 20}]
+
+        metrics = behavior_metrics(trades, closed)
+
+        self.assertEqual(metrics["dual_side_rate"], 1.0)
+        self.assertEqual(metrics["late_bias_shift"], 1.0)
+        self.assertEqual(metrics["winner_add_rate"], 1.0)
+
+    def test_build_metrics_uses_recent_activity_markets_for_activity_counts(self):
+        activity = [
+            {"type": "TRADE", "slug": "btc-updown-5m-100", "timestamp": 1000, "outcome": "Up", "usdcSize": 10},
+            {"type": "TRADE", "slug": "btc-updown-5m-100", "timestamp": 1001, "outcome": "Down", "usdcSize": 10},
+        ]
+        closed = [
+            {"slug": "btc-updown-5m-100", "endDate": "1970-01-01T00:16:40+00:00", "realizedPnl": 1, "avgPrice": 0.5, "outcome": "Up"},
+            {"slug": "eth-updown-5m-200", "endDate": "1970-01-01T00:16:45+00:00", "realizedPnl": 2, "avgPrice": 0.5, "outcome": "Down"},
+        ]
+
+        with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=[activity, []]), patch(
+            "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_profit",
+            side_effect=[
+                {"amount": 12.5, "name": "seed"},
+                {"amount": 34.5, "name": "seed"},
+            ],
+        ):
+            metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=2, closed_pages=2)
+
+        self.assertEqual(metrics["trades_7d"], 2)
+        self.assertEqual(metrics["markets_24h"], 1)
+        self.assertEqual(metrics["markets_7d"], 1)
+        self.assertEqual(metrics["markets_30d"], 1)
+        self.assertEqual(metrics["historical_markets"], 1)
+        self.assertEqual(metrics["wins_7d"], 2)
+        self.assertEqual(metrics["pnl_7d"], 12.5)
+        self.assertEqual(metrics["pnl_30d"], 34.5)
+        self.assertEqual(metrics["pnl_source"], "lb-api")
+        self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 3)
+
+    def test_activity_metrics_mark_24h_windows_as_lower_bound_when_page_cap_hit(self):
+        first_page = [
+            {"type": "TRADE", "slug": f"btc-updown-5m-{100 + idx}", "timestamp": 1000 + idx, "outcome": "Up", "usdcSize": 1}
+            for idx in range(500)
+        ]
+        closed = [{"slug": "btc-updown-5m-100", "endDate": "1970-01-01T00:16:40+00:00", "realizedPnl": 1, "avgPrice": 0.5, "outcome": "Up"}]
+
+        with patch("poly_monitor.wallet_metrics.fetch_user_activity", return_value=first_page), patch(
+            "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_profit",
+            side_effect=[
+                {"amount": 1, "name": "seed"},
+                {"amount": 1, "name": "seed"},
+            ],
+        ):
+            metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=1, closed_pages=2)
+
+        self.assertEqual(metrics["markets_24h"], 500)
+        self.assertTrue(metrics["markets_24h_lower_bound"])
+
+
+if __name__ == "__main__":
+    unittest.main()

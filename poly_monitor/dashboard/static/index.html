@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Poly Monitor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111416;
+      --panel: #171b1f;
+      --panel-2: #1e2429;
+      --line: #2b333a;
+      --text: #edf2f4;
+      --muted: #94a1aa;
+      --good: #4fc07a;
+      --warn: #d9ae4f;
+      --bad: #e16868;
+      --accent: #64b5d9;
+      --chip: #26313a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    button, input {
+      font: inherit;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #14181b;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.2;
+      font-weight: 720;
+    }
+    .subtle {
+      color: var(--muted);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    main {
+      padding: 18px;
+      display: grid;
+      gap: 18px;
+      max-width: 1500px;
+      margin: 0 auto;
+    }
+    .band {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .band-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    h2 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 680;
+    }
+    .health-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      gap: 1px;
+      background: var(--line);
+    }
+    .metric {
+      background: var(--panel);
+      padding: 12px;
+      min-width: 0;
+    }
+    .metric .label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .metric .value {
+      margin-top: 6px;
+      font-size: 16px;
+      font-weight: 680;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      display: inline-block;
+      background: var(--good);
+      margin-right: 6px;
+    }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .tab, .icon-button, .login button {
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 7px 10px;
+      cursor: pointer;
+    }
+    .tab.active {
+      border-color: var(--accent);
+      color: #dff5ff;
+    }
+    .icon-button {
+      min-width: 34px;
+      height: 34px;
+      padding: 0 9px;
+    }
+    .table-wrap {
+      overflow-x: auto;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      min-width: 1240px;
+      font-size: 12px;
+    }
+    th, td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: right;
+      white-space: nowrap;
+    }
+    th:first-child, td:first-child,
+    th:nth-child(2), td:nth-child(2) {
+      text-align: left;
+    }
+    tbody tr {
+      cursor: pointer;
+    }
+    tbody tr:hover {
+      background: #20272d;
+    }
+    .addr {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .user-cell {
+      min-width: 0;
+      max-width: 340px;
+    }
+    .user-name {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 100%;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: var(--chip);
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .ready { color: var(--good); }
+    .pending { color: var(--warn); }
+    .score_error { color: var(--bad); }
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 430px);
+      gap: 18px;
+    }
+    .events {
+      display: grid;
+      gap: 1px;
+      background: var(--line);
+      max-height: 440px;
+      overflow: auto;
+    }
+    .event {
+      display: grid;
+      grid-template-columns: 116px 66px 1fr 84px 80px;
+      gap: 10px;
+      padding: 9px 12px;
+      background: var(--panel);
+      align-items: center;
+      font-size: 12px;
+      min-width: 0;
+    }
+    .event > div {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .detail {
+      padding: 14px;
+      display: grid;
+      gap: 14px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 18px;
+    }
+    .kv > div {
+      display: grid;
+      grid-template-columns: 96px minmax(0, 1fr);
+      gap: 10px;
+      align-items: baseline;
+      min-width: 0;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(47, 58, 66, 0.6);
+    }
+    .kv strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .empty {
+      padding: 24px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .login {
+      max-width: 380px;
+      margin: 13vh auto 0;
+      display: grid;
+      gap: 10px;
+      padding: 18px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .login input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #0f1214;
+      color: var(--text);
+      padding: 10px;
+    }
+    .hidden { display: none !important; }
+    @media (max-width: 980px) {
+      .health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .split { grid-template-columns: 1fr; }
+      main { padding: 12px; }
+      .event { grid-template-columns: 90px 54px 1fr; }
+      .event .optional { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <section id="login" class="login hidden">
+    <h1>Poly Monitor</h1>
+    <input id="username" autocomplete="username" value="admin" aria-label="username">
+    <input id="password" type="password" autocomplete="current-password" aria-label="password">
+    <button id="loginButton">登录</button>
+    <div id="loginError" class="subtle"></div>
+  </section>
+
+  <section id="app" class="hidden">
+    <header class="topbar">
+      <div class="brand">
+        <h1><span id="okDot" class="status-dot"></span>Poly Monitor</h1>
+        <div id="dataDir" class="subtle"></div>
+      </div>
+      <div>
+        <button id="refresh" class="icon-button" title="刷新">↻</button>
+        <button id="logout" class="icon-button" title="退出">⎋</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="band">
+        <div class="health-grid" id="health"></div>
+      </section>
+
+      <section class="split">
+        <section class="band">
+          <div class="band-head">
+            <h2>钱包观察池</h2>
+            <div class="tabs" id="tabs"></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>用户</th>
+                  <th title="ready 表示已完成复核；pending 表示还在观察或关键字段未齐">评分状态</th>
+                  <th title="综合排序分，用来在候选池内排序，不等同于收益">综合分</th>
+                  <th title="近 7 天 BTC/ETH 5m 成交笔数">7天交易</th>
+                  <th title="近 30 天 BTC/ETH 5m 成交笔数">30天交易</th>
+                  <th title="近 24 小时 activity 样本中参与过的 BTC/ETH 5m 窗口数，用来判断近期是否活跃">24h窗口</th>
+                  <th title="Polymarket 网页 leaderboard 同口径近 7 天盈亏；如果接口失败才回退到内部估算">网页7天盈亏</th>
+                  <th title="Polymarket 网页 leaderboard 同口径近 30 天盈亏；如果接口失败才回退到内部估算">网页30天盈亏</th>
+                  <th title="近 7 天盈利市场数 / 亏损市场数">7天胜/负</th>
+                  <th title="最大单一盈利市场占总正收益比例，越低越不依赖单点暴富">最大单场占比</th>
+                  <th title="前三大盈利市场占总正收益比例，越低越分散">前三占比</th>
+                  <th title="低于 15c 的低价票利润占总正收益比例">低价票占比</th>
+                  <th title="距离最近一次 BTC/ETH 5m 交易过去了多久">最后交易距今</th>
+                  <th title="同一市场内是否经常双边下注或切换方向">双边率</th>
+                  <th title="窗口后半段是否明显加仓某一方向">后段偏移</th>
+                  <th title="后段加仓方向最终命中赢家的比例">胜方加仓</th>
+                </tr>
+              </thead>
+              <tbody id="walletRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="band">
+          <div class="band-head"><h2>钱包详情</h2><span id="detailTitle" class="subtle"></span></div>
+          <div id="walletDetail" class="detail"><div class="empty">选择一个地址查看细节</div></div>
+        </section>
+      </section>
+
+      <section class="band">
+        <div class="band-head"><h2>最近事件</h2><span class="subtle" id="eventCounts"></span></div>
+        <div id="events" class="events"></div>
+      </section>
+    </main>
+  </section>
+
+  <script>
+    const groups = ["active_candidate", "dormant_candidate"];
+    const labels = {
+      active_candidate: "活跃候选",
+      dormant_candidate: "休眠候选"
+    };
+    const labelHints = {
+      active_candidate: "近期高频且评分达标，值得重点持续采样",
+      dormant_candidate: "历史活跃期表现较好，但最近活跃度不足"
+    };
+    let statusData = null;
+    let currentGroup = "active_candidate";
+
+    const $ = (id) => document.getElementById(id);
+
+    function fmt(v, digits = 2) {
+      if (v === null || v === undefined || v === "") return "pending";
+      const n = Number(v);
+      if (!Number.isFinite(n)) return String(v);
+      return n.toLocaleString(undefined, { maximumFractionDigits: digits });
+    }
+
+    function fmtInt(v) {
+      if (v === null || v === undefined || v === "") return "pending";
+      const n = Number(v);
+      if (!Number.isFinite(n)) return String(v);
+      return Math.round(n).toLocaleString();
+    }
+
+    function pct(v) {
+      if (v === null || v === undefined || v === "") return "pending";
+      return `${fmt(Number(v) * 100, 1)}%`;
+    }
+
+    function money(v) {
+      if (v === null || v === undefined || v === "") return "pending";
+      return `$${fmt(v)}`;
+    }
+
+    function windowCount(row) {
+      const value = metricAny(row, ["markets_24h", "markets_7d"]);
+      const suffix = metric(row, "markets_24h_lower_bound") ? "+" : "";
+      return `${fmt(value, 0)}${suffix}`;
+    }
+
+    function ageSince(v) {
+      if (v === null || v === undefined) return "pending";
+      const hours = Number(v);
+      if (!Number.isFinite(hours)) return String(v);
+      const minutes = hours * 60;
+      if (minutes < 2) return "刚刚";
+      if (minutes < 60) return `${Math.round(minutes)} 分钟前`;
+      if (hours < 24) return `${fmt(hours, 1)} 小时前`;
+      return `${fmt(hours / 24, 1)} 天前`;
+    }
+
+    function zhStatus(value) {
+      const map = {
+        active_candidate: "活跃候选",
+        dormant_candidate: "休眠候选",
+        archive_candidate: "归档候选",
+        unscored: "未评分"
+      };
+      return map[value] || value || "pending";
+    }
+
+    function zhScoreState(value) {
+      const map = { ready: "已复核", pending: "待复核", score_error: "评分异常" };
+      return map[value] || value || "待复核";
+    }
+
+    function zhReason(code) {
+      const map = {
+        manual_seed_pending_score: "手工加入观察，等待完整评分",
+        trades_7d_below_threshold: "近 7 天交易数低于当前活跃门槛",
+        markets_24h_below_threshold: "近 24 小时参与的 5m 窗口数低于当前活跃门槛",
+        markets_7d_below_threshold: "近 7 天参与市场数低于旧版活跃门槛",
+        trades_30d_below_threshold: "近 30 天交易数低于当前活跃门槛",
+        markets_30d_below_threshold: "近 30 天参与市场数低于旧版活跃门槛",
+        pnl_7d_not_positive: "近 7 天盈亏未转正",
+        pnl_30d_not_positive: "近 30 天盈亏未转正",
+        wins_7d_not_above_losses: "近 7 天盈利市场数没有超过亏损市场数",
+        top1_concentration_high: "最大单场利润占比偏高",
+        top3_concentration_high: "前三盈利市场利润占比偏高",
+        longshot_profit_share_high_without_repetition: "低价票利润占比高，且重复性证据不足",
+        inactive_for_active: "最近活跃度不足，暂不算活跃候选",
+        inactive_for_archive: "长时间未活跃"
+      };
+      return map[code] || code;
+    }
+
+    function reasonText(detail) {
+      const reasons = (detail.reasons || []).map(zhReason);
+      if (!reasons.length && detail.status === "active_candidate") return "已通过当前评分规则";
+      if (!reasons.length) return "暂无扣分原因";
+      return reasons.join("；");
+    }
+
+    function shortTime(value) {
+      if (!value) return "pending";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return String(value);
+      return d.toLocaleTimeString();
+    }
+
+    function shortDateTime(value) {
+      if (!value) return "pending";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return String(value);
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
+    function remainingText(endValue) {
+      if (!endValue || !statusData?.health?.generated_at) return "";
+      const end = new Date(endValue).getTime();
+      const now = new Date(statusData.health.generated_at).getTime();
+      if (!Number.isFinite(end) || !Number.isFinite(now)) return "";
+      const sec = Math.max(0, Math.floor((end - now) / 1000));
+      return `剩余 ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+    }
+
+    function shortName(value, max = 20) {
+      const text = value || "";
+      if (text.length <= max) return text;
+      return `${text.slice(0, max)}...`;
+    }
+
+    async function api(path, options = {}) {
+      const resp = await fetch(path, { credentials: "same-origin", cache: "no-store", ...options });
+      if (resp.status === 401) {
+        showLogin();
+        throw new Error("unauthorized");
+      }
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "request_failed");
+      return data;
+    }
+
+    function showLogin() {
+      $("login").classList.remove("hidden");
+      $("app").classList.add("hidden");
+    }
+
+    function showApp() {
+      $("login").classList.add("hidden");
+      $("app").classList.remove("hidden");
+    }
+
+    async function login() {
+      $("loginError").textContent = "";
+      const body = new URLSearchParams({ username: $("username").value, password: $("password").value });
+      try {
+        await api("/api/login", { method: "POST", body });
+        await load();
+      } catch (err) {
+        $("loginError").textContent = "登录失败";
+      }
+    }
+
+    async function logout() {
+      await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
+      showLogin();
+    }
+
+    async function load() {
+      statusData = await api("/api/status");
+      showApp();
+      render();
+    }
+
+    function render() {
+      renderHealth(statusData);
+      renderTabs(statusData.candidate_counts || {});
+      renderWallets(statusData.candidates[currentGroup] || []);
+      renderEvents(statusData.events || {});
+    }
+
+    function renderHealth(data) {
+      $("dataDir").textContent = data.health.data_dir || "";
+      $("okDot").style.background = data.health.ok ? "var(--good)" : "var(--bad)";
+      const items = [
+        ["最新事件", data.health.last_event_age_seconds === null ? "pending" : `${data.health.last_event_age_seconds}s ago`],
+        ["今日 Raw", `${fmt(data.health.raw_today_bytes / 1024, 1)} KB`],
+        ["SQLite Trades", fmt(data.sqlite.trade_count, 0)],
+        ["Candidate Scores", fmt(data.sqlite.candidate_count, 0)],
+        ["Score 更新时间", shortTime(data.health.latest_score_at)],
+        ["Raw 文件数", fmt(data.raw.raw_file_count, 0)]
+      ];
+      $("health").innerHTML = items.map(([label, value]) => `<div class="metric"><div class="label">${label}</div><div class="value" title="${value}">${value}</div></div>`).join("");
+    }
+
+    function renderTabs(counts) {
+      $("tabs").innerHTML = groups.map((group) => {
+        const active = group === currentGroup ? "active" : "";
+        return `<button class="tab ${active}" data-group="${group}" title="${labelHints[group]}">${labels[group]} ${counts[group] || 0}</button>`;
+      }).join("");
+      document.querySelectorAll(".tab").forEach((btn) => btn.addEventListener("click", () => {
+        currentGroup = btn.dataset.group;
+        render();
+      }));
+    }
+
+    function metric(row, key) {
+      return (row.metrics || {})[key];
+    }
+
+    function metricAny(row, keys) {
+      const metrics = row.metrics || {};
+      for (const key of keys) {
+        if (metrics[key] !== null && metrics[key] !== undefined && metrics[key] !== "") return metrics[key];
+      }
+      return undefined;
+    }
+
+    function renderWallets(rows) {
+      if (!rows.length) {
+        $("walletRows").innerHTML = `<tr><td colspan="17" class="empty">暂无 ${labels[currentGroup]} 地址</td></tr>`;
+        return;
+      }
+      $("walletRows").innerHTML = rows.map((row) => {
+        const state = row.score_state || "pending";
+        const displayName = row.name || row.wallet_short || row.wallet;
+        const visibleName = shortName(displayName);
+        const subLine = row.name ? row.wallet_short : "";
+        return `<tr data-wallet="${row.wallet}">
+          <td class="user-cell" title="${displayName}&#10;${row.wallet}">
+            <strong class="user-name">${visibleName}</strong>
+            <div class="subtle addr">${subLine}</div>
+          </td>
+          <td><span class="pill ${state}" title="${zhScoreState(state)}">${zhScoreState(state)}</span></td>
+          <td>${fmtInt(row.rank_score)}</td>
+          <td>${fmt(metric(row, "trades_7d"), 0)}</td>
+          <td>${fmt(metric(row, "trades_30d"), 0)}</td>
+          <td>${windowCount(row)}</td>
+          <td>${money(metric(row, "pnl_7d"))}</td>
+          <td>${money(metric(row, "pnl_30d"))}</td>
+          <td>${fmt(metric(row, "wins_7d"), 0)} / ${fmt(metric(row, "losses_7d"), 0)}</td>
+          <td>${pct(metric(row, "top1_concentration"))}</td>
+          <td>${pct(metric(row, "top3_concentration"))}</td>
+          <td>${pct(metric(row, "longshot_profit_share"))}</td>
+          <td title="${fmt(metric(row, "last_active_age_hours"), 3)} 小时">${ageSince(metric(row, "last_active_age_hours"))}</td>
+          <td>${pct(metric(row, "dual_side_rate"))}</td>
+          <td>${pct(metric(row, "late_bias_shift"))}</td>
+          <td>${pct(metric(row, "winner_add_rate"))}</td>
+        </tr>`;
+      }).join("");
+      document.querySelectorAll("#walletRows tr[data-wallet]").forEach((row) => {
+        row.addEventListener("click", () => loadWallet(row.dataset.wallet));
+      });
+    }
+
+    async function loadWallet(wallet) {
+      const detail = await api(`/api/wallet?address=${encodeURIComponent(wallet)}`);
+      $("detailTitle").textContent = detail.metrics?.name || detail.wallet_short || "";
+      const m = detail.metrics || {};
+      const kv = [
+        ["分类", zhStatus(detail.status)],
+        ["评分状态", zhScoreState(detail.score_state)],
+        ["综合分", fmtInt(detail.rank_score)],
+        ["网页7天盈亏", money(m.pnl_7d)],
+        ["网页30天盈亏", money(m.pnl_30d)],
+        ["盈亏来源", m.pnl_source === "lb-api" ? "Polymarket网页口径" : "内部估算"],
+        ["7天交易", fmt(m.trades_7d, 0)],
+        ["30天交易", fmt(m.trades_30d, 0)],
+        ["24h窗口", `${fmt(m.markets_24h ?? m.markets_7d, 0)}${m.markets_24h_lower_bound ? "+" : ""}`],
+        ["最后交易距今", ageSince(m.last_active_age_hours)],
+        ["低价票占比", pct(m.longshot_profit_share)],
+        ["双边率", pct(m.dual_side_rate)],
+        ["胜方加仓", pct(m.winner_add_rate)]
+      ];
+      const trades = (detail.recent_trades || []).slice(0, 8).map((t) =>
+        `<div class="event"><div>${shortTime(t.exchange_at || t.observed_at)}</div><div>${t.symbol || ""}</div><div class="addr" title="${t.market_slug || ""}">${t.outcome || ""} @ ${fmt(t.price, 3)}</div><div class="optional">${fmt(t.size)}</div><div class="optional">${fmt(t.usdc)}</div></div>`
+      ).join("");
+      $("walletDetail").innerHTML = `
+        <div title="${detail.metrics?.name || "unnamed"}"><strong class="user-name">${shortName(detail.metrics?.name || "unnamed")}</strong></div>
+        <div class="addr" title="${detail.wallet}">${detail.wallet}</div>
+        <div class="kv">${kv.map(([k, v]) => `<div><div class="subtle">${k}</div><strong>${v}</strong></div>`).join("")}</div>
+        <div class="subtle">${reasonText(detail)}</div>
+        <div class="events">${trades || '<div class="empty">暂无最近成交</div>'}</div>`;
+    }
+
+    function renderEvents(events) {
+      const counts = events.counts || {};
+      const countLabels = {
+        trade_observed: "成交",
+        candidate_score: "评分",
+        api_error: "API异常",
+        archive_pruned: "归档清理",
+        sqlite_cleanup: "数据清理"
+      };
+      $("eventCounts").textContent = Object.entries(counts)
+        .filter(([k]) => countLabels[k])
+        .map(([k, v]) => `${countLabels[k]}:${v}`)
+        .join("  ");
+      const rows = (events.recent || []).slice(0, 50).map((e) => {
+        let main = e.message || e.market_slug || "";
+        let rightA = "";
+        let rightB = "";
+        if (e.event === "trade_observed") {
+          main = `${e.name || e.wallet_short || ""} ${e.outcome || ""} @ ${fmt(e.price, 3)} / ${fmt(e.usdc)} USDC`;
+        } else if (e.event === "archive_pruned") {
+          main = `清理 ${fmt(e.removed, 0)} 个低优先级归档`;
+        } else if (e.event === "sqlite_cleanup") {
+          main = `清理 ${fmt(e.removed_wallets, 0)} 个钱包 / ${fmt(e.removed_trades, 0)} 笔成交`;
+        }
+        return `<div class="event">
+          <div>${shortTime(e.observed_at || e.exchange_at)}</div>
+          <div>${e.symbol || ""}</div>
+          <div title="${main}">${e.event_label || e.event}: ${main}</div>
+          <div class="optional">${rightA}</div>
+          <div class="optional">${rightB}</div>
+        </div>`;
+      }).join("");
+      $("events").innerHTML = rows || '<div class="empty">暂无事件</div>';
+    }
+
+    $("loginButton").addEventListener("click", login);
+    $("password").addEventListener("keydown", (event) => { if (event.key === "Enter") login(); });
+    $("refresh").addEventListener("click", load);
+    $("logout").addEventListener("click", logout);
+    load().catch(() => showLogin());
+    setInterval(() => { if (!$("app").classList.contains("hidden")) load().catch(() => {}); }, 15000);
+  </script>
+</body>
+</html>

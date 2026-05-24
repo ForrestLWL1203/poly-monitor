@@ -1,0 +1,145 @@
+import unittest
+
+from poly_monitor.scoring import CandidateThresholds, score_wallet
+
+
+class ScoringTests(unittest.TestCase):
+    def test_score_wallet_promotes_only_high_frequency_profitable_wallets(self):
+        thresholds = CandidateThresholds()
+        metrics = {
+            "wallet": "0xabc",
+            "trades_7d": 500,
+            "markets_24h": 5,
+            "markets_7d": 5,
+            "trades_30d": 800,
+            "markets_30d": 5,
+            "pnl_7d": 10.0,
+            "pnl_30d": 100.0,
+            "wins_7d": 51,
+            "losses_7d": 49,
+            "top1_concentration": 0.25,
+            "top3_concentration": 0.5,
+            "longshot_profit_share": 0.8,
+            "longshot_profit_markets": 6,
+            "last_active_age_hours": 48,
+            "historical_trades": 800,
+            "historical_markets": 5,
+            "historical_pnl": 100.0,
+        }
+
+        score = score_wallet(metrics, thresholds)
+
+        self.assertEqual(score.status, "active_candidate")
+        self.assertEqual(score.reasons, [])
+
+    def test_score_wallet_does_not_reject_repeatable_longshot_edge(self):
+        metrics = {
+            "wallet": "0xabc",
+            "trades_7d": 1047,
+            "markets_24h": 6,
+            "markets_7d": 32,
+            "trades_30d": 1047,
+            "markets_30d": 32,
+            "pnl_7d": 30662.75,
+            "pnl_30d": 97107.40,
+            "wins_7d": 8,
+            "losses_7d": 0,
+            "top1_concentration": 0.122,
+            "top3_concentration": 0.263,
+            "longshot_profit_share": 0.668,
+            "longshot_profit_markets": 8,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 1047,
+            "historical_markets": 32,
+            "historical_pnl": 97107.40,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "active_candidate")
+
+    def test_rank_prefers_consistent_active_win_rate_over_raw_pnl_size(self):
+        quality_small_bankroll = {
+            "wallet": "0xquality",
+            "trades_7d": 1800,
+            "markets_24h": 80,
+            "trades_30d": 3000,
+            "pnl_7d": 120.0,
+            "pnl_30d": 300.0,
+            "wins_7d": 100,
+            "losses_7d": 0,
+            "top1_concentration": 0.05,
+            "top3_concentration": 0.15,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 3000,
+            "historical_markets": 80,
+            "historical_pnl": 300.0,
+        }
+        bigger_pnl_weaker_sample = {
+            **quality_small_bankroll,
+            "wallet": "0xbigger",
+            "trades_7d": 500,
+            "markets_24h": 5,
+            "trades_30d": 800,
+            "pnl_7d": 10_000.0,
+            "pnl_30d": 30_000.0,
+            "wins_7d": 51,
+            "losses_7d": 49,
+            "top1_concentration": 0.24,
+            "top3_concentration": 0.49,
+        }
+
+        quality = score_wallet(quality_small_bankroll, CandidateThresholds())
+        bigger = score_wallet(bigger_pnl_weaker_sample, CandidateThresholds())
+
+        self.assertEqual(quality.status, "active_candidate")
+        self.assertEqual(bigger.status, "active_candidate")
+        self.assertGreater(quality.rank_score, bigger.rank_score)
+
+    def test_score_wallet_downgrades_historically_good_inactive_wallet_to_dormant(self):
+        metrics = {
+            "wallet": "0xabc",
+            "trades_7d": 0,
+            "markets_24h": 0,
+            "markets_7d": 0,
+            "trades_30d": 1200,
+            "markets_30d": 180,
+            "pnl_7d": 0.0,
+            "pnl_30d": 50.0,
+            "wins_7d": 0,
+            "losses_7d": 0,
+            "top1_concentration": 0.2,
+            "top3_concentration": 0.45,
+            "longshot_profit_share": 0.2,
+            "longshot_profit_markets": 2,
+            "last_active_age_hours": 96,
+            "historical_trades": 1000,
+            "historical_markets": 20,
+            "historical_pnl": 50.0,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "dormant_candidate")
+        self.assertIn("inactive_for_active", score.reasons)
+
+    def test_score_wallet_archives_long_inactive_wallets(self):
+        metrics = {
+            "wallet": "0xabc",
+            "last_active_age_hours": 24 * 15,
+            "historical_trades": 2000,
+            "historical_markets": 200,
+            "historical_pnl": 100.0,
+            "top1_concentration": 0.1,
+            "top3_concentration": 0.2,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+        }
+
+        self.assertEqual(score_wallet(metrics, CandidateThresholds()).status, "archive_candidate")
+
+
+if __name__ == "__main__":
+    unittest.main()
