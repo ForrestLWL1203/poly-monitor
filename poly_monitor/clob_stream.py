@@ -62,7 +62,9 @@ class ClobBookStream:
         age_sec = time.monotonic() - float(book["received_at"])
         if max_age_sec is not None and age_sec > max_age_sec:
             return [], [], round(age_sec * 1000)
-        return list(book["bids"]), list(book["asks"]), round(age_sec * 1000)
+        bids = sorted(book["bids"].items(), key=lambda pair: pair[0], reverse=True)
+        asks = sorted(book["asks"].items(), key=lambda pair: pair[0])
+        return bids, asks, round(age_sec * 1000)
 
     def diagnostics(self, *, reset_counts: bool = False) -> dict[str, Any]:
         age_ms = None if self._last_message_at <= 0 else round((time.monotonic() - self._last_message_at) * 1000)
@@ -143,7 +145,7 @@ class ClobBookStream:
             self._handle_price_change(event)
 
     @staticmethod
-    def _parse_side(levels: list[dict[str, Any]], *, reverse: bool) -> list[tuple[float, float]]:
+    def _parse_side(levels: list[dict[str, Any]], *, reverse: bool) -> dict[float, float]:
         parsed: list[tuple[float, float]] = []
         for item in levels:
             try:
@@ -153,8 +155,9 @@ class ClobBookStream:
                 continue
             if price > 0 and size > 0:
                 parsed.append((price, size))
-        parsed.sort(key=lambda pair: pair[0], reverse=reverse)
-        return parsed
+        if len(parsed) > 1 and not _is_sorted_prices(parsed, reverse=reverse):
+            parsed.sort(key=lambda pair: pair[0], reverse=reverse)
+        return dict(parsed)
 
     def _handle_book(self, event: dict[str, Any]) -> None:
         token = str(event.get("asset_id") or "")
@@ -181,9 +184,17 @@ class ClobBookStream:
             side_key = "bids" if change.get("side") == "BUY" else "asks" if change.get("side") == "SELL" else None
             if side_key is None:
                 continue
-            levels = [(p, s) for p, s in book[side_key] if p != price]
             if size > 0:
-                levels.append((price, size))
-            levels.sort(key=lambda pair: pair[0], reverse=(side_key == "bids"))
-            book[side_key] = levels
+                book[side_key][price] = size
+            else:
+                book[side_key].pop(price, None)
             book["received_at"] = time.monotonic()
+
+
+def _is_sorted_prices(levels: list[tuple[float, float]], *, reverse: bool) -> bool:
+    if len(levels) < 2:
+        return True
+    prices = [price for price, _size in levels]
+    if reverse:
+        return all(left >= right for left, right in zip(prices, prices[1:]))
+    return all(left <= right for left, right in zip(prices, prices[1:]))

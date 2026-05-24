@@ -442,47 +442,92 @@ class ObserverStore:
         max_non_candidate_wallets: int | None = None,
     ) -> dict[str, int]:
         keep = {wallet.lower() for wallet in (keep_wallets or set())}
-        keep.update(self.seed_wallets())
-        rows = self.conn.execute(
-            "SELECT wallet FROM candidate_scores WHERE status IN ('active_candidate','dormant_candidate')"
-        ).fetchall()
-        keep.update(str(row["wallet"]).lower() for row in rows)
-
-        wallet_rows = self.conn.execute(
+        self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS cleanup_keep(wallet TEXT PRIMARY KEY)")
+        self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS cleanup_delete_wallets(wallet TEXT PRIMARY KEY)")
+        self.conn.execute("DELETE FROM cleanup_keep")
+        self.conn.execute("DELETE FROM cleanup_delete_wallets")
+        if keep:
+            self.conn.executemany("INSERT OR IGNORE INTO cleanup_keep(wallet) VALUES(?)", [(wallet,) for wallet in keep])
+        self.conn.executescript(
             """
-            SELECT wallet, COUNT(*) AS trade_count, MAX(exchange_ts) AS last_ts
-            FROM trades
-            GROUP BY wallet
-            ORDER BY last_ts DESC
+            INSERT OR IGNORE INTO cleanup_keep(wallet)
+            SELECT wallet FROM seeds;
+            INSERT OR IGNORE INTO cleanup_keep(wallet)
+            SELECT wallet FROM candidate_scores WHERE status IN ('active_candidate','dormant_candidate');
             """
-        ).fetchall()
-        stale_wallets = {
-            str(row["wallet"]).lower()
-            for row in wallet_rows
-            if str(row["wallet"]).lower() not in keep and int(row["last_ts"]) < inactive_cutoff_ts
-        }
+        )
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO cleanup_delete_wallets(wallet)
+            SELECT recent.wallet
+            FROM (
+                SELECT wallet, MAX(exchange_ts) AS last_ts
+                FROM trades
+                GROUP BY wallet
+                HAVING last_ts < ?
+            ) AS recent
+            LEFT JOIN cleanup_keep AS keep ON keep.wallet = recent.wallet
+            WHERE keep.wallet IS NULL
+            """,
+            (inactive_cutoff_ts,),
+        )
         if max_non_candidate_wallets is not None and max_non_candidate_wallets >= 0:
-            noise_wallets = [str(row["wallet"]).lower() for row in wallet_rows if str(row["wallet"]).lower() not in keep]
-            stale_wallets.update(noise_wallets[max_non_candidate_wallets:])
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO cleanup_delete_wallets(wallet)
+                SELECT wallet
+                FROM (
+                    SELECT
+                        trades.wallet AS wallet,
+                        ROW_NUMBER() OVER (ORDER BY MAX(exchange_ts) DESC, trades.wallet ASC) AS rn
+                    FROM trades
+                    LEFT JOIN cleanup_keep AS keep ON keep.wallet = trades.wallet
+                    WHERE keep.wallet IS NULL
+                    GROUP BY trades.wallet
+                )
+                WHERE rn > ?
+                """,
+                (max_non_candidate_wallets,),
+            )
 
-        trade_counts = {str(row["wallet"]).lower(): int(row["trade_count"]) for row in wallet_rows}
-        removed_trades = sum(trade_counts.get(wallet, 0) for wallet in stale_wallets)
-        if stale_wallets:
-            self.conn.executemany("DELETE FROM trades WHERE wallet=?", [(wallet,) for wallet in sorted(stale_wallets)])
-
-        score_rows = self.conn.execute(
-            "SELECT wallet FROM candidate_scores WHERE status NOT IN ('active_candidate','dormant_candidate')"
-        ).fetchall()
-        stale_score_wallets = [str(row["wallet"]).lower() for row in score_rows if str(row["wallet"]).lower() not in keep]
-        if stale_score_wallets:
-            self.conn.executemany("DELETE FROM candidate_scores WHERE wallet=?", [(wallet,) for wallet in stale_score_wallets])
-
-        if stale_wallets or stale_score_wallets:
+        removed_wallets = int(self.conn.execute("SELECT COUNT(*) AS n FROM cleanup_delete_wallets").fetchone()["n"] or 0)
+        removed_trades = int(
+            self.conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM trades
+                WHERE wallet IN (SELECT wallet FROM cleanup_delete_wallets)
+                """
+            ).fetchone()["n"]
+            or 0
+        )
+        removed_score_rows = int(
+            self.conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM candidate_scores
+                WHERE status NOT IN ('active_candidate','dormant_candidate')
+                  AND wallet NOT IN (SELECT wallet FROM cleanup_keep)
+                """
+            ).fetchone()["n"]
+            or 0
+        )
+        if removed_trades:
+            self.conn.execute("DELETE FROM trades WHERE wallet IN (SELECT wallet FROM cleanup_delete_wallets)")
+        if removed_score_rows:
+            self.conn.execute(
+                """
+                DELETE FROM candidate_scores
+                WHERE status NOT IN ('active_candidate','dormant_candidate')
+                  AND wallet NOT IN (SELECT wallet FROM cleanup_keep)
+                """
+            )
+        if removed_wallets or removed_score_rows:
             self.conn.commit()
         return {
-            "removed_wallets": len(stale_wallets),
+            "removed_wallets": removed_wallets,
             "removed_trades": removed_trades,
-            "removed_score_rows": len(stale_score_wallets),
+            "removed_score_rows": removed_score_rows,
         }
 
 
