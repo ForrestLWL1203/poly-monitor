@@ -252,6 +252,17 @@ Legacy `new-poly` layout still present on the same VPS:
 Never print or copy `/opt/new-poly/shared/polymarket_config.json`; it may contain
 private keys, proxy wallet config, chain ID, and signature type.
 
+Remote process restart rule:
+
+- Do not use broad `pkill -f "run_crypto_wallet_observer|run_dashboard"` or
+  similarly loose remote `pkill -f` patterns inside an SSH one-liner. They can
+  match the SSH shell command itself and terminate the connection before the
+  restart finishes.
+- For VPS restarts, first list exact Python script processes, then kill only
+  those concrete PIDs or use an anchored full-command pattern that cannot match
+  the SSH shell. Prefer a two-step flow: inspect PIDs with `pgrep -af`, then
+  `kill <pid>` for the actual `/opt/poly-monitor/venv/bin/python ...` processes.
+
 Useful read-only status checks:
 
 ```bash
