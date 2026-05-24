@@ -47,12 +47,42 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["markets_30d"], 1)
         self.assertEqual(metrics["historical_markets"], 1)
         self.assertEqual(metrics["wins_7d"], 2)
-        self.assertEqual(metrics["pnl_7d"], 3)
-        self.assertEqual(metrics["pnl_30d"], 3)
-        self.assertEqual(metrics["pnl_source"], "crypto_closed_positions")
+        self.assertEqual(metrics["pnl_7d"], 12.5)
+        self.assertEqual(metrics["pnl_30d"], 34.5)
+        self.assertEqual(metrics["pnl_source"], "profile_profit")
         self.assertEqual(metrics["profile_pnl_7d"], 12.5)
         self.assertEqual(metrics["profile_pnl_30d"], 34.5)
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 3)
+
+    def test_build_metrics_uses_profile_profit_for_net_pnl_not_closed_position_gross(self):
+        activity = [
+            {"type": "TRADE", "slug": "btc-updown-5m-100", "timestamp": 1000, "outcome": "Up", "usdcSize": 10},
+        ]
+        closed = [
+            {
+                "slug": "btc-updown-5m-100",
+                "endDate": "1970-01-01T00:16:40+00:00",
+                "realizedPnl": 100_000,
+                "avgPrice": 0.2,
+                "outcome": "Up",
+            },
+        ]
+
+        with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=[activity, []]), patch(
+            "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_profit",
+            side_effect=[
+                {"amount": 1_234.5, "name": "profile"},
+                {"amount": 3_456.7, "name": "profile"},
+            ],
+        ):
+            metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=2, closed_pages=2)
+
+        self.assertEqual(metrics["pnl_7d"], 1_234.5)
+        self.assertEqual(metrics["pnl_30d"], 3_456.7)
+        self.assertEqual(metrics["pnl_source"], "profile_profit")
+        self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 100_000)
 
     def test_activity_metrics_mark_24h_windows_as_lower_bound_when_page_cap_hit(self):
         first_page = [

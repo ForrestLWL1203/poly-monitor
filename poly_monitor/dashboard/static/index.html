@@ -645,7 +645,7 @@
         ["综合分", fmtInt(detail.rank_score)],
         ["5m 7天盈亏", money(m.pnl_7d)],
         ["5m 30天盈亏", money(m.pnl_30d)],
-        ["盈亏来源", m.pnl_source === "crypto_closed_positions" ? "Crypto 5m 已结算" : "内部估算"],
+        ["盈亏来源", m.pnl_source === "profile_profit" ? "Polymarket 账户盈亏" : (m.pnl_source === "crypto_closed_positions" ? "Crypto 5m 已结算估算" : "内部估算")],
         ["7天交易", fmt(m.trades_7d, 0)],
         ["30天交易", fmt(m.trades_30d, 0)],
         ["24h窗口", `${fmt(m.markets_24h ?? m.markets_7d, 0)}${m.markets_24h_lower_bound ? "+" : ""}`],
