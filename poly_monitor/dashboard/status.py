@@ -66,7 +66,7 @@ def _raw_files(raw_dir: Path) -> list[Path]:
     if not raw_dir.exists():
         return []
     files = [path for path in raw_dir.glob("*/events.jsonl") if path.is_file()]
-    return sorted(files, key=lambda path: path.stat().st_mtime)
+    return sorted(files, key=lambda path: (path.stat().st_mtime, str(path)))
 
 
 def _tail_lines(path: Path, *, max_lines: int, block_size: int = 65536) -> list[str]:
