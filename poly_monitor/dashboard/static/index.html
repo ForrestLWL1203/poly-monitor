@@ -609,6 +609,10 @@
       return undefined;
     }
 
+    function localObservedPnl(metrics) {
+      return metrics.local_observed_pnl_30d ?? metrics.local_observed_pnl_7d;
+    }
+
     function renderWallets(rows) {
       if (!rows.length) {
         $("walletRows").innerHTML = `<tr><td colspan="18" class="empty">暂无 ${labels[currentGroup]} 地址</td></tr>`;
@@ -631,7 +635,7 @@
           <td>${windowCount(row)}</td>
           <td>${money(metric(row, "pnl_7d"))}</td>
           <td>${money(metric(row, "pnl_30d"))}</td>
-          <td title="7天 / 30天">${money(metric(row, "local_observed_pnl_7d"))} / ${money(metric(row, "local_observed_pnl_30d"))}</td>
+          <td>${money(localObservedPnl(row.metrics || {}))}</td>
           <td>${fmt(metric(row, "wins_7d"), 0)} / ${fmt(metric(row, "losses_7d"), 0)}</td>
           <td>${pct(metric(row, "top1_concentration"))}</td>
           <td>${pct(metric(row, "top3_concentration"))}</td>
@@ -660,8 +664,7 @@
         ["历史30天PnL", money(m.pnl_30d)],
         ["Profile参考7天PnL", money(m.profile_pnl_7d)],
         ["Profile参考30天PnL", money(m.profile_pnl_30d)],
-        ["本地观测7天PnL", money(m.local_observed_pnl_7d)],
-        ["本地观测30天PnL", money(m.local_observed_pnl_30d)],
+        ["本地观测Realized PnL", money(localObservedPnl(m))],
         ["已结算窗口", `${fmt(m.settled_markets_7d, 0)} / ${fmt(m.settled_markets_30d, 0)}`],
         ["本地已结算窗口", `${fmt(m.local_observed_settled_markets_7d, 0)} / ${fmt(m.local_observed_settled_markets_30d, 0)}`],
         ["盈亏来源", pnlSourceLabel(m.pnl_source)],
@@ -675,27 +678,11 @@
         ["双边率", pct(m.dual_side_rate)],
         ["胜方加仓", pct(m.winner_add_rate)]
       ];
-      const trades = (detail.recent_trades || []).slice(0, 8).map((t) =>
-        `<div class="event"><div>${shortTime(t.exchange_at || t.observed_at)}</div><div>${t.symbol || ""}</div><div class="addr" title="${t.market_slug || ""}">${t.outcome || ""} @ ${fmt(t.price, 3)}</div><div class="optional">${fmt(t.size)}</div><div class="optional">${fmt(t.usdc)}</div></div>`
-      ).join("");
-      const settled = (detail.settled_markets || []).slice(0, 12).map((row) =>
-        `<div class="event">
-          <div>${shortTime(row.settled_at)}</div>
-          <div>${row.symbol || ""}</div>
-          <div class="addr" title="${row.market_slug || ""}">${row.incomplete ? "不完整" : money(row.realized_pnl)} / ${row.winning_side || ""}</div>
-          <div class="optional">${fmt(row.trades, 0)} 笔</div>
-          <div class="optional">买${money(row.buy_usdc)} 卖${money(row.sell_usdc)}</div>
-        </div>`
-      ).join("");
       $("walletDetail").innerHTML = `
         <div title="${detail.metrics?.name || "unnamed"}"><strong class="user-name">${shortName(detail.metrics?.name || "unnamed")}</strong></div>
         <div class="addr" title="${detail.wallet}">${detail.wallet}</div>
         <div class="kv">${kv.map(([k, v]) => `<div><div class="subtle">${k}</div><strong>${v}</strong></div>`).join("")}</div>
-        <div class="subtle">${reasonText(detail)}</div>
-        <div class="subtle">已结算窗口 Ledger</div>
-        <div class="events">${settled || '<div class="empty">暂无已结算窗口</div>'}</div>
-        <div class="subtle">最近成交</div>
-        <div class="events">${trades || '<div class="empty">暂无最近成交</div>'}</div>`;
+        <div class="subtle">${reasonText(detail)}</div>`;
     }
 
     function renderEvents(events) {
