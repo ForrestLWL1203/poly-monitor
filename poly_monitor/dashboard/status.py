@@ -326,7 +326,12 @@ def recent_trades(data_dir: Path, *, limit: int = 100) -> list[dict[str, Any]]:
     return _recent_trades_from_sqlite(data_dir, limit=limit)
 
 
-def _event_summary_from_events(events: list[dict[str, Any]], *, now: dt.datetime) -> dict[str, Any]:
+def _event_summary_from_events(
+    events: list[dict[str, Any]],
+    *,
+    now: dt.datetime,
+    wallet_names: dict[str, str] | None = None,
+) -> dict[str, Any]:
     counts = Counter(str(row.get("event") or "unknown") for row in events)
     last_event = max((parse_dt(row.get("observed_at")) for row in events), default=None)
     age = None
@@ -338,7 +343,7 @@ def _event_summary_from_events(events: list[dict[str, Any]], *, now: dt.datetime
         "counts": dict(counts),
         "last_event_at": last_event.isoformat() if last_event else None,
         "last_event_age_seconds": age,
-        "recent": [_compact_event(row) for row in recent],
+        "recent": [_compact_event(row, wallet_names=wallet_names or {}) for row in recent],
     }
 
 
@@ -346,7 +351,8 @@ def _event_summary(data_dir: Path, *, now: dt.datetime) -> dict[str, Any]:
     return _event_summary_from_events(_tail_raw_events(data_dir / "raw"), now=now)
 
 
-def _compact_event(row: dict[str, Any]) -> dict[str, Any]:
+def _compact_event(row: dict[str, Any], *, wallet_names: dict[str, str] | None = None) -> dict[str, Any]:
+    wallet_names = wallet_names or {}
     event = str(row.get("event") or "unknown")
     base = {
         "event": event,
@@ -356,12 +362,18 @@ def _compact_event(row: dict[str, Any]) -> dict[str, Any]:
         "market_slug": row.get("market_slug"),
     }
     if event == "trade_observed":
-        base.update(_trade_row(row))
+        trade = _trade_row(row)
+        name = wallet_names.get(str(trade.get("wallet") or "").lower())
+        if name and not trade.get("name"):
+            trade["name"] = name
+        base.update(trade)
     elif event == "context_snapshot":
+        wallet = str(row.get("wallet") or "").lower()
         base.update(
             {
-                "wallet": row.get("wallet"),
-                "wallet_short": compact_wallet(str(row.get("wallet") or "")),
+                "wallet": wallet,
+                "wallet_short": compact_wallet(wallet),
+                "name": wallet_names.get(wallet, ""),
                 "outcome": row.get("outcome"),
                 "price": row.get("price"),
                 "btc_price": row.get("btc_price"),
@@ -380,6 +392,17 @@ def _compact_event(row: dict[str, Any]) -> dict[str, Any]:
             }
         )
     return base
+
+
+def _candidate_wallet_names(candidates: dict[str, list[dict[str, Any]]]) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for rows in candidates.values():
+        for row in rows:
+            wallet = str(row.get("wallet") or "").lower()
+            name = str(row.get("name") or (row.get("metrics") or {}).get("name") or "")
+            if wallet and name and wallet not in names:
+                names[wallet] = name
+    return names
 
 
 def _is_dashboard_event(row: dict[str, Any]) -> bool:
@@ -530,7 +553,7 @@ def build_dashboard_status(data_dir: Path, *, now: dt.datetime | None = None, re
     candidates = sqlite_candidates if has_sqlite_scores else report_candidates
     sqlite = _sqlite_summary(data_dir)
     events = _tail_raw_events(data_dir / "raw")
-    event_summary = _event_summary_from_events(events, now=now)
+    event_summary = _event_summary_from_events(events, now=now, wallet_names=_candidate_wallet_names(candidates))
     raw_summary = _raw_size_summary(data_dir, now=now)
     health = {
         "ok": True,

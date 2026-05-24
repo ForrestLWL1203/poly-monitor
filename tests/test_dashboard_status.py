@@ -221,6 +221,54 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(len(status["events"]["recent"]), 1)
         self.assertEqual(status["events"]["recent"][0]["event_label"], "成交")
 
+    def test_recent_events_enrich_trade_with_candidate_display_name(self):
+        from poly_monitor.dashboard.status import build_dashboard_status
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0x1111111111111111111111111111111111111111"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            store.upsert_score(
+                CandidateScore(
+                    wallet=wallet,
+                    status="active_candidate",
+                    rank_score=10,
+                    reasons=[],
+                    metrics={
+                        "wallet": wallet,
+                        "profile_name": "alpha-label",
+                        "pnl_7d": 1,
+                        "pnl_30d": 1,
+                        "wins_7d": 1,
+                        "losses_7d": 0,
+                    },
+                )
+            )
+            store.close()
+            now = dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc)
+            writer = JsonlEventWriter(data_dir)
+            writer.write(
+                {
+                    "event": "trade_observed",
+                    "observed_at": now.isoformat(),
+                    "wallet": wallet,
+                    "symbol": "BTC",
+                    "market_slug": "btc-updown-5m-1",
+                    "outcome": "Up",
+                    "price": 0.51,
+                    "size": 10,
+                    "usdc": 5.1,
+                    "tx_hash": "0xtx",
+                },
+                now=now,
+            )
+            writer.close()
+
+            status = build_dashboard_status(data_dir, now=now + dt.timedelta(seconds=1))
+
+        self.assertEqual(status["events"]["recent"][0]["name"], "alpha-label")
+        self.assertEqual(status["events"]["recent"][0]["wallet_short"], "0x1111...1111")
+
     def test_recent_events_hide_market_selected_noise(self):
         from poly_monitor.dashboard.status import build_dashboard_status
 
