@@ -399,8 +399,8 @@
                   <th title="近 7 天 BTC/ETH 5m 成交笔数">7天交易</th>
                   <th title="近 30 天 BTC/ETH 5m 成交笔数">30天交易</th>
                   <th title="近 24 小时 activity 样本中参与过的 BTC/ETH 5m 窗口数，用来判断近期是否活跃">24h窗口</th>
-                  <th title="用于评分的 BTC/ETH 5m 已结算持仓 cashPnl；Profile 和 closed-position 仅作参考">历史7天PnL</th>
-                  <th title="用于评分的 BTC/ETH 5m 已结算持仓 cashPnl；Profile 和 closed-position 仅作参考">历史30天PnL</th>
+                  <th title="用于评分的 Polymarket Profile 聚合收益；已结算持仓和 closed-position 仅作诊断参考">历史7天PnL</th>
+                  <th title="用于评分的 Polymarket Profile 聚合收益；已结算持仓和 closed-position 仅作诊断参考">历史30天PnL</th>
                   <th title="仅统计 observer 启动后本地记录且已结算的 BTC/ETH 5m Ledger 盈亏">本地观测PnL</th>
                   <th title="本地观测近 7 天已结算盈利市场数 / 亏损市场数；无本地结算时显示 0 / 0">7天胜/负</th>
                   <th title="最大单一盈利市场占总正收益比例，越低越不依赖单点暴富">最大单场占比</th>
@@ -515,9 +515,9 @@
 
     function pnlSourceLabel(value) {
       const map = {
-        profile_profit: "Profile 参考收益",
-        crypto_settled_positions: "BTC/ETH 5m 已结算持仓",
-        crypto_closed_positions: "BTC/ETH 5m 历史已关闭仓位",
+        profile_profit: "Profile 页面收益",
+        crypto_settled_positions: "BTC/ETH 5m 持仓诊断",
+        crypto_closed_positions: "BTC/ETH 5m closed 诊断",
         local_observed_ledger: "本地观察 Ledger"
       };
       return map[value] || value || "未知";

@@ -226,21 +226,26 @@ def build_metrics_from_api(
     settled_positions_available = bool(settled_market_pnls_7d or settled_market_pnls_30d)
     profile_pnl_7d, profile_name_7d, profile_error_7d = _profile_profit(wallet, "7d")
     profile_pnl_30d, profile_name_30d, profile_error_30d = _profile_profit(wallet, "30d")
-    if settled_positions_available:
-        pnl_7d = crypto_settled_positions_pnl_7d
-        pnl_30d = crypto_settled_positions_pnl_30d
-        pnl_source = "crypto_settled_positions"
-    elif profile_pnl_7d is not None or profile_pnl_30d is not None:
+    if profile_pnl_7d is not None or profile_pnl_30d is not None:
         pnl_7d = profile_pnl_7d if profile_pnl_7d is not None else 0.0
         pnl_30d = profile_pnl_30d if profile_pnl_30d is not None else 0.0
         pnl_source = "profile_profit"
+    elif settled_positions_available:
+        pnl_7d = crypto_settled_positions_pnl_7d
+        pnl_30d = crypto_settled_positions_pnl_30d
+        pnl_source = "crypto_settled_positions"
     else:
         pnl_7d = crypto_closed_pnl_estimate_7d
         pnl_30d = crypto_closed_pnl_estimate_30d
         pnl_source = "crypto_closed_positions"
-    concentration_pnls_30d = settled_market_pnls_30d if settled_positions_available else market_pnls_30d
-    source_longshot_profit_30d = settled_longshot_profit_30d if settled_positions_available else longshot_profit_30d
-    source_longshot_profit_markets = settled_longshot_profit_markets if settled_positions_available else longshot_profit_markets
+    if market_pnls_30d:
+        concentration_pnls_30d = market_pnls_30d
+        source_longshot_profit_30d = longshot_profit_30d
+        source_longshot_profit_markets = longshot_profit_markets
+    else:
+        concentration_pnls_30d = settled_market_pnls_30d
+        source_longshot_profit_30d = settled_longshot_profit_30d
+        source_longshot_profit_markets = settled_longshot_profit_markets
     total_profit_30d = sum(value for value in concentration_pnls_30d if value > 0)
     last_ts = max([int(row.get("timestamp") or 0) for row in trades] or [0])
     trade_markets_24h = {row_slug(row) for row in trades_24h if row_slug(row)}

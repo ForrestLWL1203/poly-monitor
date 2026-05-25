@@ -152,7 +152,7 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["pnl_source"], "profile_profit")
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 5_000)
 
-    def test_settled_positions_drive_real_crypto_pnl(self):
+    def test_profile_profit_overrides_incomplete_position_diagnostics(self):
         activity = [
             {"type": "TRADE", "slug": "btc-updown-5m-1000", "timestamp": 1000, "outcome": "Up", "usdcSize": 10},
         ]
@@ -203,9 +203,9 @@ class WalletMetricsTests(unittest.TestCase):
         ):
             metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=2, closed_pages=2)
 
-        self.assertEqual(metrics["pnl_7d"], -10.0)
-        self.assertEqual(metrics["pnl_30d"], -10.0)
-        self.assertEqual(metrics["pnl_source"], "crypto_settled_positions")
+        self.assertEqual(metrics["pnl_7d"], 25.0)
+        self.assertEqual(metrics["pnl_30d"], -31.0)
+        self.assertEqual(metrics["pnl_source"], "profile_profit")
         self.assertEqual(metrics["crypto_settled_positions_pnl_30d"], -10.0)
         self.assertEqual(metrics["crypto_settled_positions_markets_30d"], 2)
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 5_000)
