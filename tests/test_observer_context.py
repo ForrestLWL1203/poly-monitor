@@ -562,9 +562,11 @@ class ObserverContextTests(unittest.TestCase):
             try:
                 wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
                 observer.store.add_watchlist_wallet(wallet)
+                observer._refresh_candidate_caches()
 
-                self.assertEqual(observer._metrics_cache_ttl("archive_candidate", wallet), 60)
-                self.assertEqual(observer._metrics_cache_ttl("archive_candidate", "0xnotwatched"), 600)
+                with patch.object(observer.store, "watchlist_wallets", side_effect=AssertionError("unexpected SQL")):
+                    self.assertEqual(observer._metrics_cache_ttl("archive_candidate", wallet), 60)
+                    self.assertEqual(observer._metrics_cache_ttl("archive_candidate", "0xnotwatched"), 600)
             finally:
                 observer.store.close()
                 observer.writer.close()
@@ -732,15 +734,17 @@ class ObserverContextTests(unittest.TestCase):
                 try:
                     await observer._poll_watchlist_activity_once()
                     rows = observer.store.wallet_activity_events("0xabc")
+                    trades_count = observer.store.conn.execute("SELECT COUNT(*) AS n FROM trades WHERE wallet='0xabc'").fetchone()["n"]
                 finally:
                     observer.store.close()
                     observer.writer.close()
-                return rows, observer.data_api.fetch_user_activity.await_args.kwargs
+                return rows, trades_count, observer.data_api.fetch_user_activity.await_args.kwargs
 
-        rows, kwargs = asyncio.run(run_case())
+        rows, trades_count, kwargs = asyncio.run(run_case())
         self.assertEqual([row["activity_type"] for row in rows], ["TRADE", "MERGE", "REDEEM"])
         self.assertEqual(rows[0]["side"], "BUY")
         self.assertEqual(rows[1]["usdc"], 25)
+        self.assertEqual(trades_count, 1)
         self.assertIn("start", kwargs)
 
     def test_watchlist_activity_poll_uses_last_seen_with_safety_window(self):

@@ -148,6 +148,7 @@ class CryptoWalletObserver:
         self._discovery_score_cursor = 0
         self._single_score_discovery_turn = True
         self._score_cycles_since_prune = 0
+        self._watchlist_wallets: set[str] = set()
         self._active_snapshot_wallets: set[str] = set()
         self._metrics_cache: dict[str, _MetricsCacheEntry] = {}
         self._last_context_snapshot: dict[tuple[str, str], float] = {}
@@ -456,7 +457,15 @@ class CryptoWalletObserver:
                     "error": str(exc),
                 })
                 continue
-            for event in self.store.insert_wallet_activity_events(normalized):
+            inserted = self.store.insert_wallet_activity_events(normalized)
+            trade_rows = [
+                self._trade_from_activity_event(event)
+                for event in inserted
+                if event.get("activity_type") == "TRADE"
+            ]
+            if trade_rows:
+                self.store.insert_trades(trade_rows)
+            for event in inserted:
                 self.writer.write({
                     "event": "watchlist_activity_observed",
                     "observed_at": event["observed_at"],
@@ -472,6 +481,24 @@ class CryptoWalletObserver:
                     "usdc": event["usdc"],
                     "tx_hash": event["tx_hash"],
                 })
+
+    def _trade_from_activity_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "tx_hash": str(event.get("tx_hash") or ""),
+            "fill_id": f"activity:{event.get('activity_type') or ''}:{event.get('outcome_index')}",
+            "wallet": str(event.get("wallet") or "").lower(),
+            "market_slug": str(event.get("market_slug") or ""),
+            "condition_id": str(event.get("condition_id") or ""),
+            "symbol": str(event.get("symbol") or "").upper(),
+            "exchange_ts": int(event.get("exchange_ts") or 0),
+            "outcome": str(event.get("outcome") or ""),
+            "side": str(event.get("side") or "").upper(),
+            "price": float(event.get("price") or 0.0),
+            "size": float(event.get("size") or 0.0),
+            "usdc": float(event.get("usdc") or 0.0),
+            "name": str(event.get("name") or ""),
+            "pseudonym": str(event.get("pseudonym") or ""),
+        }
 
     def _should_snapshot(self, trade: dict[str, Any]) -> bool:
         wallet = trade["wallet"]
@@ -632,7 +659,7 @@ class CryptoWalletObserver:
             metrics.setdefault("markets_24h_source", "api_sample")
 
     def _metrics_cache_ttl(self, previous_status: str | None, wallet: str | None = None) -> float:
-        if wallet and wallet.lower() in self.store.watchlist_wallets():
+        if wallet and wallet.lower() in self._watchlist_wallets:
             return self.config.active_metrics_ttl_sec
         if previous_status in {"dormant_candidate", "archive_candidate"}:
             return self.config.dormant_metrics_ttl_sec
@@ -819,6 +846,7 @@ class CryptoWalletObserver:
 
     def _refresh_candidate_caches(self) -> None:
         watchlist_wallets = set(self.store.watchlist_wallets())
+        self._watchlist_wallets = watchlist_wallets
         self._active_snapshot_wallets = set(
             self.store.candidate_wallets("active_candidate", limit=self.config.max_active_candidates)
         ) | watchlist_wallets
