@@ -125,6 +125,10 @@ Watchlisted wallets are treated as manually protected research targets:
 - Activity rows are retained for 30 days while the wallet remains watchlisted
   and 7 days after it is no longer watchlisted; derived `watchlist_market_pnl`
   rows are removed when their underlying activity rows age out.
+- New SQLite databases enable incremental auto-vacuum and activity cleanup asks
+  SQLite to reclaim a small number of free pages after deletions. Existing
+  production databases that were created before this setting still require a
+  manual maintenance-window `VACUUM` if physical file size must be rebuilt.
 
 - Historical BTC/ETH 5m activity is used for candidate discovery and ranking.
   Polymarket profile portfolio-PnL curves are used as the primary historical

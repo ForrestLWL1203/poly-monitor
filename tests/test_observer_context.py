@@ -706,6 +706,7 @@ class ObserverContextTests(unittest.TestCase):
                         "size": 25,
                         "usdcSize": 1,
                         "asset": "token-down",
+                        "id": "activity-fill-1",
                     },
                     {
                         "transactionHash": "0xmerge",
@@ -734,17 +735,17 @@ class ObserverContextTests(unittest.TestCase):
                 try:
                     await observer._poll_watchlist_activity_once()
                     rows = observer.store.wallet_activity_events("0xabc")
-                    trades_count = observer.store.conn.execute("SELECT COUNT(*) AS n FROM trades WHERE wallet='0xabc'").fetchone()["n"]
+                    trade = observer.store.conn.execute("SELECT * FROM trades WHERE wallet='0xabc'").fetchone()
                 finally:
                     observer.store.close()
                     observer.writer.close()
-                return rows, trades_count, observer.data_api.fetch_user_activity.await_args.kwargs
+                return rows, dict(trade), observer.data_api.fetch_user_activity.await_args.kwargs
 
-        rows, trades_count, kwargs = asyncio.run(run_case())
+        rows, trade, kwargs = asyncio.run(run_case())
         self.assertEqual([row["activity_type"] for row in rows], ["TRADE", "MERGE", "REDEEM"])
         self.assertEqual(rows[0]["side"], "BUY")
         self.assertEqual(rows[1]["usdc"], 25)
-        self.assertEqual(trades_count, 1)
+        self.assertEqual(trade["fill_id"], "activity-fill-1")
         self.assertIn("start", kwargs)
 
     def test_watchlist_activity_poll_warns_on_cashflow_size_mismatch(self):

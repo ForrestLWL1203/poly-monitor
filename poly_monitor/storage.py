@@ -70,6 +70,7 @@ class WatchlistStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(WATCHLIST_SCHEMA_SQL)
@@ -183,6 +184,7 @@ class ObserverStore:
         self.conn.close()
 
     def _init_schema(self) -> None:
+        self.conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS trades (
@@ -672,12 +674,24 @@ class ObserverStore:
                 removed_pnl += int(pnl_cursor.rowcount or 0)
             else:
                 self._recompute_watchlist_activity_pnl(wallet, market_slug)
+        vacuum_pages = 0
         if removed_activity or removed_pnl:
+            vacuum_pages = self._incremental_vacuum_pages(1000)
             self.conn.commit()
         return {
             "removed_activity_events": removed_activity,
             "removed_watchlist_pnl_rows": removed_pnl,
+            "vacuum_pages": vacuum_pages,
         }
+
+    def _incremental_vacuum_pages(self, pages: int) -> int:
+        try:
+            before = int(self.conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+            self.conn.execute(f"PRAGMA incremental_vacuum({max(1, int(pages))})")
+            after = int(self.conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+        except sqlite3.Error:
+            return 0
+        return max(0, before - after)
 
     def recent_wallets(self, *, limit: int = 200) -> list[str]:
         rows = self.conn.execute(

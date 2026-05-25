@@ -512,7 +512,7 @@ class CryptoWalletObserver:
     def _trade_from_activity_event(self, event: dict[str, Any]) -> dict[str, Any]:
         return {
             "tx_hash": str(event.get("tx_hash") or ""),
-            "fill_id": f"activity:{event.get('activity_type') or ''}:{event.get('outcome_index')}",
+            "fill_id": str(event.get("fill_id") or f"activity:{event.get('activity_type') or ''}:{event.get('outcome_index')}"),
             "wallet": str(event.get("wallet") or "").lower(),
             "market_slug": str(event.get("market_slug") or ""),
             "condition_id": str(event.get("condition_id") or ""),

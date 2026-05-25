@@ -328,6 +328,7 @@ class ArchiveRetentionTests(unittest.TestCase):
 
         self.assertEqual(result["removed_activity_events"], 2)
         self.assertEqual(result["removed_watchlist_pnl_rows"], 2)
+        self.assertIn("vacuum_pages", result)
         self.assertEqual(remaining, {watched, fresh_removed})
         self.assertEqual(pnl_wallets, {watched, fresh_removed})
 
@@ -542,10 +543,12 @@ class ArchiveRetentionTests(unittest.TestCase):
             store = ObserverStore(Path(tmp) / "observer.sqlite")
             cache_size = store.conn.execute("PRAGMA cache_size").fetchone()[0]
             wal_autocheckpoint = store.conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+            auto_vacuum = store.conn.execute("PRAGMA auto_vacuum").fetchone()[0]
             store.close()
 
         self.assertEqual(cache_size, -32000)
         self.assertEqual(wal_autocheckpoint, 2000)
+        self.assertEqual(auto_vacuum, 2)
 
 
 if __name__ == "__main__":
