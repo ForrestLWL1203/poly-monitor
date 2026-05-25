@@ -34,6 +34,77 @@ def trade_row(
 
 
 class StorageWalletMetricsTests(unittest.TestCase):
+    def test_wallet_activity_events_store_trade_merge_and_redeem_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                rows = [
+                    {
+                        "tx_hash": "0xtrade",
+                        "wallet": "0xabc",
+                        "market_slug": "btc-updown-5m-1",
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": 100,
+                        "activity_type": "TRADE",
+                        "side": "BUY",
+                        "outcome": "Up",
+                        "outcome_index": 0,
+                        "price": 0.52,
+                        "size": 10,
+                        "usdc": 5.2,
+                        "asset": "token-up",
+                        "observed_at": "2026-05-25T00:00:00+00:00",
+                        "raw_json": '{"type":"TRADE"}',
+                    },
+                    {
+                        "tx_hash": "0xmerge",
+                        "wallet": "0xabc",
+                        "market_slug": "btc-updown-5m-1",
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": 110,
+                        "activity_type": "MERGE",
+                        "side": "",
+                        "outcome": "",
+                        "outcome_index": 999,
+                        "price": 0.0,
+                        "size": 10,
+                        "usdc": 10,
+                        "asset": "",
+                        "observed_at": "2026-05-25T00:00:01+00:00",
+                        "raw_json": '{"type":"MERGE"}',
+                    },
+                    {
+                        "tx_hash": "0xredeem",
+                        "wallet": "0xabc",
+                        "market_slug": "btc-updown-5m-1",
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": 120,
+                        "activity_type": "REDEEM",
+                        "side": "",
+                        "outcome": "",
+                        "outcome_index": 999,
+                        "price": 0.0,
+                        "size": 5,
+                        "usdc": 5,
+                        "asset": "",
+                        "observed_at": "2026-05-25T00:00:02+00:00",
+                        "raw_json": '{"type":"REDEEM"}',
+                    },
+                ]
+
+                inserted = store.insert_wallet_activity_events(rows + [dict(rows[0])])
+                saved = store.wallet_activity_events("0xABC")
+            finally:
+                store.close()
+
+        self.assertEqual(len(inserted), 3)
+        self.assertEqual([row["activity_type"] for row in saved], ["TRADE", "MERGE", "REDEEM"])
+        self.assertEqual(saved[1]["usdc"], 10)
+        self.assertEqual(saved[2]["outcome_index"], 999)
+
     def test_watchlist_store_initializes_only_watchlist_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"

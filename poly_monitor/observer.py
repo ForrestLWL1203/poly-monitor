@@ -10,7 +10,7 @@ from typing import Any
 from .book import compact_float, token_book_summary
 from .clob_stream import ClobBookStream
 from .crypto_price import fetch_crypto_price_api
-from .data_api import AsyncDataApiClient, normalize_trade
+from .data_api import AsyncDataApiClient, normalize_activity_event, normalize_trade
 from .market import MarketSeries, MarketWindow, find_current_or_next_window
 from .price_feed import ChainlinkPriceFeed, ChainlinkPriceHub
 from .scoring import CandidateThresholds, score_wallet
@@ -51,6 +51,9 @@ class ObserverConfig:
     archive_revival_min_trades_24h: int = 100
     archive_revival_min_markets_24h: int = 20
     archive_revival_cooldown_sec: float = 300.0
+    watchlist_activity_poll_sec: float = 30.0
+    watchlist_activity_lookback_sec: int = 6 * 3600
+    watchlist_activity_pages: int = 2
 
 
 @dataclass
@@ -135,6 +138,7 @@ class CryptoWalletObserver:
         self._last_open_price_refresh = 0.0
         self._last_settlement_check = 0.0
         self._last_trade_poll = 0.0
+        self._last_watchlist_activity_poll = 0.0
         self._single_score_bucket_cursor = 0
         self._watchlist_score_cursor = 0
         self._active_score_cursor = 0
@@ -159,6 +163,7 @@ class CryptoWalletObserver:
                 await self._refresh_window_open_prices_if_due()
                 await self._write_pending_settlements_if_due()
                 await self._poll_trades_if_due()
+                await self._poll_watchlist_activity_if_due()
                 await self._refresh_scores_if_due()
                 self._write_report_if_due()
                 self._cleanup_stale_data_if_due()
@@ -201,6 +206,12 @@ class CryptoWalletObserver:
         self._last_trade_poll = time.monotonic()
         await self._poll_trades_once()
 
+    async def _poll_watchlist_activity_if_due(self) -> None:
+        if time.monotonic() - self._last_watchlist_activity_poll < self.config.watchlist_activity_poll_sec:
+            return
+        self._last_watchlist_activity_poll = time.monotonic()
+        await self._poll_watchlist_activity_once()
+
     def _next_sleep_delay(self, started: float) -> float:
         now = time.monotonic()
         due_times = [
@@ -208,6 +219,7 @@ class CryptoWalletObserver:
             self._last_window_refresh + self.config.window_refresh_sec,
             self._last_score_refresh + self.config.score_refresh_sec,
             self._last_report_refresh + self.config.report_refresh_sec,
+            self._last_watchlist_activity_poll + self.config.watchlist_activity_poll_sec,
         ]
         if self._has_missing_open_prices():
             due_times.append(self._last_open_price_refresh + self.config.open_price_refresh_sec)
@@ -396,6 +408,65 @@ class CryptoWalletObserver:
                         window_close_reference_price=self.window_reference_prices.get(window.slug, {}).get("close"),
                         max_book_age_sec=self.config.book_max_age_sec,
                     ))
+
+    async def _poll_watchlist_activity_once(self) -> None:
+        wallets = self.store.watchlist_wallets()
+        if not wallets:
+            return
+        now_ts = int(dt.datetime.now(dt.timezone.utc).timestamp())
+        start_ts = now_ts - max(60, int(self.config.watchlist_activity_lookback_sec))
+        end_ts = now_ts + 60
+        observed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        page_size = 500
+        page_count = max(1, int(self.config.watchlist_activity_pages))
+        for wallet in wallets:
+            normalized: list[dict[str, Any]] = []
+            try:
+                for page in range(page_count):
+                    rows = await self.data_api.fetch_user_activity(
+                        wallet,
+                        limit=page_size,
+                        offset=page * page_size,
+                        start=start_ts,
+                        end=end_ts,
+                    )
+                    if not rows:
+                        break
+                    for raw in rows:
+                        activity_type = str(raw.get("type") or "").upper()
+                        if activity_type not in {"TRADE", "MERGE", "REDEEM", "SPLIT"}:
+                            continue
+                        event = normalize_activity_event(raw, wallet=wallet, observed_at=observed_at)
+                        if event["market_slug"] and "-updown-5m-" not in event["market_slug"]:
+                            continue
+                        normalized.append(event)
+                    if len(rows) < page_size:
+                        break
+            except Exception as exc:
+                self.writer.write({
+                    "event": "api_error",
+                    "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "source": "watchlist_activity",
+                    "wallet": wallet,
+                    "error": str(exc),
+                })
+                continue
+            for event in self.store.insert_wallet_activity_events(normalized):
+                self.writer.write({
+                    "event": "watchlist_activity_observed",
+                    "observed_at": event["observed_at"],
+                    "wallet": event["wallet"],
+                    "activity_type": event["activity_type"],
+                    "market_slug": event["market_slug"],
+                    "condition_id": event["condition_id"],
+                    "exchange_ts": event["exchange_ts"],
+                    "side": event["side"],
+                    "outcome": event["outcome"],
+                    "price": event["price"],
+                    "size": event["size"],
+                    "usdc": event["usdc"],
+                    "tx_hash": event["tx_hash"],
+                })
 
     def _should_snapshot(self, trade: dict[str, Any]) -> bool:
         wallet = trade["wallet"]

@@ -29,7 +29,8 @@ python3 scripts/run_crypto_wallet_observer.py \
 ## Outputs
 
 - `data/raw/YYYY-MM-DD/events.jsonl`: compact raw events, 3-day rolling retention by default.
-- `data/state/observer.sqlite`: dedupe state, trades, candidate scores, watchlist wallets, and local PnL ledger.
+- `data/state/observer.sqlite`: dedupe state, trades, candidate scores,
+  watchlist wallets, watchlist activity events, and local PnL ledger.
 - `data/reports/latest_candidates.json`: active, dormant, and archive candidate snapshots.
 
 ## Dashboard
@@ -102,6 +103,11 @@ Watchlisted wallets are treated as manually protected research targets:
   current stored status is dormant or archived.
 - Their metrics cache uses the active refresh TTL, so archived watchlist wallets
   are refreshed more often than ordinary archived wallets.
+- The observer also polls each watchlisted wallet's Polymarket Activity feed
+  every 30 seconds by default and stores BTC/ETH/SOL/XRP 5m `TRADE`, `SPLIT`,
+  `MERGE`, and `REDEEM` rows in `wallet_activity_events`. This is separate from
+  the market `/trades` collector and is the data needed to reconstruct complete
+  set locking, merges, and final redemptions.
 
 - Historical BTC/ETH 5m activity is used for candidate discovery and ranking.
   Polymarket profile portfolio-PnL curves are used as the primary historical

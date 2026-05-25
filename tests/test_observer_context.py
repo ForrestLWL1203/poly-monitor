@@ -678,6 +678,71 @@ class ObserverContextTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run_case()), 2)
 
+    def test_watchlist_activity_poll_persists_trade_merge_and_redeem(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(
+                    ObserverConfig(
+                        data_dir=Path(tmp),
+                        watchlist_activity_poll_sec=0,
+                        watchlist_activity_lookback_sec=600,
+                    )
+                )
+                observer.store.add_watchlist_wallet("0xabc")
+                raw = [
+                    {
+                        "transactionHash": "0xtrade",
+                        "proxyWallet": "0xabc",
+                        "timestamp": 100,
+                        "conditionId": "0xcond",
+                        "type": "TRADE",
+                        "side": "BUY",
+                        "outcome": "Down",
+                        "outcomeIndex": 1,
+                        "slug": "btc-updown-5m-1",
+                        "price": 0.04,
+                        "size": 25,
+                        "usdcSize": 1,
+                        "asset": "token-down",
+                    },
+                    {
+                        "transactionHash": "0xmerge",
+                        "proxyWallet": "0xabc",
+                        "timestamp": 110,
+                        "conditionId": "0xcond",
+                        "type": "MERGE",
+                        "outcomeIndex": 999,
+                        "slug": "btc-updown-5m-1",
+                        "size": 25,
+                        "usdcSize": 25,
+                    },
+                    {
+                        "transactionHash": "0xredeem",
+                        "proxyWallet": "0xabc",
+                        "timestamp": 120,
+                        "conditionId": "0xcond",
+                        "type": "REDEEM",
+                        "outcomeIndex": 999,
+                        "slug": "btc-updown-5m-1",
+                        "size": 5,
+                        "usdcSize": 5,
+                    },
+                ]
+                observer.data_api.fetch_user_activity = AsyncMock(return_value=raw)
+                try:
+                    await observer._poll_watchlist_activity_once()
+                    rows = observer.store.wallet_activity_events("0xabc")
+                finally:
+                    observer.store.close()
+                    observer.writer.close()
+                return rows, observer.data_api.fetch_user_activity.await_args.kwargs
+
+        rows, kwargs = asyncio.run(run_case())
+        self.assertEqual([row["activity_type"] for row in rows], ["TRADE", "MERGE", "REDEEM"])
+        self.assertEqual(rows[0]["side"], "BUY")
+        self.assertEqual(rows[1]["usdc"], 25)
+        self.assertIn("start", kwargs)
+
     def test_context_snapshot_cooldown_is_per_wallet_and_market(self):
         with tempfile.TemporaryDirectory() as tmp:
             observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), context_snapshot_cooldown_sec=5.0))

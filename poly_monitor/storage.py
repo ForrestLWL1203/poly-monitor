@@ -244,6 +244,27 @@ class ObserverStore:
                 incomplete INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(wallet, market_slug)
             );
+            CREATE TABLE IF NOT EXISTS wallet_activity_events (
+                tx_hash TEXT NOT NULL,
+                wallet TEXT NOT NULL,
+                market_slug TEXT NOT NULL,
+                condition_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                exchange_ts INTEGER NOT NULL,
+                activity_type TEXT NOT NULL,
+                side TEXT NOT NULL DEFAULT '',
+                outcome TEXT NOT NULL DEFAULT '',
+                outcome_index INTEGER NOT NULL DEFAULT -1,
+                price REAL NOT NULL DEFAULT 0,
+                size REAL NOT NULL DEFAULT 0,
+                usdc REAL NOT NULL DEFAULT 0,
+                asset TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                pseudonym TEXT NOT NULL DEFAULT '',
+                raw_json TEXT NOT NULL DEFAULT '{}',
+                observed_at TEXT NOT NULL,
+                PRIMARY KEY(tx_hash, wallet, condition_id, activity_type, outcome_index, asset, price, size)
+            );
             """
         )
         self.conn.executescript(WATCHLIST_SCHEMA_SQL)
@@ -308,6 +329,9 @@ class ObserverStore:
             CREATE INDEX IF NOT EXISTS idx_settlements_completed ON market_settlements(completed, settled_at);
             CREATE INDEX IF NOT EXISTS idx_wallet_market_pnl_wallet_settled ON wallet_market_pnl(wallet, settled_at);
             CREATE INDEX IF NOT EXISTS idx_wallet_market_pnl_market ON wallet_market_pnl(market_slug);
+            CREATE INDEX IF NOT EXISTS idx_wallet_activity_wallet_ts ON wallet_activity_events(wallet, exchange_ts);
+            CREATE INDEX IF NOT EXISTS idx_wallet_activity_market_ts ON wallet_activity_events(market_slug, exchange_ts);
+            CREATE INDEX IF NOT EXISTS idx_wallet_activity_type ON wallet_activity_events(activity_type, exchange_ts);
             """
         )
         self.conn.commit()
@@ -387,6 +411,51 @@ class ObserverStore:
                 inserted.append(row)
         self.conn.commit()
         return inserted
+
+    def insert_wallet_activity_events(self, rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        inserted: list[dict[str, Any]] = []
+        for row in rows:
+            cursor = self.conn.execute(
+                """
+                INSERT OR IGNORE INTO wallet_activity_events(
+                    tx_hash,wallet,market_slug,condition_id,symbol,exchange_ts,activity_type,side,outcome,
+                    outcome_index,price,size,usdc,asset,name,pseudonym,raw_json,observed_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    str(row.get("tx_hash") or ""),
+                    str(row.get("wallet") or "").lower(),
+                    str(row.get("market_slug") or ""),
+                    str(row.get("condition_id") or ""),
+                    str(row.get("symbol") or "").upper(),
+                    int(row.get("exchange_ts") or 0),
+                    str(row.get("activity_type") or "").upper(),
+                    str(row.get("side") or "").upper(),
+                    str(row.get("outcome") or ""),
+                    int(row.get("outcome_index") if row.get("outcome_index") is not None else -1),
+                    float(row.get("price") or 0.0),
+                    float(row.get("size") or 0.0),
+                    float(row.get("usdc") or 0.0),
+                    str(row.get("asset") or ""),
+                    str(row.get("name") or ""),
+                    str(row.get("pseudonym") or ""),
+                    str(row.get("raw_json") or "{}"),
+                    utc_iso(row.get("observed_at")),
+                ),
+            )
+            if cursor.rowcount:
+                inserted.append(row)
+        self.conn.commit()
+        return inserted
+
+    def wallet_activity_events(self, wallet: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM wallet_activity_events WHERE wallet=? ORDER BY exchange_ts ASC, tx_hash ASC"
+        params: tuple[Any, ...] = (wallet.lower(),)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (wallet.lower(), int(limit))
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
 
     def recent_wallets(self, *, limit: int = 200) -> list[str]:
         rows = self.conn.execute(

@@ -70,6 +70,38 @@ def normalize_trade(raw: dict[str, Any], *, symbol: str, observed_at: str) -> di
     }
 
 
+def symbol_from_slug(slug: str) -> str:
+    prefix = slug.split("-", 1)[0].upper() if slug else ""
+    return prefix if prefix in {"BTC", "ETH", "SOL", "XRP"} else ""
+
+
+def normalize_activity_event(raw: dict[str, Any], *, wallet: str, observed_at: str) -> dict[str, Any]:
+    price = float(raw.get("price") or 0.0)
+    size = float(raw.get("size") or 0.0)
+    usdc = raw.get("usdcSize")
+    slug = str(raw.get("slug") or raw.get("eventSlug") or "")
+    return {
+        "observed_at": observed_at,
+        "exchange_ts": int(raw.get("timestamp") or 0),
+        "symbol": symbol_from_slug(slug),
+        "market_slug": slug,
+        "condition_id": str(raw.get("conditionId") or ""),
+        "wallet": str(raw.get("proxyWallet") or wallet or "").lower(),
+        "activity_type": str(raw.get("type") or "").upper(),
+        "side": str(raw.get("side") or "").upper(),
+        "outcome": str(raw.get("outcome") or ""),
+        "outcome_index": int(raw.get("outcomeIndex") if raw.get("outcomeIndex") is not None else -1),
+        "price": price,
+        "size": size,
+        "usdc": float(usdc) if usdc is not None else round(price * size, 6),
+        "asset": str(raw.get("asset") or ""),
+        "tx_hash": str(raw.get("transactionHash") or ""),
+        "name": str(raw.get("name") or ""),
+        "pseudonym": str(raw.get("pseudonym") or ""),
+        "raw_json": json.dumps(raw, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+    }
+
+
 def fetch_market_trades(condition_id: str, *, limit: int = 100, offset: int = 0, pages: int = 4) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
@@ -166,6 +198,15 @@ class AsyncDataApiClient:
             if not data:
                 break
         return rows
+
+    async def fetch_user_activity(self, wallet: str, *, limit: int = 500, offset: int = 0, start: int | None = None, end: int | None = None) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"user": wallet, "limit": limit, "offset": offset}
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        data = await self._get_json("/activity", params)
+        return data if isinstance(data, list) else []
 
 
 def fetch_user_activity(wallet: str, *, limit: int = 500, offset: int = 0, start: int | None = None, end: int | None = None) -> list[dict[str, Any]]:
