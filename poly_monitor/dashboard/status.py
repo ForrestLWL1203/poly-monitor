@@ -725,6 +725,8 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
             return None
         metrics = _safe_json_loads(score_row["metrics_json"], {}) if score_row else _wallet_local_metrics(conn, wallet)
         display_name = name_row["name"] if name_row else ""
+        if not display_name and isinstance(metrics, dict):
+            display_name = str(metrics.get("name") or metrics.get("profile_name") or metrics.get("pseudonym") or "")
         if display_name and "name" not in metrics:
             metrics["name"] = display_name
         reasons = _safe_json_loads(score_row["reasons_json"], []) if score_row else []
@@ -748,6 +750,7 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
         return {
             "wallet": wallet,
             "wallet_short": compact_wallet(wallet),
+            "name": display_name,
             "status": score_row["status"] if score_row else "unscored",
             "rank_score": score_row["rank_score"] if score_row else None,
             "updated_at": score_row["updated_at"] if score_row else None,

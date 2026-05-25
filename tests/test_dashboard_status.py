@@ -158,7 +158,40 @@ class DashboardStatusTests(unittest.TestCase):
 
         self.assertEqual(status["candidates"]["active_candidate"][0]["name"], "frontrow-user")
         self.assertEqual(status["candidates"]["active_candidate"][0]["metrics"]["name"], "frontrow-user")
+        self.assertEqual(detail["name"], "frontrow-user")
         self.assertEqual(detail["metrics"]["name"], "frontrow-user")
+
+    def test_wallet_detail_uses_profile_name_without_recent_trades(self):
+        from poly_monitor.dashboard.status import wallet_detail
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0x5555555555555555555555555555555555555555"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            store.upsert_score(
+                CandidateScore(
+                    wallet=wallet,
+                    status="active_candidate",
+                    rank_score=10,
+                    reasons=[],
+                    metrics={
+                        "wallet": wallet,
+                        "profile_name": "GODPROVIDES",
+                        "trades_7d": 10,
+                        "trades_30d": 10,
+                        "pnl_7d": 1,
+                        "pnl_30d": 1,
+                        "wins_7d": 1,
+                        "losses_7d": 0,
+                    },
+                )
+            )
+            store.close()
+
+            detail = wallet_detail(data_dir, wallet)
+
+        self.assertEqual(detail["name"], "GODPROVIDES")
+        self.assertEqual(detail["metrics"]["name"], "GODPROVIDES")
 
     def test_wallet_detail_includes_observed_settled_market_pnl_rows(self):
         from poly_monitor.dashboard.status import wallet_detail

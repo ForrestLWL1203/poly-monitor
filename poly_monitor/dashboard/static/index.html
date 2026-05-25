@@ -755,7 +755,8 @@
 
     async function loadWallet(wallet) {
       const detail = await api(`/api/wallet?address=${encodeURIComponent(wallet)}`);
-      $("detailHeading").textContent = shortName(detail.metrics?.name || detail.wallet_short || "钱包详情", 36);
+      const detailName = detail.name || detail.metrics?.name || detail.metrics?.profile_name || detail.metrics?.pseudonym || detail.wallet_short || "钱包详情";
+      $("detailHeading").textContent = shortName(detailName, 36);
       $("detailTitle").textContent = detail.wallet || "";
       const m = detail.metrics || {};
       const ledger = detail.ledger_summary || {};
@@ -785,7 +786,7 @@
         ["胜方加仓", pct(m.winner_add_rate)]
       ];
       $("walletDetail").innerHTML = `
-        <div title="${detail.metrics?.name || "unnamed"}"><strong class="user-name">${shortName(detail.metrics?.name || "unnamed")}</strong></div>
+        <div title="${detailName}"><strong class="user-name">${shortName(detailName)}</strong></div>
         <div class="addr" title="${detail.wallet}">${detail.wallet}</div>
         <div class="kv">${kv.map(([k, v]) => `<div><div class="subtle">${k}</div><strong>${v}</strong></div>`).join("")}</div>
         <div class="subtle">${reasonText(detail)}</div>`;
