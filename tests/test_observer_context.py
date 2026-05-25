@@ -1085,6 +1085,64 @@ class ObserverContextTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run_case()), 2)
 
+    def test_poll_trades_uses_low_page_count_for_candidate_discovery(self):
+        async def run_case():
+            now = dt.datetime.now(dt.timezone.utc)
+            window = MarketWindow(
+                symbol="BTC",
+                slug="btc-updown-5m-1",
+                condition_id="0xcond",
+                question="Bitcoin Up or Down",
+                up_token="up",
+                down_token="down",
+                start_time=now,
+                end_time=now + dt.timedelta(minutes=5),
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(
+                    ObserverConfig(data_dir=Path(tmp), market_trade_pages=1, watched_market_trade_pages=3)
+                )
+                observer.windows["BTC"] = window
+                observer.data_api.fetch_market_trades = AsyncMock(return_value=[])
+                await observer._poll_trades_once()
+                call = observer.data_api.fetch_market_trades.await_args
+                observer.store.close()
+                observer.writer.close()
+                return call
+
+        call = asyncio.run(run_case())
+        self.assertEqual(call.args[0], "0xcond")
+        self.assertEqual(call.kwargs["limit"], 100)
+        self.assertEqual(call.kwargs["pages"], 1)
+
+    def test_poll_trades_backs_off_after_rate_limit(self):
+        async def run_case():
+            now = dt.datetime.now(dt.timezone.utc)
+            window = MarketWindow(
+                symbol="BTC",
+                slug="btc-updown-5m-1",
+                condition_id="0xcond",
+                question="Bitcoin Up or Down",
+                up_token="up",
+                down_token="down",
+                start_time=now,
+                end_time=now + dt.timedelta(minutes=5),
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(
+                    ObserverConfig(data_dir=Path(tmp), market_trade_rate_limit_backoff_sec=60)
+                )
+                observer.windows["BTC"] = window
+                observer.data_api.fetch_market_trades = AsyncMock(side_effect=Exception("429 Too Many Requests"))
+                await observer._poll_trades_once(now_monotonic=100.0)
+                await observer._poll_trades_once(now_monotonic=120.0)
+                calls = observer.data_api.fetch_market_trades.await_count
+                observer.store.close()
+                observer.writer.close()
+                return calls
+
+        self.assertEqual(asyncio.run(run_case()), 1)
+
     def test_watchlist_activity_poll_persists_trade_merge_and_redeem(self):
         async def run_case():
             with tempfile.TemporaryDirectory() as tmp:

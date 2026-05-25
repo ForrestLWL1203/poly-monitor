@@ -70,6 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--watched-market-state-heartbeat-sec", type=float, default=1.0)
     parser.add_argument("--watchlist-market-capture-after-end-sec", type=float, default=1800.0)
     parser.add_argument("--max-context-writes-per-cycle", type=int, default=200)
+    parser.add_argument("--market-trade-pages", type=int, default=1)
+    parser.add_argument("--watched-market-trade-pages", type=int, default=2)
+    parser.add_argument("--market-trade-rate-limit-backoff-sec", type=float, default=60.0)
     return parser
 
 
@@ -123,6 +126,9 @@ async def async_main() -> int:
         watched_market_state_heartbeat_sec=args.watched_market_state_heartbeat_sec,
         watchlist_market_capture_after_end_sec=args.watchlist_market_capture_after_end_sec,
         max_context_writes_per_cycle=args.max_context_writes_per_cycle,
+        market_trade_pages=args.market_trade_pages,
+        watched_market_trade_pages=args.watched_market_trade_pages,
+        market_trade_rate_limit_backoff_sec=args.market_trade_rate_limit_backoff_sec,
     )
     observer = CryptoWalletObserver(config)
     return await observer.run()

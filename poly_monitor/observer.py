@@ -69,6 +69,9 @@ class ObserverConfig:
     watched_market_state_heartbeat_sec: float = 1.0
     watchlist_market_capture_after_end_sec: float = 1800.0
     max_context_writes_per_cycle: int = 200
+    market_trade_pages: int = 1
+    watched_market_trade_pages: int = 2
+    market_trade_rate_limit_backoff_sec: float = 60.0
 
 
 @dataclass
@@ -200,6 +203,7 @@ class CryptoWalletObserver:
         self._last_context_snapshot: dict[tuple[str, str], float] = {}
         self._last_market_state_sample: dict[str, tuple[dt.datetime, tuple[Any, ...]]] = {}
         self._last_score_event_state: dict[str, tuple[str, float]] = {}
+        self._market_trade_backoff_until: dict[str, float] = {}
         self._refresh_candidate_caches()
 
     async def run(self) -> int:
@@ -452,13 +456,31 @@ class CryptoWalletObserver:
             tokens.extend([window.up_token, window.down_token])
         return tokens
 
-    async def _poll_trades_once(self) -> None:
+    async def _poll_trades_once(self, *, now_monotonic: float | None = None) -> None:
+        monotonic_now = time.monotonic() if now_monotonic is None else now_monotonic
         for symbol, window in self._market_trade_poll_windows():
-            try:
-                raw_trades = await self.data_api.fetch_market_trades(window.condition_id, limit=500, offset=0)
-            except Exception as exc:
-                self.writer.write({"event": "api_error", "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "source": "market_trades", "symbol": symbol, "error": str(exc)})
+            backoff_until = self._market_trade_backoff_until.get(window.condition_id, 0.0)
+            if monotonic_now < backoff_until:
                 continue
+            is_watched = self.store.is_watched_market_active(window.slug)
+            pages = self.config.watched_market_trade_pages if is_watched else self.config.market_trade_pages
+            page_size = max(1, min(100, int(pages) * 100))
+            try:
+                raw_trades = await self.data_api.fetch_market_trades(
+                    window.condition_id,
+                    limit=page_size,
+                    offset=0,
+                    pages=max(1, int(pages)),
+                )
+            except Exception as exc:
+                error = str(exc)
+                if "429" in error or "Too Many Requests" in error:
+                    self._market_trade_backoff_until[window.condition_id] = (
+                        monotonic_now + max(1.0, float(self.config.market_trade_rate_limit_backoff_sec))
+                    )
+                self.writer.write({"event": "api_error", "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "source": "market_trades", "symbol": symbol, "error": error})
+                continue
+            self._market_trade_backoff_until.pop(window.condition_id, None)
             observed_at = dt.datetime.now(dt.timezone.utc).isoformat()
             last_seen_ts = self.store.market_last_exchange_ts(window.condition_id)
             normalized: list[dict[str, Any]] = []
