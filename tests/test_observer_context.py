@@ -269,6 +269,74 @@ class ObserverContextTests(unittest.TestCase):
         self.assertEqual(metrics["local_observed_pnl_7d"], -4.0)
         self.assertEqual(metrics["local_observed_settled_markets_7d"], 1)
 
+    def test_scoring_keeps_wallet_with_local_ledger_after_trade_cleanup(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1))
+                wallet = "0xledger"
+                observer.store.upsert_score(CandidateScore(wallet, "active_candidate", 1.0, [], {"wallet": wallet, "historical_trades": 10}))
+                observer.store.conn.execute(
+                    """
+                    INSERT INTO wallet_market_pnl(
+                        wallet, market_slug, condition_id, symbol, realized_pnl, buy_usdc,
+                        sell_usdc, settled_value, net_shares_up, net_shares_down, trades,
+                        winning_side, settled_at, incomplete
+                    )
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+                    """,
+                    (
+                        wallet,
+                        "btc-updown-5m-1",
+                        "0xcond",
+                        "BTC",
+                        25.0,
+                        50.0,
+                        0.0,
+                        75.0,
+                        75.0,
+                        0.0,
+                        1,
+                        "Up",
+                        dt.datetime.now(dt.timezone.utc).isoformat(),
+                    ),
+                )
+                observer.store.conn.commit()
+                api_metrics = {
+                    "wallet": wallet,
+                    "trades_24h": 600,
+                    "markets_24h": 100,
+                    "trades_7d": 900,
+                    "markets_7d": 100,
+                    "trades_30d": 900,
+                    "markets_30d": 100,
+                    "pnl_7d": 100,
+                    "pnl_30d": 100,
+                    "pnl_source": "crypto_settled_positions",
+                    "top1_concentration": 0.1,
+                    "top3_concentration": 0.2,
+                    "longshot_profit_share": 0.0,
+                    "longshot_profit_markets": 0,
+                    "last_active_age_hours": 0.1,
+                    "historical_trades": 900,
+                    "historical_markets": 100,
+                    "historical_pnl": 100,
+                    "dual_side_rate": 0,
+                    "late_bias_shift": 0,
+                    "winner_add_rate": 0,
+                }
+                with patch("poly_monitor.observer.build_metrics_from_api", return_value=api_metrics):
+                    metrics = await observer._metrics_for_wallet(wallet, "active_candidate")
+                exists = observer.store.conn.execute("SELECT 1 FROM candidate_scores WHERE wallet=?", (wallet,)).fetchone() is not None
+                observer.store.close()
+                observer.writer.close()
+                return metrics, exists
+
+        metrics, exists = asyncio.run(run_case())
+
+        self.assertTrue(exists)
+        self.assertIsNotNone(metrics)
+        self.assertEqual(metrics["local_observed_settled_markets_total"], 1)
+
     def test_reactivated_archive_wallet_is_scored_again(self):
         async def run_case():
             with tempfile.TemporaryDirectory() as tmp:

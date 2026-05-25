@@ -490,7 +490,11 @@ class CryptoWalletObserver:
         if entry is not None and now - entry.fetched_at < ttl:
             return dict(entry.metrics)
         local_metrics = self.store.wallet_trade_metrics(wallet)
-        if previous_status is not None and not int(local_metrics.get("historical_trades") or 0):
+        if (
+            previous_status is not None
+            and not int(local_metrics.get("historical_trades") or 0)
+            and not int(local_metrics.get("settled_markets_total") or 0)
+        ):
             self.store.delete_candidate_score(wallet)
             self._metrics_cache.pop(wallet, None)
             self._last_score_event_state.pop(wallet.lower(), None)

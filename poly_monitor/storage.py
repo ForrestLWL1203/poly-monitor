@@ -460,6 +460,7 @@ class ObserverStore:
             "historical_pnl": 0.0,
         }
         if not row or not int(row["historical_trades"] or 0):
+            metrics.update(self.wallet_observed_pnl_metrics(wallet, now_ts=now_value))
             return metrics
         metrics["trades_24h"] = int(row["trades_24h"] or 0)
         metrics["markets_24h"] = int(row["markets_24h"] or 0)
