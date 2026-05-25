@@ -162,6 +162,7 @@ class CryptoWalletObserver:
         self._score_cycles_since_prune = 0
         self._watchlist_wallets: set[str] = set()
         self._active_snapshot_wallets: set[str] = set()
+        self._watchlist_settlement_backfilled: set[str] = set()
         self._metrics_cache: dict[str, _MetricsCacheEntry] = {}
         self._last_context_snapshot: dict[tuple[str, str], float] = {}
         self._last_score_event_state: dict[str, tuple[str, float]] = {}
@@ -470,6 +471,7 @@ class CryptoWalletObserver:
                 })
                 continue
             inserted = self.store.insert_wallet_activity_events(normalized)
+            await self._backfill_watchlist_activity_settlements(inserted)
             trade_rows = [
                 self._trade_from_activity_event(event)
                 for event in inserted
@@ -496,6 +498,87 @@ class CryptoWalletObserver:
                     "usdc": event["usdc"],
                     "tx_hash": event["tx_hash"],
                 })
+
+    async def _backfill_watchlist_activity_settlements(self, events: list[dict[str, Any]]) -> None:
+        now = dt.datetime.now(dt.timezone.utc)
+        windows: dict[str, MarketWindow] = {}
+        for event in events:
+            window = self._activity_window_from_slug(event)
+            if window is None:
+                continue
+            if window.slug in self._watchlist_settlement_backfilled:
+                continue
+            if window.end_time + dt.timedelta(seconds=self.config.settlement_delay_sec) > now:
+                continue
+            existing = self.store.conn.execute(
+                "SELECT 1 FROM market_settlements WHERE market_slug=? AND completed=1 AND winning_side != ''",
+                (window.slug,),
+            ).fetchone()
+            if existing is not None:
+                self._watchlist_settlement_backfilled.add(window.slug)
+                continue
+            windows[window.slug] = window
+        for window in windows.values():
+            data = await asyncio.to_thread(fetch_crypto_price_api, window)
+            if data is None or data.get("openPrice") is None or data.get("closePrice") is None:
+                continue
+            open_price = float(data["openPrice"])
+            close_price = float(data["closePrice"])
+            winning_side = "Up" if close_price >= open_price else "Down"
+            completed = bool(data.get("completed"))
+            changed = self.store.upsert_market_settlement(
+                {
+                    "market_slug": window.slug,
+                    "condition_id": window.condition_id,
+                    "symbol": window.symbol,
+                    "winning_side": winning_side,
+                    "settlement_open_price": compact_float(open_price, 6),
+                    "settlement_close_price": compact_float(close_price, 6),
+                    "settled_at": now.isoformat(),
+                    "completed": completed,
+                }
+            )
+            if completed:
+                self._watchlist_settlement_backfilled.add(window.slug)
+            if changed:
+                self.writer.write({
+                    "event": "watchlist_activity_settlement_backfill",
+                    "observed_at": now.isoformat(),
+                    "symbol": window.symbol,
+                    "market_slug": window.slug,
+                    "condition_id": window.condition_id,
+                    "settlement_open_price": compact_float(open_price, 6),
+                    "settlement_close_price": compact_float(close_price, 6),
+                    "winning_side": winning_side,
+                    "settlement_completed": completed,
+                    "settlement_cached": bool(data.get("cached")),
+                })
+
+    def _activity_window_from_slug(self, event: dict[str, Any]) -> MarketWindow | None:
+        slug = str(event.get("market_slug") or "")
+        marker = "-updown-5m-"
+        if marker not in slug:
+            return None
+        prefix, raw_epoch = slug.rsplit(marker, 1)
+        try:
+            start_epoch = int(raw_epoch)
+        except ValueError:
+            return None
+        if start_epoch < 1_600_000_000:
+            return None
+        symbol = str(event.get("symbol") or prefix).upper()
+        start_time = dt.datetime.fromtimestamp(start_epoch, dt.timezone.utc)
+        end_time = start_time + dt.timedelta(seconds=300)
+        return MarketWindow(
+            symbol=symbol,
+            slug=slug,
+            condition_id=str(event.get("condition_id") or ""),
+            question="",
+            up_token="",
+            down_token="",
+            start_time=start_time,
+            end_time=end_time,
+        )
 
     def _activity_value_warning(self, event: dict[str, Any]) -> dict[str, Any] | None:
         activity_type = str(event.get("activity_type") or "").upper()

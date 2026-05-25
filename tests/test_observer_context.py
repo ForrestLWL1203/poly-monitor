@@ -747,6 +747,58 @@ class ObserverContextTests(unittest.TestCase):
         self.assertEqual(trade["fill_id"], "activity-fill-1")
         self.assertIn("start", kwargs)
 
+    def test_watchlist_activity_poll_backfills_settlement_for_historical_market(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(
+                    ObserverConfig(
+                        data_dir=Path(tmp),
+                        watchlist_activity_poll_sec=0,
+                        watchlist_activity_lookback_sec=600,
+                    )
+                )
+                observer.store.add_watchlist_wallet("0xabc")
+                observer.data_api.fetch_user_activity = AsyncMock(
+                    return_value=[
+                        {
+                            "transactionHash": "0xtrade",
+                            "proxyWallet": "0xabc",
+                            "timestamp": 1770000010,
+                            "conditionId": "0xcond",
+                            "type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Down",
+                            "outcomeIndex": 1,
+                            "slug": "eth-updown-5m-1770000000",
+                            "price": 0.6,
+                            "size": 10,
+                            "usdcSize": 6,
+                            "asset": "token-down",
+                            "id": "activity-fill-1",
+                        },
+                    ]
+                )
+                try:
+                    with patch(
+                        "poly_monitor.observer.fetch_crypto_price_api",
+                        return_value={"openPrice": 100, "closePrice": 99, "completed": True, "cached": False},
+                    ) as fetch_price:
+                        await observer._poll_watchlist_activity_once()
+                    pnl_rows = observer.store.watchlist_market_pnl_rows("0xabc")
+                    settlement = observer.store.conn.execute(
+                        "SELECT * FROM market_settlements WHERE market_slug='eth-updown-5m-1770000000'"
+                    ).fetchone()
+                finally:
+                    observer.store.close()
+                    observer.writer.close()
+                return fetch_price.call_count, pnl_rows, dict(settlement)
+
+        call_count, pnl_rows, settlement = asyncio.run(run_case())
+        self.assertEqual(call_count, 1)
+        self.assertEqual(settlement["winning_side"], "Down")
+        self.assertFalse(pnl_rows[0]["incomplete"])
+        self.assertAlmostEqual(pnl_rows[0]["realized_pnl"], 4.0)
+
     def test_watchlist_activity_poll_warns_on_cashflow_size_mismatch(self):
         async def run_case():
             with tempfile.TemporaryDirectory() as tmp:

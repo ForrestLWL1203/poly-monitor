@@ -365,6 +365,7 @@ class ObserverStore:
             """
         )
         self._purge_traditional_pnl_shadowed_by_activity_cashflows()
+        self._recompute_all_watchlist_activity_pnl()
         self.conn.commit()
 
     def add_watchlist_wallet(self, wallet: str, *, note: str = "") -> None:
@@ -534,12 +535,15 @@ class ObserverStore:
         up = down = 0.0
         has_merge = False
         has_redeem = False
+        pending_redeem_size = 0.0
+        latest_exchange_ts = 0
         for row in rows:
             activity_type = str(row["activity_type"] or "").upper()
             side = str(row["side"] or "").upper()
             outcome = str(row["outcome"] or "")
             size = float(row["size"] or 0.0)
             usdc = float(row["usdc"] or 0.0)
+            latest_exchange_ts = max(latest_exchange_ts, int(row["exchange_ts"] or 0))
             share_key = outcome.lower()
             if activity_type == "TRADE":
                 if side == "SELL":
@@ -575,6 +579,20 @@ class ObserverStore:
                     up -= size
                 elif winning_side.lower() == "down":
                     down -= size
+                else:
+                    pending_redeem_size += size
+        if not winning_side and pending_redeem_size > 0:
+            tolerance = max(0.01, pending_redeem_size * 1e-6)
+            up_match = abs(up - pending_redeem_size) <= tolerance
+            down_match = abs(down - pending_redeem_size) <= tolerance
+            if up_match != down_match:
+                winning_side = "Up" if up_match else "Down"
+                if winning_side == "Up":
+                    up -= pending_redeem_size
+                else:
+                    down -= pending_redeem_size
+                if not settled_at and latest_exchange_ts:
+                    settled_at = dt.datetime.fromtimestamp(latest_exchange_ts, dt.timezone.utc).isoformat()
         settled_value = 0.0
         if winning_side.lower() == "up" and up > 0:
             settled_value = up
@@ -625,6 +643,17 @@ class ObserverStore:
         ).fetchall()
         for row in rows:
             self._recompute_watchlist_activity_pnl(str(row["wallet"]), market_slug)
+
+    def _recompute_all_watchlist_activity_pnl(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT wallet, market_slug
+            FROM wallet_activity_events
+            WHERE wallet != '' AND market_slug != ''
+            """
+        ).fetchall()
+        for row in rows:
+            self._recompute_watchlist_activity_pnl(str(row["wallet"]), str(row["market_slug"]))
 
     def watchlist_market_pnl_rows(self, wallet: str | None = None) -> list[dict[str, Any]]:
         if wallet is None:

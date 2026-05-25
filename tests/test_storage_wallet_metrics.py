@@ -202,6 +202,195 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["pnl_total"], 16.115315)
         self.assertEqual(metrics["pnl_source"], "watchlist_activity_ledger")
 
+    def test_watchlist_activity_pnl_infers_winner_from_redeem_without_settlement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                wallet = "0xd950a1a89f3e61a7a9efc85a46e440ce58c15e86"
+                market = "eth-updown-5m-1779706800"
+                store.add_watchlist_wallet(wallet)
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xbuy-down",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "ETH",
+                            "exchange_ts": 1779706811,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Down",
+                            "outcome_index": 1,
+                            "price": 0.8626,
+                            "size": 420.855256,
+                            "usdc": 363.044535,
+                            "observed_at": "2026-05-25T11:00:11+00:00",
+                        },
+                        {
+                            "tx_hash": "0xbuy-up",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "ETH",
+                            "exchange_ts": 1779706812,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.1161,
+                            "size": 456.651382,
+                            "usdc": 53.003266,
+                            "observed_at": "2026-05-25T11:00:12+00:00",
+                        },
+                        {
+                            "tx_hash": "0xredeem",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "ETH",
+                            "exchange_ts": 1779707137,
+                            "activity_type": "REDEEM",
+                            "outcome_index": 999,
+                            "size": 420.855256,
+                            "usdc": 420.855256,
+                            "observed_at": "2026-05-25T11:05:37+00:00",
+                        },
+                    ]
+                )
+
+                rows = store.watchlist_market_pnl_rows(wallet)
+                metrics = store.wallet_trade_metrics(wallet, now_ts=1779708000)
+            finally:
+                store.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["winning_side"], "Down")
+        self.assertFalse(rows[0]["incomplete"])
+        self.assertAlmostEqual(rows[0]["realized_pnl"], 4.807455)
+        self.assertAlmostEqual(metrics["pnl_total"], 4.807455)
+        self.assertEqual(metrics["settled_markets_total"], 1)
+
+    def test_store_startup_recomputes_watchlist_activity_pnl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "observer.sqlite"
+            wallet = "0xd950a1a89f3e61a7a9efc85a46e440ce58c15e86"
+            market = "eth-updown-5m-1779706800"
+            store = ObserverStore(path)
+            try:
+                for tx_hash, exchange_ts, activity_type, side, outcome, outcome_index, size, usdc in [
+                    ("0xbuy-down", 1779706811, "TRADE", "BUY", "Down", 1, 420.855256, 363.044535),
+                    ("0xbuy-up", 1779706812, "TRADE", "BUY", "Up", 0, 456.651382, 53.003266),
+                    ("0xredeem", 1779707137, "REDEEM", "", "", 999, 420.855256, 420.855256),
+                ]:
+                    store.conn.execute(
+                        """
+                        INSERT INTO wallet_activity_events(
+                            tx_hash,wallet,market_slug,condition_id,symbol,exchange_ts,activity_type,
+                            side,outcome,outcome_index,price,size,usdc,asset,name,pseudonym,raw_json,observed_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            tx_hash,
+                            wallet,
+                            market,
+                            "0xcond",
+                            "ETH",
+                            exchange_ts,
+                            activity_type,
+                            side,
+                            outcome,
+                            outcome_index,
+                            0.0,
+                            size,
+                            usdc,
+                            "",
+                            "",
+                            "",
+                            "{}",
+                            "2026-05-25T11:05:37+00:00",
+                        ),
+                    )
+                store.conn.commit()
+            finally:
+                store.close()
+
+            store = ObserverStore(path)
+            try:
+                rows = store.watchlist_market_pnl_rows(wallet)
+            finally:
+                store.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["winning_side"], "Down")
+        self.assertFalse(rows[0]["incomplete"])
+        self.assertAlmostEqual(rows[0]["realized_pnl"], 4.807455)
+
+    def test_watchlist_activity_pnl_counts_unredeemed_winning_shares_after_settlement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                wallet = "0xd950a1a89f3e61a7a9efc85a46e440ce58c15e86"
+                market = "eth-updown-5m-1779706800"
+                store.add_watchlist_wallet(wallet)
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": "0xcond",
+                        "symbol": "ETH",
+                        "winning_side": "Down",
+                        "settled_at": "2026-05-25T11:05:00+00:00",
+                        "completed": True,
+                    }
+                )
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xbuy-down",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "ETH",
+                            "exchange_ts": 1779706811,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Down",
+                            "outcome_index": 1,
+                            "price": 0.8626,
+                            "size": 420.855256,
+                            "usdc": 363.044535,
+                            "observed_at": "2026-05-25T11:00:11+00:00",
+                        },
+                        {
+                            "tx_hash": "0xbuy-up",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "ETH",
+                            "exchange_ts": 1779706812,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.1161,
+                            "size": 456.651382,
+                            "usdc": 53.003266,
+                            "observed_at": "2026-05-25T11:00:12+00:00",
+                        },
+                    ]
+                )
+
+                rows = store.watchlist_market_pnl_rows(wallet)
+                metrics = store.wallet_trade_metrics(wallet, now_ts=1779708000)
+            finally:
+                store.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["incomplete"])
+        self.assertAlmostEqual(rows[0]["settled_value"], 420.855256)
+        self.assertAlmostEqual(rows[0]["realized_pnl"], 4.807455)
+        self.assertAlmostEqual(metrics["pnl_total"], 4.807455)
+
     def test_watchlist_metrics_merge_pre_watchlist_legacy_markets(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
