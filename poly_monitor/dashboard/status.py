@@ -515,7 +515,7 @@ def _watchlist_local_metrics(conn: sqlite3.Connection, wallet: str, *, now: dt.d
         "local_observed_settled_markets_7d": len(rows_7d),
         "local_observed_settled_markets_30d": len(rows_30d),
         "local_observed_settled_markets_total": len(rows_total),
-        "local_observed_observed_span_hours": observed_span_hours,
+        "local_observed_span_hours": observed_span_hours,
         "local_observed_pnl_source": "watchlist_activity_ledger",
     }
 

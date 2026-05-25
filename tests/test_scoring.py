@@ -329,7 +329,7 @@ class ScoringTests(unittest.TestCase):
             "local_observed_settled_markets_7d": 11,
             "local_observed_wins_7d": 9,
             "local_observed_losses_7d": 2,
-            "local_observed_observed_span_hours": 12,
+            "local_observed_span_hours": 12,
             "top1_concentration": 0.039,
             "top3_concentration": 0.101,
             "longshot_profit_share": 0.023,
@@ -363,7 +363,7 @@ class ScoringTests(unittest.TestCase):
             "local_observed_settled_markets_7d": 12,
             "local_observed_wins_7d": 11,
             "local_observed_losses_7d": 1,
-            "local_observed_observed_span_hours": 10,
+            "local_observed_span_hours": 10,
             "top1_concentration": 0.08,
             "top3_concentration": 0.2,
             "longshot_profit_share": 0.1,
@@ -375,7 +375,7 @@ class ScoringTests(unittest.TestCase):
         }
 
         immature = score_wallet(metrics, CandidateThresholds())
-        mature = score_wallet({**metrics, "local_observed_observed_span_hours": 30}, CandidateThresholds())
+        mature = score_wallet({**metrics, "local_observed_span_hours": 30}, CandidateThresholds())
 
         self.assertEqual(immature.status, "dormant_candidate")
         self.assertIn("markets_24h_below_threshold", immature.reasons)

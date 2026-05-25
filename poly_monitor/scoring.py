@@ -62,6 +62,7 @@ def _local_observed_span_hours(metrics: dict[str, Any]) -> float:
     return _num(
         metrics,
         "local_observed_span_hours",
+        # Backward compatibility for score rows written before 2026-05-25.
         _num(metrics, "local_observed_observed_span_hours", _num(metrics, "observed_span_hours", 999999.0)),
     )
 

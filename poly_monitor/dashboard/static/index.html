@@ -804,7 +804,7 @@
         ["Closed估算30天PnL", money(m.crypto_closed_pnl_estimate_30d)],
         ["已结算持仓市场", `${fmt(m.crypto_settled_positions_markets_7d, 0)} / ${fmt(m.crypto_settled_positions_markets_30d, 0)}`],
         ["本地观测Realized PnL", money(localObservedPnl(m))],
-        ["本地观测跨度", `${fmt(m.local_observed_observed_span_hours ?? m.local_observed_span_hours, 1)} 小时`],
+        ["本地观测跨度", `${fmt(m.local_observed_span_hours ?? m.local_observed_observed_span_hours, 1)} 小时`],
         ["已结算窗口", `${fmt(m.settled_markets_7d, 0)} / ${fmt(m.settled_markets_30d, 0)}`],
         ["本地已结算窗口", `${fmt(m.local_observed_settled_markets_7d, 0)} / ${fmt(m.local_observed_settled_markets_30d, 0)}`],
         ["盈亏来源", pnlSourceLabel(m.pnl_source)],
