@@ -820,8 +820,6 @@
         ["胜方加仓", pct(m.winner_add_rate)]
       ];
       $("walletDetail").innerHTML = `
-        <div title="${escapeHtml(detailName)}"><a class="profile-link" href="${detailProfileUrl}" target="_blank" rel="noopener noreferrer"><strong>${escapeHtml(detailName)}</strong></a></div>
-        <div class="addr" title="${escapeHtml(detail.wallet)}">${escapeHtml(detail.wallet)}</div>
         <div class="kv">${kv.map(([k, v]) => `<div><div class="subtle">${k}</div><strong>${v}</strong></div>`).join("")}</div>
         <div class="subtle">${reasonText(detail)}</div>`;
       openWalletModal();
