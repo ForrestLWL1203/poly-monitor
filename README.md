@@ -30,7 +30,10 @@ python3 scripts/run_crypto_wallet_observer.py \
 
 - `data/raw/YYYY-MM-DD/events.jsonl`: compact raw events, 3-day rolling retention by default.
 - `data/state/observer.sqlite`: dedupe state, trades, candidate scores,
-  watchlist wallets, watchlist activity events, and local PnL ledger.
+  watchlist wallets, watchlist activity events, compact trade contexts, low-rate
+  market-state samples, and local PnL ledger for non-watchlist trade rows.
+- `data/archive/YYYY-MM-DD/*.jsonl.gz`: cold strategy-research rows exported
+  from SQLite after hot retention windows expire.
 - `data/reports/latest_candidates.json`: active, dormant, and archive candidate snapshots.
 
 ## Dashboard
@@ -110,29 +113,34 @@ Watchlisted wallets are treated as manually protected research targets:
 - Their metrics cache uses the active refresh TTL, so archived watchlist wallets
   are refreshed more often than ordinary archived wallets.
 - The observer also polls each watchlisted wallet's Polymarket Activity feed
-  every 30 seconds by default and stores BTC/ETH/SOL/XRP 5m `TRADE`, `SPLIT`,
-  `MERGE`, and `REDEEM` rows in `wallet_activity_events`. This is separate from
-  the market `/trades` collector and is the data needed to reconstruct complete
-  set locking, merges, and final redemptions. After the initial lookback, each
-  poll starts from the wallet's latest saved activity timestamp minus a 60
-  second safety window instead of refetching the full lookback.
-- Watchlisted wallets use a more precise local activity ledger when those rows
-  are available. `watchlist_market_pnl` applies `TRADE`, `SPLIT`, `MERGE`, and
-  `REDEEM` cashflows per wallet/market, then the dashboard prefers that result
-  for watchlist local observed PnL. Markets observed before the wallet was added
-  to the watchlist are still included from the legacy local ledger unless the
-  same wallet/market already has a watchlist activity-ledger row.
+  on the configured watchlist activity interval and stores BTC/ETH/SOL/XRP 5m
+  `TRADE`, `SPLIT`, `MERGE`, and `REDEEM` rows in `wallet_activity_events`. This
+  is separate from the market `/trades` collector and is the data needed to
+  reconstruct complete set locking, merges, and final redemptions. After the
+  initial lookback, each poll starts from the wallet's latest saved activity
+  timestamp minus the configured safety window instead of refetching the full
+  lookback.
+- Watchlist activity rows are kept as raw behavior detail for later manual
+  strategy reconstruction. The dashboard does not convert them into local
+  observed PnL, win/loss, or settlement-quality metrics.
+- Each watchlist `TRADE` attempts to store one compact `wallet_trade_contexts`
+  row with the current window timing, reference price movement, Up/Down top-book
+  summary, depth totals, and small-notional fill estimates. Stale books are
+  marked instead of blocking activity collection.
+- Current market state is sampled at low frequency into `market_state_samples`:
+  by default every 5 seconds when changed, every 2 seconds in the final 60
+  seconds, and at least every 15 seconds as a heartbeat. Full order-book depth is
+  not stored.
 - `SPLIT`, `MERGE`, and `REDEEM` assume Polymarket's activity `usdcSize` matches
   `size`. If a future API response breaks that invariant, the observer writes a
   `watchlist_activity_value_warning` raw event and the dashboard surfaces it in
   recent events without stopping collection.
-- When a wallet/market has watchlist `SPLIT`, `MERGE`, or `REDEEM` rows, the
-  legacy `wallet_market_pnl` row is removed and future settlement recomputes skip
-  it. The activity ledger is the source of truth for that wallet/market because
-  the legacy trade table cannot represent those cashflows.
 - Activity rows are retained for 30 days while the wallet remains watchlisted
-  and 7 days after it is no longer watchlisted; derived `watchlist_market_pnl`
-  rows are removed when their underlying activity rows age out.
+  and 7 days after it is no longer watchlisted. Trade contexts are hot for 30
+  days and market-state samples are hot for 7 days before gzip archive export.
+- Strategy archive runs every 6 hours by default, writes JSONL gzip files plus an
+  `archive_manifest` row, then deletes exported SQLite rows in batches and asks
+  SQLite for incremental vacuum.
 - New SQLite databases enable incremental auto-vacuum and activity cleanup asks
   SQLite to reclaim a small number of free pages after deletions. Existing
   production databases that were created before this setting still require a
@@ -147,23 +155,11 @@ Watchlisted wallets are treated as manually protected research targets:
   positions endpoint can understate wallets by retaining unresolved/redeemable
   losing rows while missing redeemed winners, while closed-position rows can
   overstate winners.
-- The observer also records a separate local-observed Ledger PnL from trades and
-  settlements collected after this script started. This local PnL is cumulative
-  across the saved local ledger, not just the current active-candidate window.
-- Dashboard historical PnL columns are ranking inputs; the local-observed PnL
-  column is the stricter live-monitoring evidence that should drive later
-  copyability decisions.
-- Dashboard win/loss counts use locally observed settled markets. Polymarket
-  closed-position rows are not used for win/loss because that endpoint can be
-  biased toward winning outcome positions and does not match profile daily PnL.
-- Once a wallet has enough local settled markets, local observed PnL and
-  win/loss quality gate active status. Locally losing wallets can drop out of
-  active even if they trade frequently, and they can return after their local
-  ledger turns positive again.
+- Dashboard historical PnL columns keep the Polymarket public profile/official
+  web-page style PnL. Watchlist rows should be interpreted as high-detail
+  behavior capture, not local profitability scoring.
 - Very high frequency is capped and penalized in ranking because it is harder to
-  follow under realistic network and execution delay. Moderate-frequency
-  wallets with stable local profit can qualify for active with a lower 24h
-  market-count threshold.
+  follow under realistic network and execution delay.
 - A wallet can become an active candidate soon after it is first observed if the
   historical API metrics already satisfy the activity and profitability gates.
   It still needs local follow/replay evidence before any paper or live copy

@@ -383,10 +383,10 @@ class ArchiveRetentionTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(result["removed_activity_events"], 2)
-        self.assertEqual(result["removed_watchlist_pnl_rows"], 2)
+        self.assertEqual(result["removed_watchlist_pnl_rows"], 0)
         self.assertIn("vacuum_pages", result)
         self.assertEqual(remaining, {watched, fresh_removed})
-        self.assertEqual(pnl_wallets, {watched, fresh_removed})
+        self.assertEqual(pnl_wallets, set())
 
     def test_high_activity_wallets_rank_by_24h_market_count_not_only_recency(self):
         def trade(wallet: str, tx: str, ts: int, market: str) -> dict:

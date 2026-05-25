@@ -38,6 +38,30 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(status["candidates"]["active_candidate"], [])
         self.assertEqual(status["recent_trades"], [])
 
+    def test_sqlite_summary_includes_file_size_bytes(self):
+        from poly_monitor.dashboard.status import build_dashboard_status
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            store.close()
+            db_path = data_dir / "state" / "observer.sqlite"
+            wal_path = data_dir / "state" / "observer.sqlite-wal"
+            shm_path = data_dir / "state" / "observer.sqlite-shm"
+            wal_path.write_bytes(b"wal")
+            shm_path.write_bytes(b"shm!")
+
+            status = build_dashboard_status(data_dir, now=dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc))
+            db_size = db_path.stat().st_size if db_path.exists() else 0
+            wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+            shm_size = shm_path.stat().st_size if shm_path.exists() else 0
+            expected = db_size + wal_size + shm_size
+
+            self.assertEqual(status["sqlite"]["db_bytes"], db_size)
+            self.assertEqual(status["sqlite"]["wal_bytes"], wal_size)
+            self.assertEqual(status["sqlite"]["shm_bytes"], shm_size)
+            self.assertEqual(status["sqlite"]["total_bytes"], expected)
+
     def test_sqlite_scores_are_used_even_without_latest_report(self):
         from poly_monitor.dashboard.status import build_dashboard_status
 
@@ -282,7 +306,7 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertAlmostEqual(detail["ledger_summary"]["realized_pnl"], 0.0)
         self.assertTrue(detail["settled_markets"][0]["incomplete"])
 
-    def test_watchlist_dashboard_uses_activity_ledger_pnl(self):
+    def test_watchlist_dashboard_keeps_official_pnl_and_activity_detail(self):
         from poly_monitor.dashboard.status import build_dashboard_status, wallet_detail
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -297,7 +321,7 @@ class DashboardStatusTests(unittest.TestCase):
                     status="active_candidate",
                     rank_score=10,
                     reasons=[],
-                    metrics={"wallet": wallet, "pnl_total": -999, "pnl_7d": -999, "pnl_30d": -999, "wins_7d": 0, "losses_7d": 1},
+                    metrics={"wallet": wallet, "pnl_total": -999, "pnl_7d": 7, "pnl_30d": 30, "wins_7d": 0, "losses_7d": 1},
                 )
             )
             store.upsert_market_settlement(
@@ -365,12 +389,14 @@ class DashboardStatusTests(unittest.TestCase):
             detail = wallet_detail(data_dir, wallet)
 
         row = status["candidates"]["watchlist"][0]
-        self.assertAlmostEqual(row["metrics"]["local_observed_pnl_total"], 4.0)
-        self.assertEqual(row["metrics"]["local_observed_pnl_source"], "watchlist_activity_ledger")
-        self.assertAlmostEqual(detail["ledger_summary"]["realized_pnl"], 4.0)
-        self.assertEqual(detail["settled_markets"][0]["pnl_source"], "watchlist_activity_ledger")
+        self.assertEqual(row["metrics"]["pnl_7d"], 7)
+        self.assertEqual(row["metrics"]["pnl_30d"], 30)
+        self.assertNotIn("local_observed_pnl_total", row["metrics"])
+        self.assertNotIn("local_observed_pnl_source", row["metrics"])
+        self.assertEqual([event["activity_type"] for event in detail["activity_events"]], ["MERGE", "TRADE", "TRADE"])
+        self.assertEqual(detail["activity_events"][0]["tx_hash"], "0xmerge")
 
-    def test_watchlist_dashboard_merges_legacy_observed_pnl(self):
+    def test_watchlist_dashboard_does_not_merge_legacy_observed_pnl(self):
         from poly_monitor.dashboard.status import build_dashboard_status
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -442,9 +468,9 @@ class DashboardStatusTests(unittest.TestCase):
             status = build_dashboard_status(data_dir, now=dt.datetime(2026, 5, 25, 12, tzinfo=dt.timezone.utc))
 
         metrics = status["candidates"]["watchlist"][0]["metrics"]
-        self.assertAlmostEqual(metrics["local_observed_pnl_total"], 11.0)
-        self.assertEqual(metrics["local_observed_settled_markets_total"], 2)
-        self.assertEqual(metrics["local_observed_pnl_source"], "watchlist_mixed_ledger")
+        self.assertNotIn("local_observed_pnl_total", metrics)
+        self.assertNotIn("local_observed_settled_markets_total", metrics)
+        self.assertNotIn("local_observed_pnl_source", metrics)
 
     def test_dashboard_caps_archive_candidates(self):
         from poly_monitor.dashboard.status import build_dashboard_status

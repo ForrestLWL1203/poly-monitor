@@ -44,6 +44,60 @@ class WalletResearchTests(unittest.TestCase):
             store = ObserverStore(data_dir / "state" / "observer.sqlite")
             store.insert_trade(_trade("0x1", ts=now_ts - 60, market="btc-updown-5m-1770000000", outcome="Up", price=0.62, size=20))
             store.insert_trade(_trade("0x2", ts=now_ts - 180, market="btc-updown-5m-1770000300", outcome="Down", price=0.42, size=10))
+            store.insert_wallet_activity_events(
+                [
+                    {
+                        "tx_hash": "0x1",
+                        "wallet": WALLET,
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "condition_id": "0x0000",
+                        "symbol": "BTC",
+                        "exchange_ts": now_ts - 60,
+                        "activity_type": "TRADE",
+                        "side": "BUY",
+                        "outcome": "Up",
+                        "outcome_index": 0,
+                        "price": 0.62,
+                        "size": 20,
+                        "usdc": 12.4,
+                        "observed_at": now.isoformat(),
+                    }
+                ]
+            )
+            store.insert_wallet_trade_contexts(
+                [
+                    {
+                        "wallet": WALLET,
+                        "tx_hash": "0x1",
+                        "fill_id": "",
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "condition_id": "0x0000",
+                        "symbol": "BTC",
+                        "exchange_ts": now_ts - 60,
+                        "observed_at": now.isoformat(),
+                        "context_json": {"event": "context_snapshot"},
+                        "book_stale": False,
+                    }
+                ]
+            )
+            store.insert_market_state_samples(
+                [
+                    {
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "condition_id": "0x0000",
+                        "symbol": "BTC",
+                        "sampled_ts": now_ts - 60,
+                        "observed_at": now.isoformat(),
+                        "window_remaining_sec": 45,
+                        "reference_price": 100000,
+                        "reference_price_age_sec": 0.25,
+                        "up_json": {"bid": 0.61},
+                        "down_json": {"ask": 0.39},
+                        "book_stale": False,
+                        "sample_reason": "initial",
+                    }
+                ]
+            )
             store.close()
 
             writer = JsonlEventWriter(data_dir)
@@ -91,6 +145,9 @@ class WalletResearchTests(unittest.TestCase):
 
         self.assertEqual(report["wallet"], WALLET)
         self.assertEqual(report["data_coverage"]["local_trades"], 2)
+        self.assertEqual(report["data_coverage"]["watchlist_activity_events"], 1)
+        self.assertEqual(report["data_coverage"]["wallet_trade_context_rows"], 1)
+        self.assertEqual(report["data_coverage"]["market_state_samples"], 1)
         self.assertEqual(report["data_coverage"]["context_snapshots"], 1)
         self.assertEqual(report["data_coverage"]["context_coverage_pct"], 50.0)
         self.assertEqual(report["frequency_profile"]["trades_24h"], 2)

@@ -1,4 +1,6 @@
 import datetime as dt
+import gzip
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,7 +107,143 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(saved[1]["usdc"], 10)
         self.assertEqual(saved[2]["outcome_index"], 999)
 
-    def test_watchlist_activity_pnl_counts_merge_and_redeem_cashflows(self):
+    def test_wallet_trade_contexts_store_compact_context_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                context = {
+                    "wallet": "0xabc",
+                    "tx_hash": "0xtrade",
+                    "fill_id": "fill-1",
+                    "market_slug": "btc-updown-5m-1770000000",
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "exchange_ts": 1770000010,
+                    "observed_at": "2026-05-25T00:00:00+00:00",
+                    "context_json": {"event": "context_snapshot", "up": {"bid": 0.49}, "down": {"ask": 0.51}},
+                    "book_stale": True,
+                }
+
+                inserted = store.insert_wallet_trade_contexts([context, dict(context)])
+                rows = store.wallet_trade_contexts("0xABC")
+            finally:
+                store.close()
+
+        self.assertEqual(len(inserted), 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["wallet"], "0xabc")
+        self.assertEqual(rows[0]["fill_id"], "fill-1")
+        self.assertEqual(rows[0]["book_stale"], 1)
+        self.assertEqual(json.loads(rows[0]["context_json"])["up"]["bid"], 0.49)
+
+    def test_market_state_samples_store_summary_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                sample = {
+                    "market_slug": "btc-updown-5m-1770000000",
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000015,
+                    "observed_at": "2026-05-25T00:00:15+00:00",
+                    "window_remaining_sec": 120.0,
+                    "reference_price": 100000.0,
+                    "reference_price_age_sec": 0.25,
+                    "up_json": {"bid": 0.49, "ask": 0.51},
+                    "down_json": {"bid": 0.48, "ask": 0.52},
+                    "book_stale": False,
+                    "sample_reason": "heartbeat",
+                }
+
+                inserted = store.insert_market_state_samples([sample, dict(sample)])
+                rows = store.market_state_samples("btc-updown-5m-1770000000")
+            finally:
+                store.close()
+
+        self.assertEqual(len(inserted), 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sample_reason"], "heartbeat")
+        self.assertEqual(json.loads(rows[0]["up_json"])["ask"], 0.51)
+
+    def test_archive_strategy_rows_exports_gzip_and_deletes_old_rows_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xold",
+                            "wallet": "0xabc",
+                            "market_slug": "btc-updown-5m-old",
+                            "condition_id": "0xoldcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.5,
+                            "size": 10,
+                            "usdc": 5,
+                            "observed_at": "1970-01-02T00:00:00+00:00",
+                        },
+                    ]
+                )
+                store.insert_wallet_trade_contexts(
+                    [
+                        {
+                            "wallet": "0xabc",
+                            "tx_hash": "0xold",
+                            "fill_id": "",
+                            "market_slug": "btc-updown-5m-old",
+                            "condition_id": "0xoldcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "observed_at": "1970-01-02T00:00:00+00:00",
+                            "context_json": {"event": "context_snapshot"},
+                            "book_stale": False,
+                        }
+                    ]
+                )
+                result = store.archive_strategy_rows(
+                    data_dir / "archive",
+                    activity_cutoff_ts=200,
+                    context_cutoff_ts=200,
+                    sample_cutoff_ts=0,
+                    delete_batch_size=10000,
+                )
+                second = store.archive_strategy_rows(
+                    data_dir / "archive",
+                    activity_cutoff_ts=200,
+                    context_cutoff_ts=200,
+                    sample_cutoff_ts=0,
+                    delete_batch_size=10000,
+                )
+                remaining_activity = store.wallet_activity_events("0xabc")
+                remaining_contexts = store.wallet_trade_contexts("0xabc")
+                manifest = store.archive_manifest_rows()
+            finally:
+                store.close()
+
+            activity_archive = data_dir / "archive" / "1970-01-01" / "wallet_activity_events.jsonl.gz"
+            context_archive = data_dir / "archive" / "1970-01-01" / "wallet_trade_contexts.jsonl.gz"
+            with gzip.open(activity_archive, "rt", encoding="utf-8") as handle:
+                activity_rows = [json.loads(line) for line in handle]
+            with gzip.open(context_archive, "rt", encoding="utf-8") as handle:
+                context_rows = [json.loads(line) for line in handle]
+
+        self.assertEqual(result["wallet_activity_events"], 1)
+        self.assertEqual(result["wallet_trade_contexts"], 1)
+        self.assertEqual(second["wallet_activity_events"], 0)
+        self.assertEqual(second["wallet_trade_contexts"], 0)
+        self.assertEqual(remaining_activity, [])
+        self.assertEqual(remaining_contexts, [])
+        self.assertEqual(activity_rows[0]["tx_hash"], "0xold")
+        self.assertEqual(context_rows[0]["tx_hash"], "0xold")
+        self.assertEqual({row["data_type"] for row in manifest}, {"wallet_activity_events", "wallet_trade_contexts"})
+
+    def test_watchlist_activity_does_not_create_pnl_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
             try:
@@ -190,19 +328,11 @@ class StorageWalletMetricsTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(len(rows), 1)
-        row = rows[0]
-        self.assertAlmostEqual(row["realized_pnl"], 16.115315)
-        self.assertAlmostEqual(row["merge_usdc"], 163.0)
-        self.assertAlmostEqual(row["redeem_usdc"], 5.0)
-        self.assertEqual(row["activity_events"], 4)
-        self.assertTrue(row["has_merge"])
-        self.assertTrue(row["has_redeem"])
-        self.assertFalse(row["incomplete"])
-        self.assertAlmostEqual(metrics["pnl_total"], 16.115315)
-        self.assertEqual(metrics["pnl_source"], "watchlist_activity_ledger")
+        self.assertEqual(rows, [])
+        self.assertNotEqual(metrics.get("pnl_source"), "watchlist_activity_ledger")
+        self.assertNotIn("pnl_total", {key: metrics[key] for key in metrics if metrics[key] == 16.115315})
 
-    def test_watchlist_activity_pnl_infers_winner_from_redeem_without_settlement(self):
+    def test_watchlist_activity_redeem_does_not_infer_pnl_winner(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
             try:
@@ -264,14 +394,11 @@ class StorageWalletMetricsTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["winning_side"], "Down")
-        self.assertFalse(rows[0]["incomplete"])
-        self.assertAlmostEqual(rows[0]["realized_pnl"], 4.807455)
-        self.assertAlmostEqual(metrics["pnl_total"], 4.807455)
-        self.assertEqual(metrics["settled_markets_total"], 1)
+        self.assertEqual(rows, [])
+        self.assertNotEqual(metrics.get("pnl_source"), "watchlist_activity_ledger")
+        self.assertEqual(metrics["settled_markets_total"], 0)
 
-    def test_store_startup_recomputes_watchlist_activity_pnl(self):
+    def test_store_startup_does_not_recompute_watchlist_activity_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"
             wallet = "0xd950a1a89f3e61a7a9efc85a46e440ce58c15e86"
@@ -321,12 +448,9 @@ class StorageWalletMetricsTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["winning_side"], "Down")
-        self.assertFalse(rows[0]["incomplete"])
-        self.assertAlmostEqual(rows[0]["realized_pnl"], 4.807455)
+        self.assertEqual(rows, [])
 
-    def test_watchlist_activity_pnl_counts_unredeemed_winning_shares_after_settlement(self):
+    def test_watchlist_activity_settlement_does_not_create_pnl_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
             try:
@@ -385,13 +509,10 @@ class StorageWalletMetricsTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(len(rows), 1)
-        self.assertFalse(rows[0]["incomplete"])
-        self.assertAlmostEqual(rows[0]["settled_value"], 420.855256)
-        self.assertAlmostEqual(rows[0]["realized_pnl"], 4.807455)
-        self.assertAlmostEqual(metrics["pnl_total"], 4.807455)
+        self.assertEqual(rows, [])
+        self.assertNotEqual(metrics.get("pnl_source"), "watchlist_activity_ledger")
 
-    def test_watchlist_metrics_merge_pre_watchlist_legacy_markets(self):
+    def test_watchlist_metrics_do_not_merge_activity_pnl_with_legacy_markets(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
             try:
@@ -446,13 +567,13 @@ class StorageWalletMetricsTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(metrics["pnl_source"], "watchlist_mixed_ledger")
-        self.assertAlmostEqual(metrics["pnl_total"], 11.0)
-        self.assertAlmostEqual(metrics["pnl_7d"], 11.0)
-        self.assertEqual(metrics["settled_markets_total"], 2)
-        self.assertEqual(metrics["wins_7d"], 2)
+        self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
+        self.assertAlmostEqual(metrics["pnl_total"], 6.0)
+        self.assertAlmostEqual(metrics["pnl_7d"], 6.0)
+        self.assertEqual(metrics["settled_markets_total"], 1)
+        self.assertEqual(metrics["wins_7d"], 1)
 
-    def test_watchlist_cashflow_activity_suppresses_traditional_pnl_row(self):
+    def test_watchlist_cashflow_activity_marks_traditional_pnl_incomplete(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"
             store = ObserverStore(path)
@@ -516,12 +637,12 @@ class StorageWalletMetricsTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(traditional_rows, [])
-        self.assertEqual(len(watchlist_rows), 1)
-        self.assertAlmostEqual(watchlist_rows[0]["realized_pnl"], 0.0)
-        self.assertAlmostEqual(watchlist_rows[0]["split_usdc"], 10.0)
+        self.assertEqual(len(traditional_rows), 1)
+        self.assertAlmostEqual(traditional_rows[0]["realized_pnl"], 10.0)
+        self.assertEqual(traditional_rows[0]["incomplete"], 1)
+        self.assertEqual(watchlist_rows, [])
 
-    def test_store_startup_purges_traditional_pnl_shadowed_by_activity_cashflows(self):
+    def test_store_startup_keeps_traditional_pnl_when_activity_is_only_raw_detail(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"
             wallet = "0xa6896d11f76dfa2820662c1f441496f51553559b"
@@ -583,7 +704,8 @@ class StorageWalletMetricsTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(rows, [])
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["realized_pnl"], 10.0)
 
     def test_watchlist_store_initializes_only_watchlist_schema(self):
         with tempfile.TemporaryDirectory() as tmp:

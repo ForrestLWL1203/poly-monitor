@@ -90,7 +90,7 @@
     }
     .health-grid {
       display: grid;
-      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      grid-template-columns: repeat(7, minmax(130px, 1fr));
       gap: 1px;
       background: var(--line);
     }
@@ -407,10 +407,9 @@
                   <th title="近 7 天 BTC/ETH 5m 成交笔数">7天交易</th>
                   <th title="近 30 天 BTC/ETH 5m 成交笔数">30天交易</th>
                   <th title="近 24 小时 activity 样本中参与过的 BTC/ETH 5m 窗口数，用来判断近期是否活跃">24h窗口</th>
+                  <th title="Polymarket Profile 1D 资产曲线首尾差，接近公开页面 24h PnL 口径，可能包含未结算持仓价值变化">Profile 1天PnL</th>
                   <th title="用于评分的 Polymarket Profile 1W 资产曲线首尾差；leaderboard、已结算持仓和 closed-position 仅作诊断参考">历史7天PnL</th>
                   <th title="用于评分的 Polymarket Profile 1M 资产曲线首尾差；leaderboard、已结算持仓和 closed-position 仅作诊断参考">历史30天PnL</th>
-                  <th title="仅统计 observer 启动后本地记录且已结算的 BTC/ETH 5m Ledger 盈亏">本地观测PnL</th>
-                  <th title="仅统计 observer 启动后本地已观测并结算的盈利市场数 / 亏损市场数，不代表完整 7 天">本地胜/负</th>
                   <th title="最大单一盈利市场占总正收益比例，越低越不依赖单点暴富">最大单场占比</th>
                   <th title="前三大盈利市场占总正收益比例，越低越分散">前三占比</th>
                   <th title="低于 15c 的低价票利润占总正收益比例">低价票占比</th>
@@ -461,6 +460,9 @@
     };
     let statusData = null;
     let currentGroup = "watchlist";
+    const BYTES_KB = 1024;
+    const BYTES_MB = BYTES_KB * 1024;
+    const BYTES_GB = BYTES_MB * 1024;
 
     const $ = (id) => document.getElementById(id);
 
@@ -476,6 +478,16 @@
       const n = Number(v);
       if (!Number.isFinite(n)) return String(v);
       return Math.round(n).toLocaleString();
+    }
+
+    function bytes(v) {
+      if (v === null || v === undefined || v === "") return "pending";
+      const n = Number(v);
+      if (!Number.isFinite(n)) return String(v);
+      if (n >= BYTES_GB) return `${fmt(n / BYTES_GB, 1)} GB`;
+      if (n >= BYTES_MB) return `${fmt(n / BYTES_MB, 1)} MB`;
+      if (n >= BYTES_KB) return `${fmt(n / BYTES_KB, 1)} KB`;
+      return `${fmt(n, 0)} B`;
     }
 
     function pct(v) {
@@ -528,9 +540,6 @@
         profile_profit: "Profile 页面收益",
         crypto_settled_positions: "BTC/ETH 5m 持仓诊断",
         crypto_closed_positions: "BTC/ETH 5m closed 诊断",
-        local_observed_ledger: "本地观察 Ledger",
-        watchlist_activity_ledger: "重点关注 Activity Ledger",
-        watchlist_mixed_ledger: "重点关注混合 Ledger"
       };
       return map[value] || value || "未知";
     }
@@ -695,6 +704,7 @@
       const items = [
         ["最新事件", data.health.last_event_age_seconds === null ? "pending" : `${data.health.last_event_age_seconds}s ago`],
         ["今日 Raw", `${fmt(data.health.raw_today_bytes / 1024, 1)} KB`],
+        ["SQLite 大小", bytes(data.sqlite.total_bytes)],
         ["SQLite Trades", fmt(data.sqlite.trade_count, 0)],
         ["Candidate Scores", fmt(data.sqlite.candidate_count, 0)],
         ["Score 更新时间", shortTime(data.health.latest_score_at)],
@@ -726,13 +736,9 @@
       return undefined;
     }
 
-    function localObservedPnl(metrics) {
-      return metrics.local_observed_pnl_total ?? metrics.pnl_total ?? metrics.local_observed_pnl_30d ?? metrics.pnl_30d ?? metrics.local_observed_pnl_7d ?? metrics.pnl_7d;
-    }
-
     function renderWallets(rows) {
       if (!rows.length) {
-        $("walletRows").innerHTML = `<tr><td colspan="18" class="empty">暂无 ${labels[currentGroup]} 地址</td></tr>`;
+        $("walletRows").innerHTML = `<tr><td colspan="17" class="empty">暂无 ${labels[currentGroup]} 地址</td></tr>`;
         return;
       }
       $("walletRows").innerHTML = rows.map((row) => {
@@ -754,10 +760,9 @@
           <td>${fmt(metric(row, "trades_7d"), 0)}</td>
           <td>${fmt(metric(row, "trades_30d"), 0)}</td>
           <td>${windowCount(row)}</td>
+          <td>${money(metric(row, "profile_pnl_1d"))}</td>
           <td>${money(metric(row, "pnl_7d"))}</td>
           <td>${money(metric(row, "pnl_30d"))}</td>
-          <td>${money(localObservedPnl(row.metrics || {}))}</td>
-          <td>${fmt(metric(row, "local_observed_wins_7d") ?? metric(row, "wins_7d"), 0)} / ${fmt(metric(row, "local_observed_losses_7d") ?? metric(row, "losses_7d"), 0)}</td>
           <td>${pct(metric(row, "top1_concentration"))}</td>
           <td>${pct(metric(row, "top3_concentration"))}</td>
           <td>${pct(metric(row, "longshot_profit_share"))}</td>
@@ -789,7 +794,6 @@
         : escapeHtml(detailName);
       $("detailTitle").textContent = detail.wallet || "";
       const m = detail.metrics || {};
-      const ledger = detail.ledger_summary || {};
       const kv = [
         ["分类", zhStatus(detail.status)],
         ["评分状态", zhScoreState(detail.score_state)],
@@ -804,13 +808,8 @@
         ["Closed估算7天PnL", money(m.crypto_closed_pnl_estimate_7d)],
         ["Closed估算30天PnL", money(m.crypto_closed_pnl_estimate_30d)],
         ["已结算持仓市场", `${fmt(m.crypto_settled_positions_markets_7d, 0)} / ${fmt(m.crypto_settled_positions_markets_30d, 0)}`],
-        ["本地观测Realized PnL", money(localObservedPnl(m))],
-        ["本地观测跨度", `${fmt(m.local_observed_span_hours ?? m.local_observed_observed_span_hours, 1)} 小时`],
         ["已结算窗口", `${fmt(m.settled_markets_7d, 0)} / ${fmt(m.settled_markets_30d, 0)}`],
-        ["本地已结算窗口", `${fmt(m.local_observed_settled_markets_7d, 0)} / ${fmt(m.local_observed_settled_markets_30d, 0)}`],
         ["盈亏来源", pnlSourceLabel(m.pnl_source)],
-        ["明细PnL", money(ledger.realized_pnl)],
-        ["明细胜/负", `${fmt(ledger.wins, 0)} / ${fmt(ledger.losses, 0)}`],
         ["7天交易", fmt(m.trades_7d, 0)],
         ["30天交易", fmt(m.trades_30d, 0)],
         ["24h窗口", `${fmt(m.markets_24h ?? m.markets_7d, 0)}${m.markets_24h_lower_bound ? "+" : ""}`],

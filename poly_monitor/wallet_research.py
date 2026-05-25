@@ -201,6 +201,34 @@ def _load_context_snapshots(data_dir: Path, wallet: str, *, start: dt.datetime, 
     return rows
 
 
+def _sqlite_scalar(data_dir: Path, sql: str, params: tuple[Any, ...]) -> int:
+    path = data_dir / "state" / "observer.sqlite"
+    if not path.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(sql, params).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+    return int(row[0] or 0) if row else 0
+
+
+def _archive_manifest_count(data_dir: Path, *, start_ts: int, end_ts: int) -> int:
+    return _sqlite_scalar(
+        data_dir,
+        """
+        SELECT COUNT(*)
+        FROM archive_manifest
+        WHERE (max_ts IS NULL OR max_ts >= ?)
+          AND (min_ts IS NULL OR min_ts <= ?)
+        """,
+        (start_ts, end_ts),
+    )
+
+
 def _match_contexts(trades: list[dict[str, Any]], contexts: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     by_tx: dict[str, dict[str, Any]] = {}
     fallback: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -519,6 +547,26 @@ def build_wallet_research_report(
     contexts = _load_context_snapshots(data_dir, wallet, start=start, end=now_dt)
     matched = _match_contexts(local_trades, contexts)
     context_pct = round((len(matched) / len(local_trades)) * 100.0, 3) if local_trades else 0.0
+    watchlist_activity_events = _sqlite_scalar(
+        data_dir,
+        "SELECT COUNT(*) FROM wallet_activity_events WHERE wallet=? AND exchange_ts >= ? AND exchange_ts <= ?",
+        (wallet, start_ts, end_ts),
+    )
+    wallet_trade_context_rows = _sqlite_scalar(
+        data_dir,
+        "SELECT COUNT(*) FROM wallet_trade_contexts WHERE wallet=? AND exchange_ts >= ? AND exchange_ts <= ?",
+        (wallet, start_ts, end_ts),
+    )
+    market_state_samples = _sqlite_scalar(
+        data_dir,
+        """
+        SELECT COUNT(*)
+        FROM market_state_samples
+        WHERE sampled_ts >= ? AND sampled_ts <= ?
+          AND market_slug IN (SELECT DISTINCT market_slug FROM trades WHERE wallet=?)
+        """,
+        (start_ts, end_ts, wallet),
+    )
     valid_local_ts = [_safe_int(row.get("exchange_ts")) for row in local_trades if _safe_int(row.get("exchange_ts")) > 0]
     first_ts = min(valid_local_ts, default=0)
     last_ts = max(valid_local_ts, default=0)
@@ -528,6 +576,10 @@ def build_wallet_research_report(
         "api_backfill_used": should_backfill,
         "api_backfill_truncated": api_truncated,
         "context_snapshots": len(contexts),
+        "watchlist_activity_events": watchlist_activity_events,
+        "wallet_trade_context_rows": wallet_trade_context_rows,
+        "market_state_samples": market_state_samples,
+        "archive_manifest_rows": _archive_manifest_count(data_dir, start_ts=start_ts, end_ts=end_ts),
         "context_matched_trades": len(matched),
         "context_coverage_pct": context_pct,
         "local_observed_start": dt.datetime.fromtimestamp(first_ts, dt.timezone.utc).isoformat() if first_ts else None,

@@ -51,12 +51,20 @@ class ObserverConfig:
     archive_revival_min_trades_24h: int = 100
     archive_revival_min_markets_24h: int = 20
     archive_revival_cooldown_sec: float = 300.0
-    watchlist_activity_poll_sec: float = 30.0
+    watchlist_activity_poll_sec: float = 180.0
     watchlist_activity_lookback_sec: int = 6 * 3600
-    watchlist_activity_safety_window_sec: int = 60
+    watchlist_activity_safety_window_sec: int = 300
     watchlist_activity_pages: int = 2
     watchlist_activity_retention_days: int = 30
     non_watchlist_activity_retention_days: int = 7
+    context_retention_days: int = 30
+    market_state_retention_days: int = 7
+    strategy_archive_interval_hours: float = 6.0
+    market_state_sample_sec: float = 5.0
+    market_state_terminal_sample_sec: float = 2.0
+    market_state_terminal_window_sec: float = 60.0
+    market_state_heartbeat_sec: float = 15.0
+    max_context_writes_per_cycle: int = 200
 
 
 @dataclass
@@ -104,8 +112,26 @@ def context_snapshot(
     max_book_age_sec: float = 3.0,
 ) -> dict[str, Any]:
     now = dt.datetime.now(dt.timezone.utc)
+    raw_trade_exchange_ts = trade.get("exchange_ts")
+    try:
+        trade_exchange_ts = int(raw_trade_exchange_ts) if raw_trade_exchange_ts not in (None, "") else None
+    except (TypeError, ValueError):
+        trade_exchange_ts = None
     up_bids, up_asks, up_age = stream.get_book(window.up_token, max_age_sec=max_book_age_sec)
     down_bids, down_asks, down_age = stream.get_book(window.down_token, max_age_sec=max_book_age_sec)
+    up = token_book_summary(bids=up_bids, asks=up_asks, book_age_ms=up_age, targets=targets)
+    down = token_book_summary(bids=down_bids, asks=down_asks, book_age_ms=down_age, targets=targets)
+    max_age_ms = max_book_age_sec * 1000.0
+    book_stale = (
+        up_age is None
+        or down_age is None
+        or float(up_age) > max_age_ms
+        or float(down_age) > max_age_ms
+        or up.get("bid") is None
+        or up.get("ask") is None
+        or down.get("bid") is None
+        or down.get("ask") is None
+    )
     return {
         "event": "context_snapshot",
         "observed_at": now.isoformat(),
@@ -114,6 +140,7 @@ def context_snapshot(
         "market_slug": window.slug,
         "condition_id": window.condition_id,
         "trade_tx_hash": trade["tx_hash"],
+        "trade_exchange_ts": trade_exchange_ts,
         "trade_outcome": trade["outcome"],
         "trade_price": trade["price"],
         "trade_usdc": trade["usdc"],
@@ -127,8 +154,9 @@ def context_snapshot(
         "reference_return_3s_bps": compact_float(feed.return_bps(3.0) if feed else None, 3),
         "reference_return_5s_bps": compact_float(feed.return_bps(5.0) if feed else None, 3),
         "reference_return_10s_bps": compact_float(feed.return_bps(10.0) if feed else None, 3),
-        "up": token_book_summary(bids=up_bids, asks=up_asks, book_age_ms=up_age, targets=targets),
-        "down": token_book_summary(bids=down_bids, asks=down_asks, book_age_ms=down_age, targets=targets),
+        "book_stale": book_stale,
+        "up": up,
+        "down": down,
         "ws": stream.diagnostics(reset_counts=True),
     }
 
@@ -149,6 +177,7 @@ class CryptoWalletObserver:
         self._last_report_refresh = 0.0
         self._last_data_cleanup = 0.0
         self._last_raw_cleanup = 0.0
+        self._last_strategy_archive = 0.0
         self._last_window_refresh = 0.0
         self._last_open_price_refresh = 0.0
         self._last_settlement_check = 0.0
@@ -165,6 +194,7 @@ class CryptoWalletObserver:
         self._watchlist_settlement_backfilled: set[str] = set()
         self._metrics_cache: dict[str, _MetricsCacheEntry] = {}
         self._last_context_snapshot: dict[tuple[str, str], float] = {}
+        self._last_market_state_sample: dict[str, tuple[dt.datetime, tuple[Any, ...]]] = {}
         self._last_score_event_state: dict[str, tuple[str, float]] = {}
         self._refresh_candidate_caches()
 
@@ -181,10 +211,12 @@ class CryptoWalletObserver:
                 await self._write_pending_settlements_if_due()
                 await self._poll_trades_if_due()
                 await self._poll_watchlist_activity_if_due()
+                self._sample_market_state_each_cycle()
                 await self._refresh_scores_if_due()
                 self._write_report_if_due()
                 self._cleanup_stale_data_if_due()
                 self._cleanup_raw_retention_if_due()
+                self._archive_strategy_data_if_due()
                 if self.config.seconds is not None and time.monotonic() - started >= self.config.seconds:
                     break
                 await asyncio.sleep(self._next_sleep_delay(started))
@@ -248,6 +280,9 @@ class CryptoWalletObserver:
         raw_cleanup_interval = max(0.0, self.config.raw_cleanup_interval_hours) * 3600.0
         if raw_cleanup_interval > 0:
             due_times.append(self._last_raw_cleanup + raw_cleanup_interval)
+        archive_interval = max(0.0, self.config.strategy_archive_interval_hours) * 3600.0
+        if archive_interval > 0:
+            due_times.append(self._last_strategy_archive + archive_interval)
         if self.config.seconds is not None:
             due_times.append(started + self.config.seconds)
         delay = min(due_times) - now
@@ -479,6 +514,14 @@ class CryptoWalletObserver:
             ]
             if trade_rows:
                 self.store.insert_trades(trade_rows)
+                context_rows = self._trade_context_rows_for_activity(inserted)
+                if context_rows:
+                    capped_context_rows = context_rows[: max(0, self.config.max_context_writes_per_cycle)]
+                    self.store.insert_wallet_trade_contexts(capped_context_rows)
+                    for row in capped_context_rows:
+                        context = row.get("context_json")
+                        if isinstance(context, dict):
+                            self.writer.write(context)
             for event in inserted:
                 warning = self._activity_value_warning(event)
                 if warning:
@@ -498,6 +541,47 @@ class CryptoWalletObserver:
                     "usdc": event["usdc"],
                     "tx_hash": event["tx_hash"],
                 })
+
+    def _trade_context_rows_for_activity(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for event in events:
+            if str(event.get("activity_type") or "").upper() != "TRADE":
+                continue
+            window = self._window_for_event(event)
+            if window is None:
+                continue
+            feed = self.feeds.get(window.symbol)
+            context = context_snapshot(
+                trade=self._trade_from_activity_event(event),
+                window=window,
+                stream=self.stream,
+                feed=feed,
+                window_open_reference_price=self.window_reference_prices.get(window.slug, {}).get("open"),
+                window_close_reference_price=self.window_reference_prices.get(window.slug, {}).get("close"),
+                max_book_age_sec=self.config.book_max_age_sec,
+            )
+            rows.append(
+                {
+                    "wallet": str(event.get("wallet") or "").lower(),
+                    "tx_hash": str(event.get("tx_hash") or ""),
+                    "fill_id": str(event.get("fill_id") or ""),
+                    "market_slug": window.slug,
+                    "condition_id": window.condition_id,
+                    "symbol": window.symbol,
+                    "exchange_ts": int(event.get("exchange_ts") or 0),
+                    "observed_at": context["observed_at"],
+                    "context_json": context,
+                    "book_stale": bool(context.get("book_stale")),
+                }
+            )
+        return rows
+
+    def _window_for_event(self, event: dict[str, Any]) -> MarketWindow | None:
+        slug = str(event.get("market_slug") or "")
+        for window in self.windows.values():
+            if window.slug == slug:
+                return window
+        return None
 
     async def _backfill_watchlist_activity_settlements(self, events: list[dict[str, Any]]) -> None:
         now = dt.datetime.now(dt.timezone.utc)
@@ -602,6 +686,82 @@ class CryptoWalletObserver:
             "delta": round(delta, 6),
             "tx_hash": event.get("tx_hash"),
             "message": "activity cashflow invariant mismatch: expected usdcSize to match size",
+        }
+
+    def _sample_market_state_each_cycle(self, *, now: dt.datetime | None = None) -> bool:
+        now = now or dt.datetime.now(dt.timezone.utc)
+        rows: list[dict[str, Any]] = []
+        for window in self.windows.values():
+            row = self._market_state_sample_row(window, now=now)
+            if row is None:
+                continue
+            rows.append(row)
+        if not rows:
+            return False
+        self.store.insert_market_state_samples(rows)
+        return True
+
+    def _market_state_sample_row(self, window: MarketWindow, *, now: dt.datetime) -> dict[str, Any] | None:
+        up_bids, up_asks, up_age = self.stream.get_book(window.up_token, max_age_sec=self.config.book_max_age_sec)
+        down_bids, down_asks, down_age = self.stream.get_book(window.down_token, max_age_sec=self.config.book_max_age_sec)
+        up = token_book_summary(bids=up_bids, asks=up_asks, book_age_ms=up_age)
+        down = token_book_summary(bids=down_bids, asks=down_asks, book_age_ms=down_age)
+        feed = self.feeds.get(window.symbol)
+        reference_price = compact_float(feed.latest_price if feed else None, 6)
+        reference_age = compact_float(feed.latest_age_sec() if feed else None, 3)
+        signature = (
+            up.get("bid"),
+            up.get("ask"),
+            up.get("spread"),
+            down.get("bid"),
+            down.get("ask"),
+            down.get("spread"),
+            reference_price,
+        )
+        last = self._last_market_state_sample.get(window.slug)
+        remaining_sec = (window.end_time - now).total_seconds()
+        cadence = (
+            self.config.market_state_terminal_sample_sec
+            if remaining_sec <= self.config.market_state_terminal_window_sec
+            else self.config.market_state_sample_sec
+        )
+        reason = "initial"
+        if last is not None:
+            last_time, last_signature = last
+            elapsed = (now - last_time).total_seconds()
+            if elapsed < cadence:
+                return None
+            if signature != last_signature:
+                reason = "changed"
+            elif elapsed >= self.config.market_state_heartbeat_sec:
+                reason = "heartbeat"
+            else:
+                return None
+        max_age_ms = self.config.book_max_age_sec * 1000.0
+        book_stale = (
+            up_age is None
+            or down_age is None
+            or float(up_age) > max_age_ms
+            or float(down_age) > max_age_ms
+            or up.get("bid") is None
+            or up.get("ask") is None
+            or down.get("bid") is None
+            or down.get("ask") is None
+        )
+        self._last_market_state_sample[window.slug] = (now, signature)
+        return {
+            "market_slug": window.slug,
+            "condition_id": window.condition_id,
+            "symbol": window.symbol,
+            "sampled_ts": int(now.timestamp()),
+            "observed_at": now.isoformat(),
+            "window_remaining_sec": compact_float(remaining_sec, 3),
+            "reference_price": reference_price,
+            "reference_price_age_sec": reference_age,
+            "up_json": up,
+            "down_json": down,
+            "book_stale": book_stale,
+            "sample_reason": reason,
         }
 
     def _trade_from_activity_event(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -957,6 +1117,23 @@ class CryptoWalletObserver:
             return
         self._last_raw_cleanup = time.monotonic()
         cleanup_raw_retention(self.config.data_dir / "raw", retention_days=self.config.raw_retention_days)
+
+    def _archive_strategy_data_if_due(self) -> None:
+        interval_sec = max(0.0, self.config.strategy_archive_interval_hours) * 3600.0
+        if interval_sec <= 0:
+            return
+        if time.monotonic() - self._last_strategy_archive < interval_sec:
+            return
+        self._last_strategy_archive = time.monotonic()
+        now = dt.datetime.now(dt.timezone.utc)
+        result = self.store.archive_strategy_rows(
+            self.config.data_dir / "archive",
+            activity_cutoff_ts=int((now - dt.timedelta(days=self.config.watchlist_activity_retention_days)).timestamp()),
+            context_cutoff_ts=int((now - dt.timedelta(days=self.config.context_retention_days)).timestamp()),
+            sample_cutoff_ts=int((now - dt.timedelta(days=self.config.market_state_retention_days)).timestamp()),
+        )
+        if any(result.values()):
+            self.writer.write({"event": "strategy_archive", "observed_at": now.isoformat(), **result})
 
     def _write_report_if_due(self) -> None:
         if time.monotonic() - self._last_report_refresh >= self.config.report_refresh_sec:

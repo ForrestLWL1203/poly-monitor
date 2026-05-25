@@ -30,6 +30,11 @@ class FakeFeed:
         return lookback_sec
 
 
+class StaleFakeStream(FakeStream):
+    def get_book(self, token, max_age_sec=3.0):
+        return [], [], 10_000
+
+
 class ObserverContextTests(unittest.TestCase):
     def test_context_snapshot_includes_window_reference_prices(self):
         now = dt.datetime.now(dt.timezone.utc)
@@ -46,6 +51,7 @@ class ObserverContextTests(unittest.TestCase):
         trade = {
             "wallet": "0xabc",
             "tx_hash": "0xtx",
+            "exchange_ts": 1770000010,
             "outcome": "Up",
             "price": 0.51,
             "usdc": 25.5,
@@ -62,6 +68,233 @@ class ObserverContextTests(unittest.TestCase):
 
         self.assertEqual(row["window_open_reference_price"], 99_900.0)
         self.assertEqual(row["window_close_reference_price"], 100_100.0)
+        self.assertEqual(row["trade_exchange_ts"], 1770000010)
+
+    def test_context_snapshot_marks_stale_books(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        window = MarketWindow(
+            symbol="BTC",
+            slug="btc-updown-5m-1770000000",
+            condition_id="0xcond",
+            question="Bitcoin Up or Down",
+            up_token="up",
+            down_token="down",
+            start_time=now - dt.timedelta(seconds=30),
+            end_time=now + dt.timedelta(seconds=270),
+        )
+        row = context_snapshot(
+            trade={"wallet": "0xabc", "tx_hash": "0xtx", "outcome": "Up", "price": 0.51, "usdc": 25.5},
+            window=window,
+            stream=StaleFakeStream(),
+            feed=FakeFeed(),
+            max_book_age_sec=3.0,
+        )
+
+        self.assertTrue(row["book_stale"])
+        self.assertEqual(row["up"]["book_age_ms"], 10_000)
+
+    def test_watchlist_trade_activity_writes_trade_context(self):
+        async def run_case():
+            now = dt.datetime.now(dt.timezone.utc)
+            window = MarketWindow(
+                symbol="BTC",
+                slug="btc-updown-5m-1770000000",
+                condition_id="0xcond",
+                question="Bitcoin Up or Down",
+                up_token="up",
+                down_token="down",
+                start_time=now - dt.timedelta(seconds=30),
+                end_time=now + dt.timedelta(seconds=270),
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), watchlist_activity_poll_sec=0))
+                observer.windows["BTC"] = window
+                observer.stream = FakeStream()
+                observer.feeds["BTC"] = FakeFeed()
+                observer.store.add_watchlist_wallet("0xabc")
+                observer.data_api.fetch_user_activity = AsyncMock(
+                    return_value=[
+                        {
+                            "transactionHash": "0xtrade",
+                            "proxyWallet": "0xabc",
+                            "timestamp": int(now.timestamp()),
+                            "conditionId": "0xcond",
+                            "type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcomeIndex": 0,
+                            "slug": window.slug,
+                            "price": 0.5,
+                            "size": 10,
+                            "usdcSize": 5,
+                            "asset": "up",
+                            "id": "fill-1",
+                        },
+                        {
+                            "transactionHash": "0xmerge",
+                            "proxyWallet": "0xabc",
+                            "timestamp": int(now.timestamp()) + 1,
+                            "conditionId": "0xcond",
+                            "type": "MERGE",
+                            "slug": window.slug,
+                            "size": 10,
+                            "usdcSize": 10,
+                        },
+                    ]
+                )
+                try:
+                    await observer._poll_watchlist_activity_once()
+                    contexts = observer.store.wallet_trade_contexts("0xabc")
+                finally:
+                    observer.store.close()
+                    observer.writer.close()
+                return contexts
+
+        contexts = asyncio.run(run_case())
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0]["tx_hash"], "0xtrade")
+        self.assertEqual(contexts[0]["fill_id"], "fill-1")
+        self.assertFalse(contexts[0]["book_stale"])
+
+    def test_historical_watchlist_activity_does_not_write_synthetic_context(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                data_dir = Path(tmp)
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=data_dir, watchlist_activity_poll_sec=0))
+                observer.stream = FakeStream()
+                observer.feeds["BTC"] = FakeFeed()
+                observer.store.add_watchlist_wallet("0xabc")
+                observer.data_api.fetch_user_activity = AsyncMock(
+                    return_value=[
+                        {
+                            "transactionHash": "0xhistorical",
+                            "proxyWallet": "0xabc",
+                            "timestamp": 1770000010,
+                            "conditionId": "0xcond",
+                            "type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcomeIndex": 0,
+                            "slug": "btc-updown-5m-1770000000",
+                            "price": 0.5,
+                            "size": 10,
+                            "usdcSize": 5,
+                            "asset": "up-token",
+                            "id": "historical-fill-1",
+                        },
+                    ]
+                )
+                try:
+                    with patch("poly_monitor.observer.fetch_crypto_price_api", return_value=None):
+                        await observer._poll_watchlist_activity_once()
+                    contexts = observer.store.wallet_trade_contexts("0xabc")
+                finally:
+                    observer.store.close()
+                    observer.writer.close()
+                raw_events = []
+                for path in sorted((data_dir / "raw").glob("*/events.jsonl")):
+                    raw_events.extend(json.loads(line) for line in path.read_text().splitlines())
+                return contexts, raw_events
+
+        contexts, raw_events = asyncio.run(run_case())
+        self.assertEqual(contexts, [])
+        self.assertNotIn("context_snapshot", {row.get("event") for row in raw_events})
+        self.assertIn("watchlist_activity_observed", {row.get("event") for row in raw_events})
+
+    def test_watchlist_context_write_cap_limits_sqlite_and_raw_snapshots(self):
+        async def run_case():
+            now = dt.datetime.now(dt.timezone.utc)
+            window = MarketWindow(
+                symbol="BTC",
+                slug="btc-updown-5m-1770000000",
+                condition_id="0xcond",
+                question="Bitcoin Up or Down",
+                up_token="up",
+                down_token="down",
+                start_time=now - dt.timedelta(seconds=30),
+                end_time=now + dt.timedelta(seconds=270),
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                data_dir = Path(tmp)
+                observer = CryptoWalletObserver(
+                    ObserverConfig(
+                        data_dir=data_dir,
+                        watchlist_activity_poll_sec=0,
+                        max_context_writes_per_cycle=1,
+                    )
+                )
+                observer.windows["BTC"] = window
+                observer.stream = FakeStream()
+                observer.feeds["BTC"] = FakeFeed()
+                observer.store.add_watchlist_wallet("0xabc")
+                observer.data_api.fetch_user_activity = AsyncMock(
+                    return_value=[
+                        {
+                            "transactionHash": f"0xtrade{idx}",
+                            "proxyWallet": "0xabc",
+                            "timestamp": int(now.timestamp()) + idx,
+                            "conditionId": "0xcond",
+                            "type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcomeIndex": 0,
+                            "slug": window.slug,
+                            "price": 0.5,
+                            "size": 10,
+                            "usdcSize": 5,
+                            "asset": "up",
+                            "id": f"fill-{idx}",
+                        }
+                        for idx in range(3)
+                    ]
+                )
+                try:
+                    await observer._poll_watchlist_activity_once()
+                    contexts = observer.store.wallet_trade_contexts("0xabc")
+                finally:
+                    observer.store.close()
+                    observer.writer.close()
+                raw_events = []
+                for path in sorted((data_dir / "raw").glob("*/events.jsonl")):
+                    raw_events.extend(json.loads(line) for line in path.read_text().splitlines())
+                return contexts, raw_events
+
+        contexts, raw_events = asyncio.run(run_case())
+        raw_contexts = [row for row in raw_events if row.get("event") == "context_snapshot"]
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(len(raw_contexts), 1)
+        self.assertEqual(raw_contexts[0]["trade_tx_hash"], "0xtrade0")
+
+    def test_market_state_sampling_is_low_frequency_with_heartbeat(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        window = MarketWindow(
+            symbol="BTC",
+            slug="btc-updown-5m-1770000000",
+            condition_id="0xcond",
+            question="Bitcoin Up or Down",
+            up_token="up",
+            down_token="down",
+            start_time=now - dt.timedelta(seconds=30),
+            end_time=now + dt.timedelta(seconds=270),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp)))
+            observer.windows["BTC"] = window
+            observer.stream = FakeStream()
+            observer.feeds["BTC"] = FakeFeed()
+            try:
+                self.assertTrue(observer._sample_market_state_each_cycle(now=now))
+                self.assertFalse(observer._sample_market_state_each_cycle(now=now + dt.timedelta(seconds=1)))
+                self.assertFalse(observer._sample_market_state_each_cycle(now=now + dt.timedelta(seconds=5)))
+                self.assertTrue(observer._sample_market_state_each_cycle(now=now + dt.timedelta(seconds=15)))
+                rows = observer.store.market_state_samples(window.slug)
+            finally:
+                observer.store.close()
+                observer.writer.close()
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["sample_reason"], "initial")
+        self.assertEqual(rows[1]["sample_reason"], "heartbeat")
 
     def test_raw_trade_events_are_limited_to_followed_wallets(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -796,8 +1029,7 @@ class ObserverContextTests(unittest.TestCase):
         call_count, pnl_rows, settlement = asyncio.run(run_case())
         self.assertEqual(call_count, 1)
         self.assertEqual(settlement["winning_side"], "Down")
-        self.assertFalse(pnl_rows[0]["incomplete"])
-        self.assertAlmostEqual(pnl_rows[0]["realized_pnl"], 4.0)
+        self.assertEqual(pnl_rows, [])
 
     def test_watchlist_activity_poll_warns_on_cashflow_size_mismatch(self):
         async def run_case():

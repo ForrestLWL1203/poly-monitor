@@ -52,12 +52,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--archive-revival-min-trades-24h", type=int, default=100)
     parser.add_argument("--archive-revival-min-markets-24h", type=int, default=20)
     parser.add_argument("--archive-revival-cooldown-sec", type=float, default=300.0)
-    parser.add_argument("--watchlist-activity-poll-sec", type=float, default=30.0)
+    parser.add_argument("--watchlist-activity-poll-sec", type=float, default=180.0)
     parser.add_argument("--watchlist-activity-lookback-sec", type=int, default=6 * 3600)
-    parser.add_argument("--watchlist-activity-safety-window-sec", type=int, default=60)
+    parser.add_argument("--watchlist-activity-safety-window-sec", type=int, default=300)
     parser.add_argument("--watchlist-activity-pages", type=int, default=2)
     parser.add_argument("--watchlist-activity-retention-days", type=int, default=30)
     parser.add_argument("--non-watchlist-activity-retention-days", type=int, default=7)
+    parser.add_argument("--context-retention-days", type=int, default=30)
+    parser.add_argument("--market-state-retention-days", type=int, default=7)
+    parser.add_argument("--strategy-archive-interval-hours", type=float, default=6.0)
+    parser.add_argument("--market-state-sample-sec", type=float, default=5.0)
+    parser.add_argument("--market-state-terminal-sample-sec", type=float, default=2.0)
+    parser.add_argument("--market-state-terminal-window-sec", type=float, default=60.0)
+    parser.add_argument("--market-state-heartbeat-sec", type=float, default=15.0)
+    parser.add_argument("--max-context-writes-per-cycle", type=int, default=200)
     return parser
 
 
@@ -99,6 +107,14 @@ async def async_main() -> int:
         watchlist_activity_pages=args.watchlist_activity_pages,
         watchlist_activity_retention_days=args.watchlist_activity_retention_days,
         non_watchlist_activity_retention_days=args.non_watchlist_activity_retention_days,
+        context_retention_days=args.context_retention_days,
+        market_state_retention_days=args.market_state_retention_days,
+        strategy_archive_interval_hours=args.strategy_archive_interval_hours,
+        market_state_sample_sec=args.market_state_sample_sec,
+        market_state_terminal_sample_sec=args.market_state_terminal_sample_sec,
+        market_state_terminal_window_sec=args.market_state_terminal_window_sec,
+        market_state_heartbeat_sec=args.market_state_heartbeat_sec,
+        max_context_writes_per_cycle=args.max_context_writes_per_cycle,
     )
     observer = CryptoWalletObserver(config)
     return await observer.run()
