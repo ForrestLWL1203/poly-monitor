@@ -52,11 +52,19 @@ def _local_pnl_7d(metrics: dict[str, Any]) -> float:
 
 
 def _local_wins_7d(metrics: dict[str, Any]) -> float:
-    return _num(metrics, "local_observed_wins_7d", _num(metrics, "wins_7d"))
+    return _num(metrics, "local_observed_wins_7d")
 
 
 def _local_losses_7d(metrics: dict[str, Any]) -> float:
-    return _num(metrics, "local_observed_losses_7d", _num(metrics, "losses_7d"))
+    return _num(metrics, "local_observed_losses_7d")
+
+
+def _quality_win_loss_counts(metrics: dict[str, Any]) -> tuple[float, float]:
+    if _num(metrics, "local_observed_settled_markets_7d") > 0:
+        return _local_wins_7d(metrics), _local_losses_7d(metrics)
+    if metrics.get("pnl_source") == "local_observed_ledger":
+        return _num(metrics, "wins_7d"), _num(metrics, "losses_7d")
+    return _num(metrics, "closed_position_wins_7d"), _num(metrics, "closed_position_losses_7d")
 
 
 def _local_observed_span_hours(metrics: dict[str, Any]) -> float:
@@ -103,8 +111,7 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
     longshot_high = _num(metrics, "longshot_profit_share") > thresholds.max_longshot_profit_share
     repeat_longshot = _num(metrics, "longshot_profit_markets") >= thresholds.min_repeat_longshot_profit_markets
     markets_24h = _num(metrics, "markets_24h", _num(metrics, "markets_7d"))
-    wins = _num(metrics, "wins_7d")
-    losses = _num(metrics, "losses_7d")
+    wins, losses = _quality_win_loss_counts(metrics)
     resolved_markets = wins + losses
     win_loss_failed = resolved_markets >= thresholds.min_resolved_markets_for_win_loss_check and wins < losses
     has_local_quality_sample = _has_local_quality_sample(metrics, thresholds)
@@ -191,8 +198,7 @@ def _log_bonus(value: float, *, scale: float, cap: float) -> float:
 
 
 def _active_rank_score(metrics: dict[str, Any]) -> float:
-    wins = _num(metrics, "wins_7d")
-    losses = _num(metrics, "losses_7d")
+    wins, losses = _quality_win_loss_counts(metrics)
     resolved_markets = wins + losses
     win_rate = wins / resolved_markets if resolved_markets > 0 else 0.0
 

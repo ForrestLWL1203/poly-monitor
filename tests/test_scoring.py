@@ -60,6 +60,69 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(score.status, "dormant_candidate")
         self.assertIn("inactive_for_active", score.reasons)
 
+    def test_active_rank_uses_local_observed_quality_not_cancelled_api_wins(self):
+        metrics = {
+            "wallet": "0x25f4707c93e4bfdf26cd6c5cc46c5464691cf88e",
+            "trades_24h": 3224,
+            "markets_24h": 346,
+            "trades_7d": 1365,
+            "trades_30d": 1365,
+            "pnl_7d": 5950.883,
+            "pnl_30d": 14926.985,
+            "pnl_source": "profile_portfolio_pnl",
+            "wins_7d": 0,
+            "losses_7d": 0,
+            "closed_position_wins_7d": 174,
+            "closed_position_losses_7d": 0,
+            "local_observed_pnl_7d": 171.959363,
+            "local_observed_settled_markets_7d": 191,
+            "local_observed_wins_7d": 110,
+            "local_observed_losses_7d": 81,
+            "local_observed_span_hours": 22.503,
+            "local_observed_max_trades_per_market_24h": 72,
+            "top1_concentration": 0.017674,
+            "top3_concentration": 0.046623,
+            "longshot_profit_share": 0.0,
+            "longshot_profit_markets": 0,
+            "last_active_age_hours": 0.004,
+            "historical_trades": 1365,
+            "historical_markets": 60,
+            "historical_pnl": 14926.985,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "active_candidate")
+        self.assertGreater(score.rank_score, 200)
+
+    def test_active_quality_gate_ignores_cancelled_api_wins(self):
+        metrics = {
+            "wallet": "0xstaleapi",
+            "trades_7d": 1000,
+            "markets_24h": 120,
+            "trades_30d": 2000,
+            "pnl_7d": 500,
+            "pnl_30d": 1000,
+            "pnl_source": "profile_portfolio_pnl",
+            "wins_7d": 0,
+            "losses_7d": 99,
+            "closed_position_wins_7d": 30,
+            "closed_position_losses_7d": 10,
+            "top1_concentration": 0.05,
+            "top3_concentration": 0.15,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 2000,
+            "historical_markets": 200,
+            "historical_pnl": 1000,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "active_candidate")
+        self.assertNotIn("wins_7d_below_losses", score.reasons)
+
     def test_score_wallet_does_not_reject_repeatable_longshot_edge(self):
         metrics = {
             "wallet": "0xabc",
