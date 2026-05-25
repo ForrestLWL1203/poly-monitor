@@ -58,7 +58,7 @@ class ObserverConfig:
     watchlist_activity_retention_days: int = 7
     non_watchlist_activity_retention_days: int = 3
     context_retention_days: int = 7
-    research_cleanup_dormant_wallets: int = 3
+    research_cleanup_dormant_wallets: int = 10
     market_state_retention_days: int = 7
     strategy_archive_interval_hours: float = 6.0
     market_state_sample_sec: float = 5.0
@@ -183,9 +183,10 @@ class CryptoWalletObserver:
         self.pending_settlements: dict[str, tuple[MarketWindow, dt.datetime]] = {}
         self._last_score_refresh = 0.0
         self._last_report_refresh = 0.0
-        self._last_data_cleanup = 0.0
-        self._last_raw_cleanup = 0.0
-        self._last_strategy_archive = 0.0
+        now_monotonic = time.monotonic()
+        self._last_data_cleanup = now_monotonic
+        self._last_raw_cleanup = now_monotonic
+        self._last_strategy_archive = now_monotonic
         self._last_window_refresh = 0.0
         self._last_open_price_refresh = 0.0
         self._last_settlement_check = 0.0

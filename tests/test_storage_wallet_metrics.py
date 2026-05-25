@@ -1041,7 +1041,6 @@ class StorageWalletMetricsTests(unittest.TestCase):
                     }
                 )
                 traditional_rows = store.wallet_market_pnl_rows(wallet)
-                watchlist_rows = store.watchlist_market_pnl_rows(wallet)
             finally:
                 store.close()
 
@@ -1050,7 +1049,6 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(traditional_rows[0]["pnl_source"], "trade_ledger")
         self.assertEqual(traditional_rows[0]["has_merge_or_split"], 0)
         self.assertEqual(traditional_rows[0]["incomplete"], 1)
-        self.assertEqual(watchlist_rows, [])
 
     def test_store_startup_keeps_traditional_pnl_when_activity_is_only_raw_detail(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1243,6 +1241,19 @@ class StorageWalletMetricsTests(unittest.TestCase):
                         "status": "tracking",
                     }
                 )
+                store.insert_market_state_samples(
+                    [
+                        {
+                            "market_slug": "btc-updown-5m-1",
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "sampled_ts": 100,
+                            "observed_at": "2026-05-25T00:00:00+00:00",
+                            "up_json": {"bid": 0.5},
+                            "down_json": {"ask": 0.5},
+                        }
+                    ]
+                )
 
                 result = store.remove_watchlist_wallet_and_purge(wallet)
                 remaining_wallets = store.watchlist_wallets()
@@ -1252,6 +1263,7 @@ class StorageWalletMetricsTests(unittest.TestCase):
                 removed_pnl = store.wallet_market_pnl_rows(wallet)
                 profile = store.conn.execute("SELECT 1 FROM wallet_profiles WHERE wallet=?", (wallet,)).fetchone()
                 watched = store.watched_market_windows()
+                samples = store.market_state_samples("btc-updown-5m-1")
             finally:
                 store.close()
 
@@ -1261,6 +1273,7 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(result["removed_wallet_market_pnl"], 1)
         self.assertEqual(result["removed_wallet_profiles"], 1)
         self.assertEqual(result["removed_watched_market_windows"], 1)
+        self.assertEqual(result["removed_orphan_market_state_samples"], 1)
         self.assertEqual(remaining_wallets, [other])
         self.assertEqual(removed_activity, [])
         self.assertEqual(len(other_activity), 1)
@@ -1268,6 +1281,7 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(removed_pnl, [])
         self.assertIsNone(profile)
         self.assertEqual(watched, [])
+        self.assertEqual(samples, [])
 
     def test_wallet_trade_metrics_counts_time_windows_without_loading_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

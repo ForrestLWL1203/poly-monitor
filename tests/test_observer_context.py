@@ -1448,7 +1448,7 @@ class ObserverContextTests(unittest.TestCase):
                         return_value={"openPrice": 100, "closePrice": 99, "completed": True, "cached": False},
                     ) as fetch_price:
                         await observer._poll_watchlist_activity_once()
-                    pnl_rows = observer.store.watchlist_market_pnl_rows("0xabc")
+                    pnl_rows = observer.store.wallet_market_pnl_rows("0xabc")
                     settlement = observer.store.conn.execute(
                         "SELECT * FROM market_settlements WHERE market_slug='eth-updown-5m-1770000000'"
                     ).fetchone()
@@ -1460,7 +1460,8 @@ class ObserverContextTests(unittest.TestCase):
         call_count, pnl_rows, settlement = asyncio.run(run_case())
         self.assertEqual(call_count, 1)
         self.assertEqual(settlement["winning_side"], "Down")
-        self.assertEqual(pnl_rows, [])
+        self.assertEqual(len(pnl_rows), 1)
+        self.assertEqual(pnl_rows[0]["winning_side"], "Down")
 
     def test_watchlist_activity_poll_warns_on_cashflow_size_mismatch(self):
         async def run_case():
@@ -1607,6 +1608,17 @@ class ObserverContextTests(unittest.TestCase):
             try:
                 observer._cleanup_stale_data_if_due()
                 self.assertEqual(set(observer._last_context_snapshot), {("0xfresh", "fresh-market")})
+            finally:
+                observer.store.close()
+                observer.writer.close()
+
+    def test_cleanup_stale_data_is_not_due_immediately_after_startup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), cleanup_interval_hours=0.001))
+            try:
+                with patch.object(observer.store, "cleanup_inactive_wallet_data") as cleanup:
+                    observer._cleanup_stale_data_if_due()
+                cleanup.assert_not_called()
             finally:
                 observer.store.close()
                 observer.writer.close()

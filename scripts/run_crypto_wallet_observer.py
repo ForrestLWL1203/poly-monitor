@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--watchlist-activity-retention-days", type=int, default=7)
     parser.add_argument("--non-watchlist-activity-retention-days", type=int, default=3)
     parser.add_argument("--context-retention-days", type=int, default=7)
-    parser.add_argument("--research-cleanup-dormant-wallets", type=int, default=3)
+    parser.add_argument("--research-cleanup-dormant-wallets", type=int, default=10)
     parser.add_argument("--market-state-retention-days", type=int, default=7)
     parser.add_argument("--strategy-archive-interval-hours", type=float, default=6.0)
     parser.add_argument("--market-state-sample-sec", type=float, default=5.0)

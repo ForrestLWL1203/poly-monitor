@@ -289,30 +289,6 @@ class ObserverStore:
                 pseudonym TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS watchlist_market_pnl (
-                wallet TEXT NOT NULL,
-                market_slug TEXT NOT NULL,
-                condition_id TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                realized_pnl REAL NOT NULL,
-                cash_flow REAL NOT NULL,
-                buy_usdc REAL NOT NULL,
-                sell_usdc REAL NOT NULL,
-                merge_usdc REAL NOT NULL,
-                redeem_usdc REAL NOT NULL,
-                split_usdc REAL NOT NULL,
-                settled_value REAL NOT NULL,
-                net_shares_up REAL NOT NULL,
-                net_shares_down REAL NOT NULL,
-                activity_events INTEGER NOT NULL,
-                has_merge INTEGER NOT NULL DEFAULT 0,
-                has_redeem INTEGER NOT NULL DEFAULT 0,
-                winning_side TEXT NOT NULL DEFAULT '',
-                settled_at TEXT NOT NULL DEFAULT '',
-                incomplete INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY(wallet, market_slug)
-            );
             CREATE TABLE IF NOT EXISTS wallet_trade_contexts (
                 wallet TEXT NOT NULL,
                 tx_hash TEXT NOT NULL,
@@ -375,6 +351,13 @@ class ObserverStore:
             """
         )
         self.conn.executescript(WATCHLIST_SCHEMA_SQL)
+        self.conn.executescript(
+            """
+            DROP INDEX IF EXISTS idx_watchlist_market_pnl_wallet_settled;
+            DROP INDEX IF EXISTS idx_watchlist_market_pnl_market;
+            DROP TABLE IF EXISTS watchlist_market_pnl;
+            """
+        )
         activity_table_info = self.conn.execute("PRAGMA table_info(wallet_activity_events)").fetchall()
         activity_columns = {str(row["name"]) for row in activity_table_info}
         if "name" in activity_columns or "pseudonym" in activity_columns:
@@ -473,8 +456,6 @@ class ObserverStore:
             CREATE INDEX IF NOT EXISTS idx_wallet_activity_wallet_ts ON wallet_activity_events(wallet, exchange_ts);
             CREATE INDEX IF NOT EXISTS idx_wallet_activity_market_ts ON wallet_activity_events(market_slug, exchange_ts);
             CREATE INDEX IF NOT EXISTS idx_wallet_activity_type ON wallet_activity_events(activity_type, exchange_ts);
-            CREATE INDEX IF NOT EXISTS idx_watchlist_market_pnl_wallet_settled ON watchlist_market_pnl(wallet, settled_at);
-            CREATE INDEX IF NOT EXISTS idx_watchlist_market_pnl_market ON watchlist_market_pnl(market_slug);
             CREATE INDEX IF NOT EXISTS idx_wallet_trade_contexts_wallet_ts ON wallet_trade_contexts(wallet, exchange_ts);
             CREATE INDEX IF NOT EXISTS idx_wallet_trade_contexts_market_ts ON wallet_trade_contexts(market_slug, exchange_ts);
             CREATE INDEX IF NOT EXISTS idx_market_state_samples_market_ts ON market_state_samples(market_slug, sampled_ts);
@@ -612,16 +593,42 @@ class ObserverStore:
 
     def remove_watchlist_wallet_and_purge(self, wallet: str, *, vacuum_pages: int = 1000) -> dict[str, int]:
         normalized = wallet.lower()
+        removed_market_slugs = [
+            str(row["market_slug"])
+            for row in self.conn.execute(
+                "SELECT market_slug FROM watched_market_windows WHERE source_wallet=?",
+                (normalized,),
+            ).fetchall()
+        ]
         removed = WatchlistStore.remove_wallet(self, normalized)
         activity = self.conn.execute("DELETE FROM wallet_activity_events WHERE wallet=?", (normalized,))
         contexts = self.conn.execute("DELETE FROM wallet_trade_contexts WHERE wallet=?", (normalized,))
         pnl = self.conn.execute("DELETE FROM wallet_market_pnl WHERE wallet=?", (normalized,))
         profiles = self.conn.execute("DELETE FROM wallet_profiles WHERE wallet=?", (normalized,))
         watched = self.conn.execute("DELETE FROM watched_market_windows WHERE source_wallet=?", (normalized,))
+        samples_removed = 0
+        if removed_market_slugs:
+            self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS purge_market_slugs(market_slug TEXT PRIMARY KEY)")
+            self.conn.execute("DELETE FROM purge_market_slugs")
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO purge_market_slugs(market_slug) VALUES(?)",
+                [(slug,) for slug in removed_market_slugs],
+            )
+            samples = self.conn.execute(
+                """
+                DELETE FROM market_state_samples
+                WHERE market_slug IN (SELECT market_slug FROM purge_market_slugs)
+                  AND market_slug NOT IN (SELECT market_slug FROM watched_market_windows)
+                """
+            )
+            samples_removed = int(samples.rowcount or 0)
+        removed_any = any(int(cursor.rowcount or 0) for cursor in (activity, contexts, pnl, profiles, watched)) or samples_removed
         vacuumed = 0
-        if any(int(cursor.rowcount or 0) for cursor in (activity, contexts, pnl, profiles, watched)):
+        if removed_any:
             vacuumed = self._incremental_vacuum_pages(vacuum_pages)
         self.conn.commit()
+        if removed_any:
+            self._checkpoint_wal()
         return {
             "removed_watchlist_rows": removed,
             "removed_activity_events": int(activity.rowcount or 0),
@@ -629,13 +636,14 @@ class ObserverStore:
             "removed_wallet_market_pnl": int(pnl.rowcount or 0),
             "removed_wallet_profiles": int(profiles.rowcount or 0),
             "removed_watched_market_windows": int(watched.rowcount or 0),
+            "removed_orphan_market_state_samples": samples_removed,
             "vacuum_pages": vacuumed,
         }
 
     def cleanup_non_focus_research_data(
         self,
         *,
-        dormant_limit: int = 3,
+        dormant_limit: int = 10,
         vacuum_pages: int = 1000,
     ) -> dict[str, int]:
         self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS research_keep(wallet TEXT PRIMARY KEY)")
@@ -666,19 +674,27 @@ class ObserverStore:
                 "research_cleanup_keep_wallets": 0,
                 "removed_non_focus_activity_events": 0,
                 "removed_non_focus_trade_contexts": 0,
-                "removed_non_focus_wallet_market_pnl": 0,
                 "removed_non_focus_wallet_profiles": 0,
                 "removed_non_focus_watched_market_windows": 0,
+                "removed_orphan_market_state_samples": 0,
                 "research_cleanup_vacuum_pages": 0,
             }
+        self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS research_removed_markets(market_slug TEXT PRIMARY KEY)")
+        self.conn.execute("DELETE FROM research_removed_markets")
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO research_removed_markets(market_slug)
+            SELECT market_slug
+            FROM watched_market_windows
+            WHERE source_wallet != ''
+              AND source_wallet NOT IN (SELECT wallet FROM research_keep)
+            """
+        )
         activity = self.conn.execute(
             "DELETE FROM wallet_activity_events WHERE wallet NOT IN (SELECT wallet FROM research_keep)"
         )
         contexts = self.conn.execute(
             "DELETE FROM wallet_trade_contexts WHERE wallet NOT IN (SELECT wallet FROM research_keep)"
-        )
-        pnl = self.conn.execute(
-            "DELETE FROM wallet_market_pnl WHERE wallet NOT IN (SELECT wallet FROM research_keep)"
         )
         profiles = self.conn.execute(
             "DELETE FROM wallet_profiles WHERE wallet NOT IN (SELECT wallet FROM research_keep)"
@@ -690,17 +706,25 @@ class ObserverStore:
               AND source_wallet NOT IN (SELECT wallet FROM research_keep)
             """
         )
-        removed_any = any(int(cursor.rowcount or 0) for cursor in (activity, contexts, pnl, profiles, watched))
+        samples = self.conn.execute(
+            """
+            DELETE FROM market_state_samples
+            WHERE market_slug IN (SELECT market_slug FROM research_removed_markets)
+              AND market_slug NOT IN (SELECT market_slug FROM watched_market_windows)
+            """
+        )
+        removed_any = any(int(cursor.rowcount or 0) for cursor in (activity, contexts, profiles, watched, samples))
         vacuumed = self._incremental_vacuum_pages(vacuum_pages) if removed_any else 0
         if removed_any:
             self.conn.commit()
+            self._checkpoint_wal()
         return {
             "research_cleanup_keep_wallets": keep_wallets,
             "removed_non_focus_activity_events": int(activity.rowcount or 0),
             "removed_non_focus_trade_contexts": int(contexts.rowcount or 0),
-            "removed_non_focus_wallet_market_pnl": int(pnl.rowcount or 0),
             "removed_non_focus_wallet_profiles": int(profiles.rowcount or 0),
             "removed_non_focus_watched_market_windows": int(watched.rowcount or 0),
+            "removed_orphan_market_state_samples": int(samples.rowcount or 0),
             "research_cleanup_vacuum_pages": vacuumed,
         }
 
@@ -1058,31 +1082,12 @@ class ObserverStore:
         ).fetchone()
         return int(row["last_ts"] or 0) if row else 0
 
-    def watchlist_market_pnl_rows(self, wallet: str | None = None) -> list[dict[str, Any]]:
-        if wallet is None:
-            rows = self.conn.execute("SELECT * FROM watchlist_market_pnl ORDER BY wallet, market_slug").fetchall()
-        else:
-            rows = self.conn.execute("SELECT * FROM watchlist_market_pnl WHERE wallet=? ORDER BY settled_at DESC, market_slug", (wallet.lower(),)).fetchall()
-        return [dict(row) for row in rows]
-
     def cleanup_wallet_activity_events(
         self,
         *,
         watchlist_cutoff_ts: int,
         non_watchlist_cutoff_ts: int,
     ) -> dict[str, int]:
-        stale_pairs = {
-            (str(row["wallet"]), str(row["market_slug"]))
-            for row in self.conn.execute(
-                """
-                SELECT wallet, market_slug
-                FROM wallet_activity_events
-                WHERE (wallet IN (SELECT wallet FROM watchlist_wallets) AND exchange_ts < ?)
-                   OR (wallet NOT IN (SELECT wallet FROM watchlist_wallets) AND exchange_ts < ?)
-                """,
-                (watchlist_cutoff_ts, non_watchlist_cutoff_ts),
-            ).fetchall()
-        }
         cursor = self.conn.execute(
             """
             DELETE FROM wallet_activity_events
@@ -1092,25 +1097,13 @@ class ObserverStore:
             (watchlist_cutoff_ts, non_watchlist_cutoff_ts),
         )
         removed_activity = int(cursor.rowcount or 0)
-        removed_pnl = 0
-        for wallet, market_slug in stale_pairs:
-            remaining = self.conn.execute(
-                "SELECT 1 FROM wallet_activity_events WHERE wallet=? AND market_slug=? LIMIT 1",
-                (wallet, market_slug),
-            ).fetchone()
-            if remaining is None:
-                pnl_cursor = self.conn.execute(
-                    "DELETE FROM watchlist_market_pnl WHERE wallet=? AND market_slug=?",
-                    (wallet, market_slug),
-                )
-                removed_pnl += int(pnl_cursor.rowcount or 0)
         vacuum_pages = 0
-        if removed_activity or removed_pnl:
+        if removed_activity:
             vacuum_pages = self._incremental_vacuum_pages(1000)
             self.conn.commit()
+            self._checkpoint_wal()
         return {
             "removed_activity_events": removed_activity,
-            "removed_watchlist_pnl_rows": removed_pnl,
             "vacuum_pages": vacuum_pages,
         }
 
@@ -1240,6 +1233,12 @@ class ObserverStore:
         except sqlite3.Error:
             return 0
         return max(0, before - after)
+
+    def _checkpoint_wal(self) -> None:
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass
 
     def recent_wallets(self, *, limit: int = 200) -> list[str]:
         rows = self.conn.execute(

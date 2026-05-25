@@ -376,17 +376,11 @@ class ArchiveRetentionTests(unittest.TestCase):
                 str(row["wallet"])
                 for row in store.conn.execute("SELECT DISTINCT wallet FROM wallet_activity_events").fetchall()
             }
-            pnl_wallets = {
-                str(row["wallet"])
-                for row in store.conn.execute("SELECT DISTINCT wallet FROM watchlist_market_pnl").fetchall()
-            }
             store.close()
 
         self.assertEqual(result["removed_activity_events"], 2)
-        self.assertEqual(result["removed_watchlist_pnl_rows"], 0)
         self.assertIn("vacuum_pages", result)
         self.assertEqual(remaining, {watched, fresh_removed})
-        self.assertEqual(pnl_wallets, set())
 
     def test_cleanup_non_focus_research_data_keeps_watchlist_active_and_top_dormant(self):
         def event(wallet: str, tx: str, market: str) -> dict:
@@ -505,12 +499,11 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(result["research_cleanup_keep_wallets"], 3)
         self.assertEqual(result["removed_non_focus_activity_events"], 3)
         self.assertEqual(result["removed_non_focus_trade_contexts"], 3)
-        self.assertEqual(result["removed_non_focus_wallet_market_pnl"], 3)
         self.assertEqual(result["removed_non_focus_wallet_profiles"], 3)
         self.assertEqual(result["removed_non_focus_watched_market_windows"], 3)
         self.assertEqual(activity_wallets, keep)
         self.assertEqual(context_wallets, keep)
-        self.assertEqual(pnl_wallets, keep)
+        self.assertEqual(pnl_wallets, set(wallets))
         self.assertEqual(profile_wallets, keep)
         self.assertEqual(watched_wallets, keep)
 
