@@ -409,6 +409,67 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["pnl_total"], 0.0)
         self.assertEqual(metrics["settled_markets_total"], 0)
 
+    def test_activity_ledger_partial_redeem_keeps_unredeemed_winner_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                wallet = "0xpartial"
+                market = "btc-updown-5m-partial-redeem"
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-25T07:40:00+00:00",
+                        "completed": True,
+                    }
+                )
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xbuy-up",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.4,
+                            "size": 100,
+                            "usdc": 40,
+                            "observed_at": "2026-05-25T07:30:00+00:00",
+                        },
+                        {
+                            "tx_hash": "0xredeem-partial",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 120,
+                            "activity_type": "REDEEM",
+                            "outcome_index": 999,
+                            "size": 30,
+                            "usdc": 30,
+                            "observed_at": "2026-05-25T07:40:00+00:00",
+                        },
+                    ]
+                )
+
+                row = store.wallet_market_pnl_rows(wallet)[0]
+            finally:
+                store.close()
+
+        self.assertEqual(row["pnl_source"], "activity_ledger")
+        self.assertAlmostEqual(row["realized_pnl"], 60.0)
+        self.assertAlmostEqual(row["settled_value"], 100.0)
+        self.assertAlmostEqual(row["activity_redeem_usdc"], 30.0)
+        self.assertAlmostEqual(row["activity_net_shares_up"], 70.0)
+        self.assertAlmostEqual(row["activity_net_shares_down"], 0.0)
+
     def test_store_startup_recomputes_settled_activity_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"

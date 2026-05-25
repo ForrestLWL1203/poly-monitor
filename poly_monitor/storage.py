@@ -1261,6 +1261,8 @@ class ObserverStore:
             elif activity_type == "REDEEM":
                 item["cash"] += amount
                 item["redeem_usdc"] += amount
+                winner_key = "up" if winning_side.lower() == "up" else "down"
+                item[winner_key] -= amount
                 activity_cashflow_wallets.add(wallet)
             item["activity_events"] += 1
 
@@ -1269,12 +1271,8 @@ class ObserverStore:
             activity_item = activity_by_wallet.get(wallet)
             if activity_item is not None and int(activity_item["trades"]) > 0:
                 item = activity_item
-                residual_settled = (
-                    0.0
-                    if float(item["redeem_usdc"]) > 0
-                    else max(0.0, float(item["up"] if winning_side.lower() == "up" else item["down"]))
-                )
-                settled_value = float(item["redeem_usdc"]) if float(item["redeem_usdc"]) > 0 else residual_settled
+                residual_settled = max(0.0, float(item["up"] if winning_side.lower() == "up" else item["down"]))
+                settled_value = float(item["redeem_usdc"]) + residual_settled
                 realized = float(item["cash"]) + residual_settled
                 incomplete = int(float(item["up"]) < -1e-6 or float(item["down"]) < -1e-6)
                 pnl_source = "activity_ledger"
