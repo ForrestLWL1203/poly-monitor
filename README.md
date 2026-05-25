@@ -103,10 +103,11 @@ Watchlisted wallets are treated as manually protected research targets:
 - Their metrics cache uses the active refresh TTL, so archived watchlist wallets
   are refreshed more often than ordinary archived wallets.
 
-- Historical BTC/ETH 5m activity and BTC/ETH 5m closed-position estimates are
-  used for candidate discovery and ranking.
-- Whole-profile leaderboard profit is kept as reference context only; it is not
-  used as scoring PnL because it may come from unrelated markets.
+- Historical BTC/ETH 5m activity is used for candidate discovery and ranking.
+  Polymarket profile profit is used as the primary historical PnL because the
+  closed-position endpoint can overstate winners.
+- BTC/ETH 5m closed-position estimates are kept as reference context only; they
+  are not used as the primary scoring PnL.
 - The observer also records a separate local-observed Ledger PnL from trades and
   settlements collected after this script started. This local PnL is cumulative
   across the saved local ledger, not just the current active-candidate window.

@@ -167,9 +167,9 @@ def build_metrics_from_api(
     crypto_closed_pnl_estimate_30d = round(sum(market_pnls_30d), 6)
     profile_pnl_7d, profile_name_7d, profile_error_7d = _profile_profit(wallet, "7d")
     profile_pnl_30d, profile_name_30d, profile_error_30d = _profile_profit(wallet, "30d")
-    pnl_7d = crypto_closed_pnl_estimate_7d
-    pnl_30d = crypto_closed_pnl_estimate_30d
-    pnl_source = "crypto_closed_positions"
+    pnl_7d = profile_pnl_7d if profile_pnl_7d is not None else crypto_closed_pnl_estimate_7d
+    pnl_30d = profile_pnl_30d if profile_pnl_30d is not None else crypto_closed_pnl_estimate_30d
+    pnl_source = "profile_profit" if profile_pnl_7d is not None or profile_pnl_30d is not None else "crypto_closed_positions"
     total_profit_30d = sum(value for value in market_pnls_30d if value > 0)
     last_ts = max([int(row.get("timestamp") or 0) for row in trades] or [0])
     trade_markets_24h = {row_slug(row) for row in trades_24h if row_slug(row)}

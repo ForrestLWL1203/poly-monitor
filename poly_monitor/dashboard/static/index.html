@@ -399,8 +399,8 @@
                   <th title="近 7 天 BTC/ETH 5m 成交笔数">7天交易</th>
                   <th title="近 30 天 BTC/ETH 5m 成交笔数">30天交易</th>
                   <th title="近 24 小时 activity 样本中参与过的 BTC/ETH 5m 窗口数，用来判断近期是否活跃">24h窗口</th>
-                  <th title="用于评分的 BTC/ETH 5m 历史已关闭仓位近 7 天 PnL">历史7天PnL</th>
-                  <th title="用于评分的 BTC/ETH 5m 历史已关闭仓位近 30 天 PnL">历史30天PnL</th>
+                  <th title="用于评分的 Polymarket Profile 近 7 天 PnL；BTC/ETH closed-position 估算仅作参考">历史7天PnL</th>
+                  <th title="用于评分的 Polymarket Profile 近 30 天 PnL；BTC/ETH closed-position 估算仅作参考">历史30天PnL</th>
                   <th title="仅统计 observer 启动后本地记录且已结算的 BTC/ETH 5m Ledger 盈亏">本地观测PnL</th>
                   <th title="本地观测近 7 天已结算盈利市场数 / 亏损市场数；无本地结算时显示 0 / 0">7天胜/负</th>
                   <th title="最大单一盈利市场占总正收益比例，越低越不依赖单点暴富">最大单场占比</th>
@@ -764,8 +764,8 @@
         ["综合分", fmtInt(detail.rank_score)],
         ["历史7天PnL", money(m.pnl_7d)],
         ["历史30天PnL", money(m.pnl_30d)],
-        ["Profile参考7天PnL", money(m.profile_pnl_7d)],
-        ["Profile参考30天PnL", money(m.profile_pnl_30d)],
+        ["BTC/ETH估算7天PnL", money(m.crypto_closed_pnl_estimate_7d)],
+        ["BTC/ETH估算30天PnL", money(m.crypto_closed_pnl_estimate_30d)],
         ["本地观测Realized PnL", money(localObservedPnl(m))],
         ["已结算窗口", `${fmt(m.settled_markets_7d, 0)} / ${fmt(m.settled_markets_30d, 0)}`],
         ["本地已结算窗口", `${fmt(m.local_observed_settled_markets_7d, 0)} / ${fmt(m.local_observed_settled_markets_30d, 0)}`],
