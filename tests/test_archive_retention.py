@@ -278,6 +278,59 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(watched_score, "archive_candidate")
         self.assertIsNone(stale_score)
 
+    def test_cleanup_wallet_activity_events_applies_watchlist_and_non_watchlist_retention(self):
+        def event(wallet: str, tx: str, ts: int, market: str) -> dict:
+            return {
+                "tx_hash": tx,
+                "wallet": wallet,
+                "market_slug": market,
+                "condition_id": f"cond-{market}",
+                "symbol": "BTC",
+                "exchange_ts": ts,
+                "activity_type": "TRADE",
+                "side": "BUY",
+                "outcome": "Up",
+                "outcome_index": 0,
+                "price": 0.5,
+                "size": 10,
+                "usdc": 5,
+                "observed_at": "2026-05-25T00:00:00+00:00",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            watched = "0xwatched"
+            old_removed = "0xremoved"
+            fresh_removed = "0xfresh"
+            store.add_watchlist_wallet(watched)
+            store.insert_wallet_activity_events(
+                [
+                    event(watched, "0xw-old", 100, "btc-updown-5m-watched-old"),
+                    event(watched, "0xw-fresh", 600, "btc-updown-5m-watched-fresh"),
+                    event(old_removed, "0xr-old", 200, "btc-updown-5m-removed-old"),
+                    event(fresh_removed, "0xr-fresh", 950, "btc-updown-5m-removed-fresh"),
+                ]
+            )
+
+            result = store.cleanup_wallet_activity_events(
+                watchlist_cutoff_ts=500,
+                non_watchlist_cutoff_ts=900,
+            )
+            remaining = {
+                str(row["wallet"])
+                for row in store.conn.execute("SELECT DISTINCT wallet FROM wallet_activity_events").fetchall()
+            }
+            pnl_wallets = {
+                str(row["wallet"])
+                for row in store.conn.execute("SELECT DISTINCT wallet FROM watchlist_market_pnl").fetchall()
+            }
+            store.close()
+
+        self.assertEqual(result["removed_activity_events"], 2)
+        self.assertEqual(result["removed_watchlist_pnl_rows"], 2)
+        self.assertEqual(remaining, {watched, fresh_removed})
+        self.assertEqual(pnl_wallets, {watched, fresh_removed})
+
     def test_cleanup_does_not_make_observed_pnl_reset_on_settlement_refresh(self):
         def trade(wallet: str, tx: str, ts: int) -> dict:
             return {

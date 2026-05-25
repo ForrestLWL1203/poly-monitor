@@ -54,7 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--archive-revival-cooldown-sec", type=float, default=300.0)
     parser.add_argument("--watchlist-activity-poll-sec", type=float, default=30.0)
     parser.add_argument("--watchlist-activity-lookback-sec", type=int, default=6 * 3600)
+    parser.add_argument("--watchlist-activity-safety-window-sec", type=int, default=60)
     parser.add_argument("--watchlist-activity-pages", type=int, default=2)
+    parser.add_argument("--watchlist-activity-retention-days", type=int, default=30)
+    parser.add_argument("--non-watchlist-activity-retention-days", type=int, default=7)
     return parser
 
 
@@ -92,7 +95,10 @@ async def async_main() -> int:
         archive_revival_cooldown_sec=args.archive_revival_cooldown_sec,
         watchlist_activity_poll_sec=args.watchlist_activity_poll_sec,
         watchlist_activity_lookback_sec=args.watchlist_activity_lookback_sec,
+        watchlist_activity_safety_window_sec=args.watchlist_activity_safety_window_sec,
         watchlist_activity_pages=args.watchlist_activity_pages,
+        watchlist_activity_retention_days=args.watchlist_activity_retention_days,
+        non_watchlist_activity_retention_days=args.non_watchlist_activity_retention_days,
     )
     observer = CryptoWalletObserver(config)
     return await observer.run()

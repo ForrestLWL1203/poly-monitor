@@ -107,11 +107,16 @@ Watchlisted wallets are treated as manually protected research targets:
   every 30 seconds by default and stores BTC/ETH/SOL/XRP 5m `TRADE`, `SPLIT`,
   `MERGE`, and `REDEEM` rows in `wallet_activity_events`. This is separate from
   the market `/trades` collector and is the data needed to reconstruct complete
-  set locking, merges, and final redemptions.
+  set locking, merges, and final redemptions. After the initial lookback, each
+  poll starts from the wallet's latest saved activity timestamp minus a 60
+  second safety window instead of refetching the full lookback.
 - Watchlisted wallets use a more precise local activity ledger when those rows
   are available. `watchlist_market_pnl` applies `TRADE`, `SPLIT`, `MERGE`, and
   `REDEEM` cashflows per wallet/market, then the dashboard prefers that result
   for watchlist local observed PnL.
+- Activity rows are retained for 30 days while the wallet remains watchlisted
+  and 7 days after it is no longer watchlisted; derived `watchlist_market_pnl`
+  rows are removed when their underlying activity rows age out.
 
 - Historical BTC/ETH 5m activity is used for candidate discovery and ranking.
   Polymarket profile portfolio-PnL curves are used as the primary historical

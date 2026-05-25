@@ -490,6 +490,13 @@ class ObserverStore:
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
+    def last_wallet_activity_ts(self, wallet: str) -> int:
+        row = self.conn.execute(
+            "SELECT MAX(exchange_ts) AS last_ts FROM wallet_activity_events WHERE wallet=?",
+            (wallet.lower(),),
+        ).fetchone()
+        return int(row["last_ts"] or 0) if row else 0
+
     def _recompute_watchlist_activity_pnl(self, wallet: str, market_slug: str) -> None:
         wallet = wallet.lower()
         rows = self.conn.execute(
@@ -618,6 +625,54 @@ class ObserverStore:
         else:
             rows = self.conn.execute("SELECT * FROM watchlist_market_pnl WHERE wallet=? ORDER BY settled_at DESC, market_slug", (wallet.lower(),)).fetchall()
         return [dict(row) for row in rows]
+
+    def cleanup_wallet_activity_events(
+        self,
+        *,
+        watchlist_cutoff_ts: int,
+        non_watchlist_cutoff_ts: int,
+    ) -> dict[str, int]:
+        stale_pairs = {
+            (str(row["wallet"]), str(row["market_slug"]))
+            for row in self.conn.execute(
+                """
+                SELECT wallet, market_slug
+                FROM wallet_activity_events
+                WHERE (wallet IN (SELECT wallet FROM watchlist_wallets) AND exchange_ts < ?)
+                   OR (wallet NOT IN (SELECT wallet FROM watchlist_wallets) AND exchange_ts < ?)
+                """,
+                (watchlist_cutoff_ts, non_watchlist_cutoff_ts),
+            ).fetchall()
+        }
+        cursor = self.conn.execute(
+            """
+            DELETE FROM wallet_activity_events
+            WHERE (wallet IN (SELECT wallet FROM watchlist_wallets) AND exchange_ts < ?)
+               OR (wallet NOT IN (SELECT wallet FROM watchlist_wallets) AND exchange_ts < ?)
+            """,
+            (watchlist_cutoff_ts, non_watchlist_cutoff_ts),
+        )
+        removed_activity = int(cursor.rowcount or 0)
+        removed_pnl = 0
+        for wallet, market_slug in stale_pairs:
+            remaining = self.conn.execute(
+                "SELECT 1 FROM wallet_activity_events WHERE wallet=? AND market_slug=? LIMIT 1",
+                (wallet, market_slug),
+            ).fetchone()
+            if remaining is None:
+                pnl_cursor = self.conn.execute(
+                    "DELETE FROM watchlist_market_pnl WHERE wallet=? AND market_slug=?",
+                    (wallet, market_slug),
+                )
+                removed_pnl += int(pnl_cursor.rowcount or 0)
+            else:
+                self._recompute_watchlist_activity_pnl(wallet, market_slug)
+        if removed_activity or removed_pnl:
+            self.conn.commit()
+        return {
+            "removed_activity_events": removed_activity,
+            "removed_watchlist_pnl_rows": removed_pnl,
+        }
 
     def recent_wallets(self, *, limit: int = 200) -> list[str]:
         rows = self.conn.execute(

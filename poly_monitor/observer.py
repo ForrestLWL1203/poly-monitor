@@ -53,7 +53,10 @@ class ObserverConfig:
     archive_revival_cooldown_sec: float = 300.0
     watchlist_activity_poll_sec: float = 30.0
     watchlist_activity_lookback_sec: int = 6 * 3600
+    watchlist_activity_safety_window_sec: int = 60
     watchlist_activity_pages: int = 2
+    watchlist_activity_retention_days: int = 30
+    non_watchlist_activity_retention_days: int = 7
 
 
 @dataclass
@@ -414,12 +417,14 @@ class CryptoWalletObserver:
         if not wallets:
             return
         now_ts = int(dt.datetime.now(dt.timezone.utc).timestamp())
-        start_ts = now_ts - max(60, int(self.config.watchlist_activity_lookback_sec))
         end_ts = now_ts + 60
         observed_at = dt.datetime.now(dt.timezone.utc).isoformat()
         page_size = 500
         page_count = max(1, int(self.config.watchlist_activity_pages))
         for wallet in wallets:
+            lookback_start = now_ts - max(60, int(self.config.watchlist_activity_lookback_sec))
+            last_seen = self.store.last_wallet_activity_ts(wallet)
+            start_ts = max(lookback_start, last_seen - max(0, int(self.config.watchlist_activity_safety_window_sec))) if last_seen else lookback_start
             normalized: list[dict[str, Any]] = []
             try:
                 for page in range(page_count):
@@ -744,6 +749,11 @@ class CryptoWalletObserver:
             inactive_cutoff_ts=cutoff_ts,
             max_non_candidate_wallets=self.config.max_non_candidate_wallets,
         )
+        activity_cleanup = self.store.cleanup_wallet_activity_events(
+            watchlist_cutoff_ts=int((now - dt.timedelta(days=self.config.watchlist_activity_retention_days)).timestamp()),
+            non_watchlist_cutoff_ts=int((now - dt.timedelta(days=self.config.non_watchlist_activity_retention_days)).timestamp()),
+        )
+        result.update(activity_cleanup)
         if any(result.values()):
             self.writer.write({
                 "event": "sqlite_cleanup",

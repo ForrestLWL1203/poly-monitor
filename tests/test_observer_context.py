@@ -743,6 +743,51 @@ class ObserverContextTests(unittest.TestCase):
         self.assertEqual(rows[1]["usdc"], 25)
         self.assertIn("start", kwargs)
 
+    def test_watchlist_activity_poll_uses_last_seen_with_safety_window(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(
+                    ObserverConfig(
+                        data_dir=Path(tmp),
+                        watchlist_activity_lookback_sec=3600,
+                        watchlist_activity_safety_window_sec=60,
+                    )
+                )
+                observer.store.add_watchlist_wallet("0xabc")
+                observer.store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xexisting",
+                            "wallet": "0xabc",
+                            "market_slug": "btc-updown-5m-1",
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 1_000,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.5,
+                            "size": 10,
+                            "usdc": 5,
+                            "observed_at": "2026-05-25T00:00:00+00:00",
+                        }
+                    ]
+                )
+                observer.data_api.fetch_user_activity = AsyncMock(return_value=[])
+                with patch("poly_monitor.observer.dt.datetime") as fake_datetime:
+                    fake_datetime.now.return_value = dt.datetime.fromtimestamp(1_500, dt.timezone.utc)
+                    fake_datetime.fromtimestamp.side_effect = dt.datetime.fromtimestamp
+                    try:
+                        await observer._poll_watchlist_activity_once()
+                    finally:
+                        observer.store.close()
+                        observer.writer.close()
+                return observer.data_api.fetch_user_activity.await_args.kwargs
+
+        kwargs = asyncio.run(run_case())
+        self.assertEqual(kwargs["start"], 940)
+
     def test_context_snapshot_cooldown_is_per_wallet_and_market(self):
         with tempfile.TemporaryDirectory() as tmp:
             observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), context_snapshot_cooldown_sec=5.0))
