@@ -289,9 +289,17 @@
       gap: 2px;
     }
     .modal-title h2 {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .profile-link {
+      color: #dff5ff;
+      text-decoration: none;
+      overflow-wrap: anywhere;
+    }
+    .profile-link:hover {
+      color: var(--accent);
+      text-decoration: underline;
     }
     .modal-panel .detail {
       overflow: auto;
@@ -581,6 +589,21 @@
       return `${text.slice(0, max)}...`;
     }
 
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;"
+      }[ch]));
+    }
+
+    function profileUrl(name) {
+      const clean = String(name || "").trim();
+      return clean ? `https://polymarket.com/zh/@${encodeURIComponent(clean)}` : "";
+    }
+
     async function api(path, options = {}) {
       const resp = await fetch(path, { credentials: "same-origin", cache: "no-store", ...options });
       if (resp.status === 401) {
@@ -758,7 +781,10 @@
     async function loadWallet(wallet) {
       const detail = await api(`/api/wallet?address=${encodeURIComponent(wallet)}`);
       const detailName = detail.name || detail.metrics?.name || detail.metrics?.profile_name || detail.metrics?.pseudonym || detail.wallet_short || "钱包详情";
-      $("detailHeading").textContent = shortName(detailName, 36);
+      const detailProfileUrl = profileUrl(detailName);
+      $("detailHeading").innerHTML = detailProfileUrl
+        ? `<a class="profile-link" href="${detailProfileUrl}" target="_blank" rel="noopener noreferrer">${escapeHtml(detailName)}</a>`
+        : escapeHtml(detailName);
       $("detailTitle").textContent = detail.wallet || "";
       const m = detail.metrics || {};
       const ledger = detail.ledger_summary || {};
@@ -792,8 +818,8 @@
         ["胜方加仓", pct(m.winner_add_rate)]
       ];
       $("walletDetail").innerHTML = `
-        <div title="${detailName}"><strong class="user-name">${shortName(detailName)}</strong></div>
-        <div class="addr" title="${detail.wallet}">${detail.wallet}</div>
+        <div title="${escapeHtml(detailName)}"><a class="profile-link" href="${detailProfileUrl}" target="_blank" rel="noopener noreferrer"><strong>${escapeHtml(detailName)}</strong></a></div>
+        <div class="addr" title="${escapeHtml(detail.wallet)}">${escapeHtml(detail.wallet)}</div>
         <div class="kv">${kv.map(([k, v]) => `<div><div class="subtle">${k}</div><strong>${v}</strong></div>`).join("")}</div>
         <div class="subtle">${reasonText(detail)}</div>`;
       openWalletModal();
