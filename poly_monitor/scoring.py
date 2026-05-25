@@ -212,8 +212,8 @@ def _active_rank_score(metrics: dict[str, Any]) -> float:
         + _num(metrics, "top3_concentration") * 90.0
     )
     high_frequency_penalty = (
-        _capped(markets_24h - 80.0, 220.0) * 1.8
-        + _capped(_num(metrics, "trades_24h") - 400.0, 2500.0) * 0.05
+        _capped(markets_24h - 120.0, 180.0) * 0.75
+        + _capped(_num(metrics, "trades_24h") - 600.0, 2500.0) * 0.025
     )
     recency_penalty = _capped(last_active_age, 48.0) * 1.5
 
