@@ -357,6 +357,70 @@ class DashboardServerTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=3)
 
+    def test_wallet_export_api_requires_auth_and_watchlist_wallet(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+        from poly_monitor.storage import ObserverStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.add_watchlist_wallet(wallet)
+            finally:
+                store.close()
+            server = create_server(
+                DashboardConfig(
+                    data_dir=data_dir,
+                    host="127.0.0.1",
+                    port=0,
+                    username="admin",
+                    password="secret",
+                    cookie_secret="test-secret",
+                )
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                body = json.dumps({"wallet": wallet}).encode()
+                unauth_req = urllib.request.Request(
+                    f"{base}/api/wallet-export",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unauth:
+                    urllib.request.urlopen(unauth_req, timeout=3)
+                self.assertEqual(unauth.exception.code, 401)
+
+                cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                req = urllib.request.Request(
+                    f"{base}/api/wallet-export",
+                    data=body,
+                    headers={"Cookie": cookie, "Content-Type": "application/json"},
+                    method="POST",
+                )
+                payload = json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+                self.assertTrue(payload["ok"])
+                self.assertTrue(Path(payload["zip_path"]).exists())
+
+                missing_body = json.dumps({"wallet": "0x1111111111111111111111111111111111111111"}).encode()
+                missing_req = urllib.request.Request(
+                    f"{base}/api/wallet-export",
+                    data=missing_body,
+                    headers={"Cookie": cookie, "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as missing:
+                    urllib.request.urlopen(missing_req, timeout=3)
+                self.assertEqual(missing.exception.code, 404)
+                self.assertEqual(json.loads(missing.exception.read().decode())["error"], "wallet_not_watchlisted")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
 
 if __name__ == "__main__":
     unittest.main()

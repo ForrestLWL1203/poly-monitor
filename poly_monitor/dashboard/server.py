@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..storage import WatchlistStore
+from ..wallet_export import export_watchlist_wallet
 from .status import build_dashboard_status, recent_trades, wallet_detail
 
 
@@ -192,6 +193,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._watchlist_mutation()
             return
+        if parsed.path == "/api/wallet-export":
+            if not self._authenticated():
+                self._json({"error": "unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            self._wallet_export()
+            return
         self._json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
     def _handle_api_get(self, parsed: urllib.parse.ParseResult) -> None:
@@ -294,6 +301,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
             store.close()
         _clear_status_cache()
         self._json(payload)
+
+    def _wallet_export(self) -> None:
+        body = self.rfile.read(_int_param(self.headers.get("Content-Length"), default=0, minimum=0, maximum=16384))
+        content_type = self.headers.get("Content-Type", "")
+        if "application/json" in content_type:
+            try:
+                form = json.loads(body.decode() or "{}")
+            except json.JSONDecodeError:
+                form = {}
+        else:
+            form = {key: values[0] for key, values in urllib.parse.parse_qs(body.decode()).items()}
+        wallet = str(form.get("wallet") or form.get("address") or "").lower().strip()
+        if not ADDRESS_RE.match(wallet):
+            self._json({"error": "invalid_wallet", "hint": "expected 0x + 40 hex chars"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        store = WatchlistStore(self.dashboard_config.data_dir / "state" / "observer.sqlite")
+        try:
+            if wallet not in set(store.wallets()):
+                self._json({"error": "wallet_not_watchlisted"}, status=HTTPStatus.NOT_FOUND)
+                return
+        finally:
+            store.close()
+        try:
+            result = export_watchlist_wallet(wallet, data_dir=self.dashboard_config.data_dir)
+        except ValueError as exc:
+            if str(exc) == "wallet_not_watchlisted":
+                self._json({"error": "wallet_not_watchlisted"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._json({"error": "export_failed", "message": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except Exception as exc:
+            self._json({"error": "export_failed", "message": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._json({"ok": True, **result})
 
     def _authenticated(self) -> bool:
         token = _cookie_value(self.headers.get("Cookie", ""), COOKIE_NAME)

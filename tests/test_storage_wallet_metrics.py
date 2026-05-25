@@ -774,9 +774,33 @@ class StorageWalletMetricsTests(unittest.TestCase):
                 self.assertEqual(metrics["markets_7d"], 3)
                 self.assertEqual(metrics["trades_30d"], 4)
                 self.assertEqual(metrics["markets_30d"], 4)
+                self.assertEqual(metrics["max_trades_per_market_24h"], 1)
+                self.assertEqual(metrics["max_trades_per_market_7d"], 1)
+                self.assertEqual(metrics["max_trades_per_market_30d"], 1)
                 self.assertEqual(metrics["historical_trades"], 5)
                 self.assertEqual(metrics["historical_markets"], 5)
                 self.assertAlmostEqual(metrics["last_active_age_hours"], round(100 / 3600, 3))
+            finally:
+                store.close()
+
+    def test_wallet_trade_metrics_exposes_extreme_single_window_trade_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                now_ts = 2_000_000
+                rows = [
+                    trade_row("0xabc", "btc-updown-5m-1999800", now_ts - idx, tx_hash=f"tx-{idx}")
+                    for idx in range(603)
+                ]
+                rows.append(trade_row("0xabc", "eth-updown-5m-1999800", now_ts - 10, tx_hash="eth-1"))
+                store.insert_trades(rows)
+
+                metrics = store.wallet_trade_metrics("0xabc", now_ts=now_ts)
+
+                self.assertEqual(metrics["trades_24h"], 604)
+                self.assertEqual(metrics["max_trades_per_market_24h"], 603)
+                self.assertEqual(metrics["max_trades_per_market_7d"], 603)
+                self.assertEqual(metrics["max_trades_per_market_30d"], 603)
             finally:
                 store.close()
 

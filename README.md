@@ -141,6 +141,20 @@ Watchlisted wallets are treated as manually protected research targets:
 - Strategy archive runs every 6 hours by default, writes JSONL gzip files plus an
   `archive_manifest` row, then deletes exported SQLite rows in batches and asks
   SQLite for incremental vacuum.
+- When a watchlisted wallet emits a BTC/ETH/SOL/XRP 5m `TRADE`, `SPLIT`,
+  `MERGE`, or `REDEEM`, the observer registers that `market_slug` in
+  `watched_market_windows` and keeps collecting market-level trades plus denser
+  book/reference samples through the window and the delayed settlement/redeem
+  period. This is forward collection only; missing historical book state is not
+  reconstructed later.
+- The dashboard wallet detail view can export a watchlisted wallet into
+  `data/exports/<wallet>/<timestamp>/bundle.zip`. The bundle is organized by
+  full window slug and includes wallet activity, wallet trades, market trades,
+  compact trade contexts, market-state samples, settlement data, and a
+  `manifest.json` coverage report. If the observer did not capture a window
+  early enough, or settlement/book samples are missing, the manifest marks the
+  window with `insufficient_market_capture=true` instead of pretending it is
+  complete.
 - New SQLite databases enable incremental auto-vacuum and activity cleanup asks
   SQLite to reclaim a small number of free pages after deletions. Existing
   production databases that were created before this setting still require a

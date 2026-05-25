@@ -306,6 +306,9 @@ class WalletMetricsTests(unittest.TestCase):
 
         self.assertEqual(activity.call_count, 3)
         self.assertEqual(metrics["trades_24h"], 1500)
+        self.assertTrue(metrics["trades_7d_lower_bound"])
+        self.assertEqual(metrics["activity_sample_span_hours"], 0.001)
+        self.assertGreater(metrics["activity_sample_trades_per_hour"], 3000)
         self.assertEqual(metrics["markets_24h"], 288)
         self.assertTrue(metrics["markets_24h_lower_bound"])
 

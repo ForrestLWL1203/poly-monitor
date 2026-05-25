@@ -21,7 +21,7 @@ class ScoringTests(unittest.TestCase):
             "top3_concentration": 0.5,
             "longshot_profit_share": 0.8,
             "longshot_profit_markets": 6,
-            "last_active_age_hours": 48,
+            "last_active_age_hours": 1,
             "historical_trades": 800,
             "historical_markets": 100,
             "historical_pnl": 100.0,
@@ -31,6 +31,34 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual(score.status, "active_candidate")
         self.assertEqual(score.reasons, [])
+
+    def test_score_wallet_downgrades_wallet_inactive_for_more_than_one_hour(self):
+        metrics = {
+            "wallet": "0x1adbccaf449aa1f84b48e1f1ec689bdacefc1495",
+            "trades_24h": 259,
+            "markets_24h": 103,
+            "markets_24h_lower_bound": True,
+            "trades_7d": 1040,
+            "trades_30d": 1040,
+            "pnl_7d": 143.29879,
+            "pnl_30d": 303.787292,
+            "pnl_source": "profile_portfolio_pnl",
+            "wins_7d": 0,
+            "losses_7d": 0,
+            "top1_concentration": 0.006985,
+            "top3_concentration": 0.019501,
+            "longshot_profit_share": 0.0,
+            "longshot_profit_markets": 0,
+            "last_active_age_hours": 1.075,
+            "historical_trades": 1040,
+            "historical_markets": 400,
+            "historical_pnl": 303.787292,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "dormant_candidate")
+        self.assertIn("inactive_for_active", score.reasons)
 
     def test_score_wallet_does_not_reject_repeatable_longshot_edge(self):
         metrics = {
@@ -457,6 +485,34 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(moderate.status, "active_candidate")
         self.assertEqual(extreme.status, "active_candidate")
         self.assertGreater(moderate.rank_score, extreme.rank_score)
+
+    def test_score_wallet_downgrades_uncopyable_single_window_frequency(self):
+        metrics = {
+            "wallet": "0xrobot",
+            "trades_24h": 900,
+            "markets_24h": 120,
+            "trades_7d": 1300,
+            "trades_30d": 4000,
+            "pnl_7d": 200,
+            "pnl_30d": 600,
+            "pnl_source": "profile_profit",
+            "wins_7d": 80,
+            "losses_7d": 20,
+            "top1_concentration": 0.05,
+            "top3_concentration": 0.2,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 4000,
+            "historical_markets": 200,
+            "historical_pnl": 600,
+            "local_observed_max_trades_per_market_24h": 603,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertNotEqual(score.status, "active_candidate")
+        self.assertIn("uncopyable_single_window_frequency", score.reasons)
 
     def test_score_wallet_rejects_negative_7d_pnl_on_api_metrics(self):
         metrics = {

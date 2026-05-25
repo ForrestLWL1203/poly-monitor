@@ -65,6 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--market-state-terminal-sample-sec", type=float, default=2.0)
     parser.add_argument("--market-state-terminal-window-sec", type=float, default=60.0)
     parser.add_argument("--market-state-heartbeat-sec", type=float, default=15.0)
+    parser.add_argument("--watched-market-state-sample-sec", type=float, default=1.0)
+    parser.add_argument("--watched-market-state-terminal-sample-sec", type=float, default=1.0)
+    parser.add_argument("--watched-market-state-heartbeat-sec", type=float, default=1.0)
+    parser.add_argument("--watchlist-market-capture-after-end-sec", type=float, default=1800.0)
     parser.add_argument("--max-context-writes-per-cycle", type=int, default=200)
     return parser
 
@@ -114,6 +118,10 @@ async def async_main() -> int:
         market_state_terminal_sample_sec=args.market_state_terminal_sample_sec,
         market_state_terminal_window_sec=args.market_state_terminal_window_sec,
         market_state_heartbeat_sec=args.market_state_heartbeat_sec,
+        watched_market_state_sample_sec=args.watched_market_state_sample_sec,
+        watched_market_state_terminal_sample_sec=args.watched_market_state_terminal_sample_sec,
+        watched_market_state_heartbeat_sec=args.watched_market_state_heartbeat_sec,
+        watchlist_market_capture_after_end_sec=args.watchlist_market_capture_after_end_sec,
         max_context_writes_per_cycle=args.max_context_writes_per_cycle,
     )
     observer = CryptoWalletObserver(config)

@@ -64,6 +64,10 @@ class ObserverConfig:
     market_state_terminal_sample_sec: float = 2.0
     market_state_terminal_window_sec: float = 60.0
     market_state_heartbeat_sec: float = 15.0
+    watched_market_state_sample_sec: float = 1.0
+    watched_market_state_terminal_sample_sec: float = 1.0
+    watched_market_state_heartbeat_sec: float = 1.0
+    watchlist_market_capture_after_end_sec: float = 1800.0
     max_context_writes_per_cycle: int = 200
 
 
@@ -370,8 +374,27 @@ class CryptoWalletObserver:
 
     async def _write_pending_settlements(self) -> None:
         now = dt.datetime.now(dt.timezone.utc)
-        due = [(slug, item[0]) for slug, item in self.pending_settlements.items() if item[1] <= now]
-        for slug, window in due:
+        due: dict[str, MarketWindow] = {
+            slug: item[0]
+            for slug, item in self.pending_settlements.items()
+            if item[1] <= now
+        }
+        for row in self.store.watched_market_windows(active_only=True, now=now):
+            slug = str(row.get("market_slug") or "")
+            if not slug or slug in due:
+                continue
+            window = self._market_window_from_watched_row(row)
+            if window is None:
+                continue
+            if window.end_time + dt.timedelta(seconds=self.config.settlement_delay_sec) > now:
+                continue
+            existing = self.store.conn.execute(
+                "SELECT 1 FROM market_settlements WHERE market_slug=? AND completed=1 AND winning_side != ''",
+                (slug,),
+            ).fetchone()
+            if existing is None:
+                due[slug] = window
+        for slug, window in due.items():
             data = await asyncio.to_thread(fetch_crypto_price_api, window)
             refs = self.window_reference_prices.setdefault(slug, {"open": None, "close": None})
             open_price = data.get("openPrice") if data is not None else refs.get("open")
@@ -430,7 +453,7 @@ class CryptoWalletObserver:
         return tokens
 
     async def _poll_trades_once(self) -> None:
-        for symbol, window in list(self.windows.items()):
+        for symbol, window in self._market_trade_poll_windows():
             try:
                 raw_trades = await self.data_api.fetch_market_trades(window.condition_id, limit=500, offset=0)
             except Exception as exc:
@@ -460,6 +483,42 @@ class CryptoWalletObserver:
                         window_close_reference_price=self.window_reference_prices.get(window.slug, {}).get("close"),
                         max_book_age_sec=self.config.book_max_age_sec,
                     ))
+
+    def _market_trade_poll_windows(self) -> list[tuple[str, MarketWindow]]:
+        by_condition: dict[str, tuple[str, MarketWindow]] = {}
+        by_slug: dict[str, MarketWindow] = {}
+        for symbol, window in list(self.windows.items()):
+            if window.condition_id:
+                by_condition[window.condition_id] = (symbol, window)
+            by_slug[window.slug] = window
+        for row in self.store.watched_market_windows(active_only=True):
+            condition_id = str(row.get("condition_id") or "")
+            if not condition_id or condition_id in by_condition:
+                continue
+            current = by_slug.get(str(row.get("market_slug") or ""))
+            if current is not None:
+                by_condition[condition_id] = (current.symbol, current)
+                continue
+            window = self._market_window_from_watched_row(row)
+            if window is not None:
+                by_condition[condition_id] = (window.symbol, window)
+        return list(by_condition.values())
+
+    def _market_window_from_watched_row(self, row: dict[str, Any]) -> MarketWindow | None:
+        start = self._parse_iso_dt(row.get("window_start"))
+        end = self._parse_iso_dt(row.get("window_end"))
+        if start is None or end is None:
+            return None
+        return MarketWindow(
+            symbol=str(row.get("symbol") or "").upper(),
+            slug=str(row.get("market_slug") or ""),
+            condition_id=str(row.get("condition_id") or ""),
+            question="",
+            up_token="",
+            down_token="",
+            start_time=start,
+            end_time=end,
+        )
 
     async def _poll_watchlist_activity_once(self) -> None:
         wallets = self.store.watchlist_wallets()
@@ -506,6 +565,7 @@ class CryptoWalletObserver:
                 })
                 continue
             inserted = self.store.insert_wallet_activity_events(normalized)
+            self._register_watchlist_market_windows(inserted)
             await self._backfill_watchlist_activity_settlements(inserted)
             trade_rows = [
                 self._trade_from_activity_event(event)
@@ -541,6 +601,49 @@ class CryptoWalletObserver:
                     "usdc": event["usdc"],
                     "tx_hash": event["tx_hash"],
                 })
+
+    def _register_watchlist_market_windows(self, events: list[dict[str, Any]]) -> None:
+        now = dt.datetime.now(dt.timezone.utc)
+        for event in events:
+            activity_type = str(event.get("activity_type") or "").upper()
+            if activity_type not in {"TRADE", "MERGE", "REDEEM", "SPLIT"}:
+                continue
+            window = self._activity_window_from_slug(event)
+            if window is None:
+                continue
+            capture_until = max(
+                now + dt.timedelta(seconds=max(0.0, self.config.watchlist_market_capture_after_end_sec)),
+                window.end_time + dt.timedelta(seconds=max(0.0, self.config.watchlist_market_capture_after_end_sec)),
+            )
+            created = self.store.upsert_watched_market_window(
+                {
+                    "market_slug": window.slug,
+                    "condition_id": window.condition_id,
+                    "symbol": window.symbol,
+                    "first_seen_at": now.isoformat(),
+                    "window_start": window.start_time.isoformat(),
+                    "window_end": window.end_time.isoformat(),
+                    "tracking_reason": f"watchlist_{activity_type.lower()}",
+                    "source_wallet": str(event.get("wallet") or "").lower(),
+                    "capture_until": capture_until.isoformat(),
+                    "status": "tracking",
+                }
+            )
+            if created:
+                self.writer.write(
+                    {
+                        "event": "watched_market_window_registered",
+                        "observed_at": now.isoformat(),
+                        "wallet": str(event.get("wallet") or "").lower(),
+                        "activity_type": activity_type,
+                        "symbol": window.symbol,
+                        "market_slug": window.slug,
+                        "condition_id": window.condition_id,
+                        "window_start": window.start_time.isoformat(),
+                        "window_end": window.end_time.isoformat(),
+                        "capture_until": capture_until.isoformat(),
+                    }
+                )
 
     def _trade_context_rows_for_activity(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -720,11 +823,21 @@ class CryptoWalletObserver:
         )
         last = self._last_market_state_sample.get(window.slug)
         remaining_sec = (window.end_time - now).total_seconds()
-        cadence = (
-            self.config.market_state_terminal_sample_sec
-            if remaining_sec <= self.config.market_state_terminal_window_sec
-            else self.config.market_state_sample_sec
-        )
+        watched = self.store.is_watched_market_active(window.slug, now=now)
+        if watched:
+            cadence = (
+                self.config.watched_market_state_terminal_sample_sec
+                if remaining_sec <= self.config.market_state_terminal_window_sec
+                else self.config.watched_market_state_sample_sec
+            )
+            heartbeat = self.config.watched_market_state_heartbeat_sec
+        else:
+            cadence = (
+                self.config.market_state_terminal_sample_sec
+                if remaining_sec <= self.config.market_state_terminal_window_sec
+                else self.config.market_state_sample_sec
+            )
+            heartbeat = self.config.market_state_heartbeat_sec
         reason = "initial"
         if last is not None:
             last_time, last_signature = last
@@ -732,9 +845,9 @@ class CryptoWalletObserver:
             if elapsed < cadence:
                 return None
             if signature != last_signature:
-                reason = "changed"
-            elif elapsed >= self.config.market_state_heartbeat_sec:
-                reason = "heartbeat"
+                reason = "watched_changed" if watched else "changed"
+            elif elapsed >= heartbeat:
+                reason = "watched_heartbeat" if watched else "heartbeat"
             else:
                 return None
         max_age_ms = self.config.book_max_age_sec * 1000.0
@@ -763,6 +876,17 @@ class CryptoWalletObserver:
             "book_stale": book_stale,
             "sample_reason": reason,
         }
+
+    def _parse_iso_dt(self, value: Any) -> dt.datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
 
     def _trade_from_activity_event(self, event: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -908,6 +1032,9 @@ class CryptoWalletObserver:
             "markets_7d",
             "trades_30d",
             "markets_30d",
+            "max_trades_per_market_24h",
+            "max_trades_per_market_7d",
+            "max_trades_per_market_30d",
             "pnl_7d",
             "pnl_30d",
             "pnl_total",

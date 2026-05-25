@@ -326,6 +326,19 @@ class ObserverStore:
                 archived_at TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(market_slug, sampled_ts)
             );
+            CREATE TABLE IF NOT EXISTS watched_market_windows (
+                market_slug TEXT PRIMARY KEY,
+                condition_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                window_start TEXT NOT NULL,
+                window_end TEXT NOT NULL,
+                tracking_reason TEXT NOT NULL,
+                source_wallet TEXT NOT NULL DEFAULT '',
+                capture_until TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'tracking',
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS archive_manifest (
                 data_type TEXT NOT NULL,
                 archive_date TEXT NOT NULL,
@@ -408,6 +421,8 @@ class ObserverStore:
             CREATE INDEX IF NOT EXISTS idx_wallet_trade_contexts_wallet_ts ON wallet_trade_contexts(wallet, exchange_ts);
             CREATE INDEX IF NOT EXISTS idx_wallet_trade_contexts_market_ts ON wallet_trade_contexts(market_slug, exchange_ts);
             CREATE INDEX IF NOT EXISTS idx_market_state_samples_market_ts ON market_state_samples(market_slug, sampled_ts);
+            CREATE INDEX IF NOT EXISTS idx_watched_market_windows_status_until ON watched_market_windows(status, capture_until);
+            CREATE INDEX IF NOT EXISTS idx_watched_market_windows_wallet ON watched_market_windows(source_wallet, first_seen_at);
             CREATE INDEX IF NOT EXISTS idx_archive_manifest_type_date ON archive_manifest(data_type, archive_date);
             """
         )
@@ -624,6 +639,101 @@ class ObserverStore:
             params = (*params, int(limit))
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
+
+    def upsert_watched_market_window(self, row: dict[str, Any]) -> bool:
+        market_slug = str(row.get("market_slug") or "")
+        if not market_slug:
+            return False
+        now = utc_now().isoformat()
+        existing = self.conn.execute(
+            "SELECT first_seen_at, source_wallet, capture_until FROM watched_market_windows WHERE market_slug=?",
+            (market_slug,),
+        ).fetchone()
+        first_seen_at = utc_iso(row.get("first_seen_at"))
+        source_wallet = str(row.get("source_wallet") or "").lower()
+        capture_until = utc_iso(row.get("capture_until"))
+        if existing is not None:
+            first_seen_at = min(str(existing["first_seen_at"]), first_seen_at)
+            if not source_wallet:
+                source_wallet = str(existing["source_wallet"] or "").lower()
+            capture_until = max(str(existing["capture_until"]), capture_until)
+        self.conn.execute(
+            """
+            INSERT INTO watched_market_windows(
+                market_slug,condition_id,symbol,first_seen_at,window_start,window_end,
+                tracking_reason,source_wallet,capture_until,status,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(market_slug) DO UPDATE SET
+                condition_id=excluded.condition_id,
+                symbol=excluded.symbol,
+                first_seen_at=excluded.first_seen_at,
+                window_start=excluded.window_start,
+                window_end=excluded.window_end,
+                tracking_reason=excluded.tracking_reason,
+                source_wallet=CASE
+                    WHEN watched_market_windows.source_wallet='' THEN excluded.source_wallet
+                    ELSE watched_market_windows.source_wallet
+                END,
+                capture_until=MAX(watched_market_windows.capture_until, excluded.capture_until),
+                status=excluded.status,
+                updated_at=excluded.updated_at
+            """,
+            (
+                market_slug,
+                str(row.get("condition_id") or ""),
+                str(row.get("symbol") or "").upper(),
+                first_seen_at,
+                utc_iso(row.get("window_start")),
+                utc_iso(row.get("window_end")),
+                str(row.get("tracking_reason") or "watchlist_activity"),
+                source_wallet,
+                capture_until,
+                str(row.get("status") or "tracking"),
+                now,
+            ),
+        )
+        self.conn.commit()
+        return existing is None
+
+    def watched_market_windows(
+        self,
+        *,
+        active_only: bool = False,
+        now: dt.datetime | None = None,
+        source_wallet: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if active_only:
+            clauses.append("status='tracking'")
+            params.append(utc_iso(now))
+            clauses.append("capture_until>=?")
+        if source_wallet:
+            clauses.append("source_wallet=?")
+            params.append(source_wallet.lower())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT *
+            FROM watched_market_windows
+            {where}
+            ORDER BY window_start ASC, market_slug ASC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def is_watched_market_active(self, market_slug: str, *, now: dt.datetime | None = None) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM watched_market_windows
+            WHERE market_slug=? AND status='tracking' AND capture_until>=?
+            LIMIT 1
+            """,
+            (market_slug, utc_iso(now)),
+        ).fetchone()
+        return row is not None
 
     def archive_manifest_rows(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -902,6 +1012,9 @@ class ObserverStore:
             "markets_7d": 0,
             "trades_30d": 0,
             "markets_30d": 0,
+            "max_trades_per_market_24h": 0,
+            "max_trades_per_market_7d": 0,
+            "max_trades_per_market_30d": 0,
             "pnl_7d": 0.0,
             "pnl_30d": 0.0,
             "wins_7d": 0,
@@ -925,12 +1038,36 @@ class ObserverStore:
         metrics["markets_7d"] = int(row["markets_7d"] or 0)
         metrics["trades_30d"] = int(row["trades_30d"] or 0)
         metrics["markets_30d"] = int(row["markets_30d"] or 0)
+        metrics.update(self._wallet_max_trades_per_market(wallet, now_ts=now_value))
         metrics["historical_trades"] = int(row["historical_trades"] or 0)
         metrics["historical_markets"] = int(row["historical_markets"] or 0)
         last_ts = int(row["last_ts"] or 0)
         metrics["last_active_age_hours"] = round((now_value - last_ts) / 3600.0, 3)
         metrics.update(self._preferred_observed_pnl_metrics(wallet, now_ts=now_value))
         return metrics
+
+    def _wallet_max_trades_per_market(self, wallet: str, *, now_ts: int) -> dict[str, int]:
+        cutoffs = {
+            "max_trades_per_market_24h": now_ts - 86400,
+            "max_trades_per_market_7d": now_ts - 7 * 86400,
+            "max_trades_per_market_30d": now_ts - 30 * 86400,
+        }
+        out: dict[str, int] = {}
+        for key, cutoff in cutoffs.items():
+            row = self.conn.execute(
+                """
+                SELECT MAX(n) AS max_n
+                FROM (
+                    SELECT market_slug, COUNT(*) AS n
+                    FROM trades
+                    WHERE wallet=? AND exchange_ts >= ?
+                    GROUP BY market_slug
+                )
+                """,
+                (wallet.lower(), int(cutoff)),
+            ).fetchone()
+            out[key] = int(row["max_n"] or 0) if row else 0
+        return out
 
     def upsert_market_settlement(self, row: dict[str, Any]) -> bool:
         market_slug = str(row["market_slug"])

@@ -279,6 +279,13 @@ def build_metrics_from_api(
         source_longshot_profit_markets = settled_longshot_profit_markets
     total_profit_30d = sum(value for value in concentration_pnls_30d if value > 0)
     last_ts = max([int(row.get("timestamp") or 0) for row in trades] or [0])
+    activity_ts_values = [int(row.get("timestamp") or 0) for row in activity if int(row.get("timestamp") or 0) > 0]
+    activity_sample_span_hours = 0.0
+    if len(activity_ts_values) >= 2:
+        activity_sample_span_hours = round((max(activity_ts_values) - min(activity_ts_values)) / 3600.0, 3)
+    activity_sample_trades_per_hour = 0.0
+    if activity_sample_span_hours > 0:
+        activity_sample_trades_per_hour = round(len(trades) / activity_sample_span_hours, 3)
     trade_markets_24h = {row_slug(row) for row in trades_24h if row_slug(row)}
     btc_trade_markets_24h = {slug for slug in trade_markets_24h if slug.startswith("btc-updown-5m-")}
     eth_trade_markets_24h = {slug for slug in trade_markets_24h if slug.startswith("eth-updown-5m-")}
@@ -299,9 +306,13 @@ def build_metrics_from_api(
         "markets_24h_lower_bound": markets_24h_lower_bound,
         "activity_page_cap_hit": activity_page_cap_hit,
         "activity_rows_sampled": len(activity),
+        "activity_sample_span_hours": activity_sample_span_hours,
+        "activity_sample_trades_per_hour": activity_sample_trades_per_hour,
         "trades_7d": len(trades_7d),
+        "trades_7d_lower_bound": bool(activity_page_cap_hit and trades_7d),
         "markets_7d": len(trade_markets_7d),
         "trades_30d": len(trades_30d),
+        "trades_30d_lower_bound": bool(activity_page_cap_hit and trades_30d),
         "markets_30d": len(trade_markets_30d),
         "pnl_7d": round(pnl_7d, 6),
         "pnl_30d": round(pnl_30d, 6),

@@ -19,10 +19,11 @@ class CandidateThresholds:
     min_local_quality_markets_for_gate: int = 10
     min_local_quality_observed_hours: float = 24.0
     min_quality_markets_24h: int = 30
-    active_max_age_hours: float = 48.0
+    active_max_age_hours: float = 1.0
     archive_age_hours: float = 14 * 24.0
     dormant_min_historical_trades: int = 500
     dormant_min_historical_markets: int = 5
+    max_copyable_trades_per_market_24h: int = 200
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,11 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
     check_pnl_7d = metrics.get("pnl_source") != "local_observed_ledger" or _num(metrics, "settled_markets_7d") >= 1
     use_historical_quality_gates = not local_quality_passes or _has_reliable_profile_pnl(metrics)
     checks = [
+        (
+            "uncopyable_single_window_frequency",
+            _num(metrics, "local_observed_max_trades_per_market_24h") >= thresholds.max_copyable_trades_per_market_24h
+            or _num(metrics, "max_trades_per_market_24h") >= thresholds.max_copyable_trades_per_market_24h,
+        ),
         ("trades_7d_below_threshold", _num(metrics, "trades_7d") < thresholds.min_trades_7d),
         ("markets_24h_below_threshold", market_activity_failed),
         ("trades_30d_below_threshold", _num(metrics, "trades_30d") < thresholds.min_trades_30d),
@@ -215,8 +221,9 @@ def _active_rank_score(metrics: dict[str, Any]) -> float:
     high_frequency_penalty = (
         _capped(markets_24h - 120.0, 180.0) * 0.75
         + _capped(_num(metrics, "trades_24h") - 600.0, 2500.0) * 0.025
+        + _capped(_num(metrics, "local_observed_max_trades_per_market_24h") - 100.0, 1000.0) * 0.20
     )
-    recency_penalty = _capped(last_active_age, 48.0) * 1.5
+    recency_penalty = _capped(last_active_age, 1.0) * 35.0
 
     return quality + sample_confidence + activity + pnl_bonus - stability_penalty - high_frequency_penalty - recency_penalty
 

@@ -125,13 +125,24 @@
       gap: 6px;
       flex-wrap: wrap;
     }
-    .tab, .icon-button, .login button {
+    .tab, .icon-button, .login button, .button {
       border: 1px solid var(--line);
       background: var(--panel-2);
       color: var(--text);
       border-radius: 6px;
       padding: 7px 10px;
       cursor: pointer;
+    }
+    .button:disabled {
+      cursor: not-allowed;
+      opacity: 0.65;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 14px 0;
+      flex-wrap: wrap;
     }
     .tab.active {
       border-color: var(--accent);
@@ -699,6 +710,24 @@
       await load();
     }
 
+    async function exportWallet(wallet) {
+      const button = $("exportWalletBtn");
+      if (button) button.disabled = true;
+      try {
+        const payload = await api("/api/wallet-export", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wallet })
+        });
+        const warning = payload.insufficient_market_capture ? " · 数据覆盖不足" : "";
+        $("exportStatus").innerHTML = `导出完成${warning}<br><code>${escapeHtml(payload.zip_path || "")}</code>`;
+      } catch (err) {
+        $("exportStatus").textContent = "导出失败";
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
     async function load() {
       statusData = await api("/api/status");
       showApp();
@@ -742,6 +771,11 @@
       return (row.metrics || {})[key];
     }
 
+    function lowerBoundMetric(row, key) {
+      const value = fmt(metric(row, key), 0);
+      return metric(row, `${key}_lower_bound`) ? `≥${value}` : value;
+    }
+
     function metricAny(row, keys) {
       const metrics = row.metrics || {};
       for (const key of keys) {
@@ -771,8 +805,8 @@
           </td>
           <td><span class="pill ${state}" title="${zhScoreState(state)}">${zhScoreState(state)}</span></td>
           <td>${fmtInt(row.rank_score)}</td>
-          <td>${fmt(metric(row, "trades_7d"), 0)}</td>
-          <td>${fmt(metric(row, "trades_30d"), 0)}</td>
+          <td>${lowerBoundMetric(row, "trades_7d")}</td>
+          <td>${lowerBoundMetric(row, "trades_30d")}</td>
           <td>${windowCount(row)}</td>
           <td>${money(metric(row, "profile_pnl_1d"))}</td>
           <td>${money(metric(row, "pnl_7d"))}</td>
@@ -824,8 +858,8 @@
         ["已结算持仓市场", `${fmt(m.crypto_settled_positions_markets_7d, 0)} / ${fmt(m.crypto_settled_positions_markets_30d, 0)}`],
         ["已结算窗口", `${fmt(m.settled_markets_7d, 0)} / ${fmt(m.settled_markets_30d, 0)}`],
         ["盈亏来源", pnlSourceLabel(m.pnl_source)],
-        ["7天交易", fmt(m.trades_7d, 0)],
-        ["30天交易", fmt(m.trades_30d, 0)],
+        ["7天交易", m.trades_7d_lower_bound ? `≥${fmt(m.trades_7d, 0)}` : fmt(m.trades_7d, 0)],
+        ["30天交易", m.trades_30d_lower_bound ? `≥${fmt(m.trades_30d, 0)}` : fmt(m.trades_30d, 0)],
         ["24h窗口", windowCountDetail(m)],
         ["最后交易距今", ageSince(m.last_active_age_hours)],
         ["低价票占比", pct(m.longshot_profit_share)],
@@ -834,7 +868,10 @@
       ];
       $("walletDetail").innerHTML = `
         <div class="kv">${kv.map(([k, v]) => `<div><div class="subtle">${k}</div><strong>${v}</strong></div>`).join("")}</div>
+        ${detail.watchlisted ? `<div class="actions"><button id="exportWalletBtn" class="button" type="button">导出</button><span id="exportStatus" class="subtle"></span></div>` : ""}
         <div class="subtle">${reasonText(detail)}</div>`;
+      const exportButton = $("exportWalletBtn");
+      if (exportButton) exportButton.addEventListener("click", () => exportWallet(detail.wallet));
       openWalletModal();
     }
 
