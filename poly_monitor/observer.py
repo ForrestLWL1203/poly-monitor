@@ -537,7 +537,8 @@ class CryptoWalletObserver:
         for key in local_fields:
             if key in local_metrics:
                 metrics[f"local_observed_{key}"] = local_metrics[key]
-        if int(local_metrics.get("settled_markets_7d") or 0) > 0:
+        local_span_hours = float(local_metrics.get("observed_span_hours") or 0.0)
+        if int(local_metrics.get("settled_markets_7d") or 0) > 0 and local_span_hours >= 24.0:
             metrics["wins_7d"] = local_metrics.get("wins_7d", 0)
             metrics["losses_7d"] = local_metrics.get("losses_7d", 0)
         metrics["local_observed_pnl_source"] = local_metrics.get("pnl_source", "local_observed")
