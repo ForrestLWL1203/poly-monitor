@@ -17,6 +17,7 @@ class CandidateThresholds:
     min_resolved_markets_for_win_loss_check: int = 20
     min_settled_markets_for_local_active: int = 5
     min_local_quality_markets_for_gate: int = 10
+    min_local_quality_observed_hours: float = 24.0
     min_quality_markets_24h: int = 30
     active_max_age_hours: float = 48.0
     archive_age_hours: float = 14 * 24.0
@@ -57,14 +58,43 @@ def _local_losses_7d(metrics: dict[str, Any]) -> float:
     return _num(metrics, "local_observed_losses_7d", _num(metrics, "losses_7d"))
 
 
+def _local_observed_span_hours(metrics: dict[str, Any]) -> float:
+    return _num(
+        metrics,
+        "local_observed_span_hours",
+        _num(metrics, "local_observed_observed_span_hours", _num(metrics, "observed_span_hours", 999999.0)),
+    )
+
+
 def _has_local_quality_sample(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
+    return (
+        _local_settled_7d(metrics) >= thresholds.min_local_quality_markets_for_gate
+        and _local_observed_span_hours(metrics) >= thresholds.min_local_quality_observed_hours
+    )
+
+
+def _has_local_quality_count(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
     return _local_settled_7d(metrics) >= thresholds.min_local_quality_markets_for_gate
 
 
-def _local_quality_passes(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
-    if not _has_local_quality_sample(metrics, thresholds):
+def _local_quality_direction_passes(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
+    if not _has_local_quality_count(metrics, thresholds):
         return False
     return _local_pnl_7d(metrics) > 0 and _local_wins_7d(metrics) > _local_losses_7d(metrics)
+
+
+def _local_quality_passes(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
+    return _has_local_quality_sample(metrics, thresholds) and _local_quality_direction_passes(metrics, thresholds)
+
+
+def _has_reliable_profile_pnl(metrics: dict[str, Any]) -> bool:
+    return str(metrics.get("pnl_source") or "") in {"profile_portfolio_pnl", "leaderboard_profit", "profile_profit"}
+
+
+def _reliable_profile_pnl_passes(metrics: dict[str, Any]) -> bool:
+    if not _has_reliable_profile_pnl(metrics):
+        return True
+    return _num(metrics, "pnl_7d") > 0 and _num(metrics, "pnl_30d") > 0
 
 
 def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -> list[str]:
@@ -77,12 +107,14 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
     win_loss_failed = resolved_markets >= thresholds.min_resolved_markets_for_win_loss_check and wins < losses
     has_local_quality_sample = _has_local_quality_sample(metrics, thresholds)
     local_quality_passes = _local_quality_passes(metrics, thresholds)
-    if local_quality_passes:
+    profile_trend_passes = _reliable_profile_pnl_passes(metrics)
+    local_quality_can_relax_activity = local_quality_passes and profile_trend_passes
+    if local_quality_can_relax_activity:
         market_activity_failed = markets_24h < thresholds.min_quality_markets_24h
     else:
         market_activity_failed = markets_24h < thresholds.min_markets_24h
     check_pnl_7d = metrics.get("pnl_source") != "local_observed_ledger" or _num(metrics, "settled_markets_7d") >= 1
-    use_historical_quality_gates = not local_quality_passes
+    use_historical_quality_gates = not local_quality_passes or _has_reliable_profile_pnl(metrics)
     checks = [
         ("trades_7d_below_threshold", _num(metrics, "trades_7d") < thresholds.min_trades_7d),
         ("markets_24h_below_threshold", market_activity_failed),
@@ -109,6 +141,14 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
 
 
 def _dormant_ok(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
+    if (
+        _has_reliable_profile_pnl(metrics)
+        and _local_quality_direction_passes(metrics, thresholds)
+        and _num(metrics, "pnl_7d") > 0
+        and _num(metrics, "historical_trades") >= thresholds.dormant_min_historical_trades
+        and _num(metrics, "historical_markets") >= thresholds.dormant_min_historical_markets
+    ):
+        return True
     if (
         metrics.get("pnl_source") == "local_observed_ledger"
         and _num(metrics, "historical_trades") >= thresholds.dormant_min_historical_trades

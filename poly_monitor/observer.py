@@ -532,6 +532,7 @@ class CryptoWalletObserver:
             "historical_markets",
             "historical_pnl",
             "last_active_age_hours",
+            "observed_span_hours",
         }
         for key in local_fields:
             if key in local_metrics:

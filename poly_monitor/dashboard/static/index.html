@@ -402,7 +402,7 @@
                   <th title="用于评分的 Polymarket Profile 1W 资产曲线首尾差；leaderboard、已结算持仓和 closed-position 仅作诊断参考">历史7天PnL</th>
                   <th title="用于评分的 Polymarket Profile 1M 资产曲线首尾差；leaderboard、已结算持仓和 closed-position 仅作诊断参考">历史30天PnL</th>
                   <th title="仅统计 observer 启动后本地记录且已结算的 BTC/ETH 5m Ledger 盈亏">本地观测PnL</th>
-                  <th title="本地观测近 7 天已结算盈利市场数 / 亏损市场数；无本地结算时显示 0 / 0">7天胜/负</th>
+                  <th title="仅统计 observer 启动后本地已观测并结算的盈利市场数 / 亏损市场数，不代表完整 7 天">本地胜/负</th>
                   <th title="最大单一盈利市场占总正收益比例，越低越不依赖单点暴富">最大单场占比</th>
                   <th title="前三大盈利市场占总正收益比例，越低越分散">前三占比</th>
                   <th title="低于 15c 的低价票利润占总正收益比例">低价票占比</th>
@@ -732,7 +732,7 @@
           <td>${money(metric(row, "pnl_7d"))}</td>
           <td>${money(metric(row, "pnl_30d"))}</td>
           <td>${money(localObservedPnl(row.metrics || {}))}</td>
-          <td>${fmt(metric(row, "wins_7d"), 0)} / ${fmt(metric(row, "losses_7d"), 0)}</td>
+          <td>${fmt(metric(row, "local_observed_wins_7d") ?? metric(row, "wins_7d"), 0)} / ${fmt(metric(row, "local_observed_losses_7d") ?? metric(row, "losses_7d"), 0)}</td>
           <td>${pct(metric(row, "top1_concentration"))}</td>
           <td>${pct(metric(row, "top3_concentration"))}</td>
           <td>${pct(metric(row, "longshot_profit_share"))}</td>
@@ -777,6 +777,7 @@
         ["Closed估算30天PnL", money(m.crypto_closed_pnl_estimate_30d)],
         ["已结算持仓市场", `${fmt(m.crypto_settled_positions_markets_7d, 0)} / ${fmt(m.crypto_settled_positions_markets_30d, 0)}`],
         ["本地观测Realized PnL", money(localObservedPnl(m))],
+        ["本地观测跨度", `${fmt(m.local_observed_observed_span_hours ?? m.local_observed_span_hours, 1)} 小时`],
         ["已结算窗口", `${fmt(m.settled_markets_7d, 0)} / ${fmt(m.settled_markets_30d, 0)}`],
         ["本地已结算窗口", `${fmt(m.local_observed_settled_markets_7d, 0)} / ${fmt(m.local_observed_settled_markets_30d, 0)}`],
         ["盈亏来源", pnlSourceLabel(m.pnl_source)],

@@ -637,11 +637,25 @@ class ObserverStore:
         pnl_total = pnl(rows_total)
         positive_30d = sorted([float(row["realized_pnl"] or 0.0) for row in rows_30d if float(row["realized_pnl"] or 0.0) > 0], reverse=True)
         positive_total = sum(positive_30d)
+        settled_times: list[dt.datetime] = []
+        for row in rows_total:
+            raw = str(row["settled_at"] or "")
+            try:
+                settled_times.append(dt.datetime.fromisoformat(raw.replace("Z", "+00:00")))
+            except ValueError:
+                continue
+        first_settled = min(settled_times) if settled_times else None
+        observed_span_hours = (
+            round((dt.datetime.fromtimestamp(now_value, dt.timezone.utc) - first_settled).total_seconds() / 3600.0, 3)
+            if first_settled is not None
+            else 0.0
+        )
         return {
             "pnl_7d": pnl_7d,
             "pnl_30d": pnl_30d,
             "pnl_total": pnl_total,
             "pnl_source": "local_observed_ledger",
+            "observed_span_hours": observed_span_hours,
             "wins_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) > 0),
             "losses_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) < 0),
             "settled_markets_7d": len(rows_7d),

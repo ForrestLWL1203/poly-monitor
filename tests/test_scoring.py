@@ -311,6 +311,76 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(score.status, "active_candidate")
         self.assertNotIn("markets_24h_below_threshold", score.reasons)
 
+    def test_reliable_profile_30d_loss_blocks_local_recovery_from_active(self):
+        metrics = {
+            "wallet": "0xcbcf",
+            "trades_24h": 229,
+            "markets_24h": 74,
+            "trades_7d": 569,
+            "markets_7d": 171,
+            "trades_30d": 1057,
+            "markets_30d": 359,
+            "pnl_7d": 455.23,
+            "pnl_30d": -8283.84,
+            "pnl_source": "profile_portfolio_pnl",
+            "wins_7d": 9,
+            "losses_7d": 2,
+            "local_observed_pnl_7d": 529.42,
+            "local_observed_settled_markets_7d": 11,
+            "local_observed_wins_7d": 9,
+            "local_observed_losses_7d": 2,
+            "local_observed_observed_span_hours": 12,
+            "top1_concentration": 0.039,
+            "top3_concentration": 0.101,
+            "longshot_profit_share": 0.023,
+            "longshot_profit_markets": 3,
+            "last_active_age_hours": 1.4,
+            "historical_trades": 1057,
+            "historical_markets": 359,
+            "historical_pnl": -8283.84,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "dormant_candidate")
+        self.assertIn("pnl_30d_not_positive", score.reasons)
+
+    def test_immature_local_sample_does_not_relax_activity_gate(self):
+        metrics = {
+            "wallet": "0xyoung",
+            "trades_24h": 200,
+            "markets_24h": 50,
+            "trades_7d": 700,
+            "markets_7d": 140,
+            "trades_30d": 1200,
+            "markets_30d": 260,
+            "pnl_7d": 500,
+            "pnl_30d": 1500,
+            "pnl_source": "profile_portfolio_pnl",
+            "wins_7d": 11,
+            "losses_7d": 1,
+            "local_observed_pnl_7d": 120,
+            "local_observed_settled_markets_7d": 12,
+            "local_observed_wins_7d": 11,
+            "local_observed_losses_7d": 1,
+            "local_observed_observed_span_hours": 10,
+            "top1_concentration": 0.08,
+            "top3_concentration": 0.2,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 1200,
+            "historical_markets": 260,
+            "historical_pnl": 1500,
+        }
+
+        immature = score_wallet(metrics, CandidateThresholds())
+        mature = score_wallet({**metrics, "local_observed_observed_span_hours": 30}, CandidateThresholds())
+
+        self.assertEqual(immature.status, "dormant_candidate")
+        self.assertIn("markets_24h_below_threshold", immature.reasons)
+        self.assertEqual(mature.status, "active_candidate")
+
     def test_local_observed_quality_can_override_negative_historical_positions(self):
         metrics = {
             "wallet": "0xrecovering",
