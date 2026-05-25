@@ -4,7 +4,7 @@ import datetime as dt
 from collections import defaultdict
 from typing import Any
 
-from .data_api import fetch_closed_positions, fetch_user_activity, fetch_user_positions, fetch_user_profit
+from .data_api import fetch_closed_positions, fetch_user_activity, fetch_user_pnl_history, fetch_user_positions, fetch_user_profit
 
 DEFAULT_ACTIVITY_PAGES = 3
 SATURATED_MARKETS_24H = 288
@@ -122,6 +122,30 @@ def _profile_profit(wallet: str, window: str) -> tuple[float | None, str | None,
     return amount, name, None
 
 
+def _portfolio_pnl_delta(wallet: str, interval: str, fidelity: str, *, now_ts: int) -> tuple[float | None, str | None]:
+    try:
+        rows = fetch_user_pnl_history(wallet, interval=interval, fidelity=fidelity)
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if not rows:
+        return None, "empty_portfolio_pnl_response"
+    cutoff = {
+        "1d": now_ts - 86400,
+        "1w": now_ts - 7 * 86400,
+        "1m": now_ts - 30 * 86400,
+    }.get(interval.lower())
+    if cutoff is not None:
+        rows = [row for row in rows if int(row.get("t") or 0) >= cutoff]
+    if len(rows) < 2:
+        return None, "insufficient_portfolio_pnl_points"
+    try:
+        start = float(rows[0].get("p") or 0.0)
+        end = float(rows[-1].get("p") or 0.0)
+    except (TypeError, ValueError):
+        return None, "invalid_portfolio_pnl_points"
+    return end - start, None
+
+
 def build_metrics_from_api(
     wallet: str,
     *,
@@ -224,12 +248,19 @@ def build_metrics_from_api(
     crypto_settled_positions_pnl_7d = round(sum(settled_market_pnls_7d), 6)
     crypto_settled_positions_pnl_30d = round(sum(settled_market_pnls_30d), 6)
     settled_positions_available = bool(settled_market_pnls_7d or settled_market_pnls_30d)
-    profile_pnl_7d, profile_name_7d, profile_error_7d = _profile_profit(wallet, "7d")
-    profile_pnl_30d, profile_name_30d, profile_error_30d = _profile_profit(wallet, "30d")
-    if profile_pnl_7d is not None or profile_pnl_30d is not None:
-        pnl_7d = profile_pnl_7d if profile_pnl_7d is not None else 0.0
-        pnl_30d = profile_pnl_30d if profile_pnl_30d is not None else 0.0
-        pnl_source = "profile_profit"
+    portfolio_pnl_1d, portfolio_error_1d = _portfolio_pnl_delta(wallet, "1d", "1h", now_ts=now)
+    portfolio_pnl_7d, portfolio_error_7d = _portfolio_pnl_delta(wallet, "1w", "3h", now_ts=now)
+    portfolio_pnl_30d, portfolio_error_30d = _portfolio_pnl_delta(wallet, "1m", "18h", now_ts=now)
+    lb_profit_7d, profile_name_7d, lb_error_7d = _profile_profit(wallet, "7d")
+    lb_profit_30d, profile_name_30d, lb_error_30d = _profile_profit(wallet, "30d")
+    if portfolio_pnl_7d is not None or portfolio_pnl_30d is not None:
+        pnl_7d = portfolio_pnl_7d if portfolio_pnl_7d is not None else 0.0
+        pnl_30d = portfolio_pnl_30d if portfolio_pnl_30d is not None else 0.0
+        pnl_source = "profile_portfolio_pnl"
+    elif lb_profit_7d is not None or lb_profit_30d is not None:
+        pnl_7d = lb_profit_7d if lb_profit_7d is not None else 0.0
+        pnl_30d = lb_profit_30d if lb_profit_30d is not None else 0.0
+        pnl_source = "leaderboard_profit"
     elif settled_positions_available:
         pnl_7d = crypto_settled_positions_pnl_7d
         pnl_30d = crypto_settled_positions_pnl_30d
@@ -271,10 +302,14 @@ def build_metrics_from_api(
         "pnl_7d": round(pnl_7d, 6),
         "pnl_30d": round(pnl_30d, 6),
         "pnl_source": pnl_source,
-        "profile_pnl_7d": round(profile_pnl_7d, 6) if profile_pnl_7d is not None else None,
-        "profile_pnl_30d": round(profile_pnl_30d, 6) if profile_pnl_30d is not None else None,
+        "profile_pnl_1d": round(portfolio_pnl_1d, 6) if portfolio_pnl_1d is not None else None,
+        "profile_pnl_7d": round(portfolio_pnl_7d, 6) if portfolio_pnl_7d is not None else None,
+        "profile_pnl_30d": round(portfolio_pnl_30d, 6) if portfolio_pnl_30d is not None else None,
+        "leaderboard_profit_pnl_7d": round(lb_profit_7d, 6) if lb_profit_7d is not None else None,
+        "leaderboard_profit_pnl_30d": round(lb_profit_30d, 6) if lb_profit_30d is not None else None,
         "profile_name": profile_name_30d or profile_name_7d,
-        "profile_pnl_error": "; ".join(error for error in [profile_error_7d, profile_error_30d] if error),
+        "profile_pnl_error": "; ".join(error for error in [portfolio_error_1d, portfolio_error_7d, portfolio_error_30d] if error),
+        "leaderboard_profit_error": "; ".join(error for error in [lb_error_7d, lb_error_30d] if error),
         "crypto_settled_positions_pnl_7d": crypto_settled_positions_pnl_7d,
         "crypto_settled_positions_pnl_30d": crypto_settled_positions_pnl_30d,
         "crypto_settled_positions_markets_7d": len(settled_market_pnls_7d),

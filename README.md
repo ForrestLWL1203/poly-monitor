@@ -104,12 +104,14 @@ Watchlisted wallets are treated as manually protected research targets:
   are refreshed more often than ordinary archived wallets.
 
 - Historical BTC/ETH 5m activity is used for candidate discovery and ranking.
-  Polymarket profile profit is used as the primary historical PnL because it
-  matches the public profile aggregation shown by Polymarket.
-- BTC/ETH 5m settled-position `cashPnl` and closed-position estimates are kept
-  as reference diagnostics only. The positions endpoint can understate wallets
-  by retaining unresolved/redeemable losing rows while missing redeemed winners,
-  while closed-position rows can overstate winners.
+  Polymarket profile portfolio-PnL curves are used as the primary historical
+  PnL because they match the rolling 1D/1W/1M Profit/Loss widget on the public
+  profile page.
+- Leaderboard profit, BTC/ETH 5m settled-position `cashPnl`, and
+  closed-position estimates are kept as reference diagnostics only. The
+  positions endpoint can understate wallets by retaining unresolved/redeemable
+  losing rows while missing redeemed winners, while closed-position rows can
+  overstate winners.
 - The observer also records a separate local-observed Ledger PnL from trades and
   settlements collected after this script started. This local PnL is cumulative
   across the saved local ledger, not just the current active-candidate window.

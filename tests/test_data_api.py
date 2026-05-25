@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
-from poly_monitor.data_api import AsyncDataApiClient, fetch_market_trades, normalize_trade
+from poly_monitor.data_api import AsyncDataApiClient, fetch_market_trades, fetch_user_pnl_history, normalize_trade
 
 
 class DataApiTests(unittest.TestCase):
@@ -72,6 +72,23 @@ class DataApiTests(unittest.TestCase):
             "tx_hash": "0xtx",
             "fill_id": "7",
         })
+
+    def test_fetch_user_pnl_history_uses_public_profile_curve_endpoint(self):
+        calls = []
+
+        def fake_get_url_json(base_url, path, params, **kwargs):
+            calls.append((base_url, path, dict(params), dict(kwargs)))
+            return [{"t": 1, "p": 2}]
+
+        with patch("poly_monitor.data_api._get_url_json", side_effect=fake_get_url_json):
+            rows = fetch_user_pnl_history("0xabc", interval="1w", fidelity="3h")
+
+        self.assertEqual(rows, [{"t": 1, "p": 2}])
+        base_url, path, params, kwargs = calls[0]
+        self.assertEqual(base_url, "https://user-pnl-api.polymarket.com")
+        self.assertEqual(path, "/user-pnl")
+        self.assertEqual(params, {"user_address": "0xabc", "interval": "1w", "fidelity": "3h"})
+        self.assertIn("Origin", kwargs["headers"])
 
     def test_async_client_uses_tuned_tcp_connector(self):
         async def run_case():

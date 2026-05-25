@@ -14,14 +14,26 @@ except ImportError:  # pragma: no cover
 
 DATA_API = "https://data-api.polymarket.com"
 LB_API = "https://lb-api.polymarket.com"
+USER_PNL_API = "https://user-pnl-api.polymarket.com"
 
 
-def _get_url_json(base_url: str, path: str, params: dict[str, Any], *, timeout: float = 10.0, retries: int = 3) -> Any:
+def _get_url_json(
+    base_url: str,
+    path: str,
+    params: dict[str, Any],
+    *,
+    timeout: float = 10.0,
+    retries: int = 3,
+    headers: dict[str, str] | None = None,
+) -> Any:
     url = base_url + path + "?" + urllib.parse.urlencode(params, doseq=True)
     last_error: Exception | None = None
     for attempt in range(retries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "poly-monitor/0.1", "Accept": "application/json"})
+            req_headers = {"User-Agent": "poly-monitor/0.1", "Accept": "application/json"}
+            if headers:
+                req_headers.update(headers)
+            req = urllib.request.Request(url, headers=req_headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
@@ -182,3 +194,17 @@ def fetch_user_profit(wallet: str, *, window: str) -> dict[str, Any] | None:
         row = data[0]
         return row if isinstance(row, dict) else None
     return None
+
+
+def fetch_user_pnl_history(wallet: str, *, interval: str, fidelity: str) -> list[dict[str, Any]]:
+    data = _get_url_json(
+        USER_PNL_API,
+        "/user-pnl",
+        {"user_address": wallet, "interval": interval, "fidelity": fidelity},
+        headers={
+            "User-Agent": "Mozilla/5.0 poly-monitor/0.1",
+            "Origin": "https://polymarket.com",
+            "Referer": "https://polymarket.com/",
+        },
+    )
+    return data if isinstance(data, list) else []

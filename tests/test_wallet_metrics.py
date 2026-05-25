@@ -35,6 +35,8 @@ class WalletMetricsTests(unittest.TestCase):
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
         ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_pnl_history", return_value=[]
+        ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
                 {"amount": 12.5, "name": "profile"},
@@ -54,10 +56,44 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["closed_position_losses_7d"], 0)
         self.assertEqual(metrics["pnl_7d"], 12.5)
         self.assertEqual(metrics["pnl_30d"], 34.5)
-        self.assertEqual(metrics["pnl_source"], "profile_profit")
-        self.assertEqual(metrics["profile_pnl_7d"], 12.5)
-        self.assertEqual(metrics["profile_pnl_30d"], 34.5)
+        self.assertEqual(metrics["pnl_source"], "leaderboard_profit")
+        self.assertIsNone(metrics["profile_pnl_7d"])
+        self.assertIsNone(metrics["profile_pnl_30d"])
+        self.assertEqual(metrics["leaderboard_profit_pnl_7d"], 12.5)
+        self.assertEqual(metrics["leaderboard_profit_pnl_30d"], 34.5)
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 3)
+
+    def test_build_metrics_uses_profile_portfolio_curve_delta_for_page_pnl(self):
+        activity = [
+            {"type": "TRADE", "slug": "btc-updown-5m-100", "timestamp": 1000, "outcome": "Up", "usdcSize": 10},
+        ]
+        history_1d = [{"t": 1000, "p": 100.0}, {"t": 2000, "p": 125.0}]
+        history_1w = [{"t": 1000, "p": 100.0}, {"t": 2000, "p": 180.0}]
+        history_1m = [{"t": 1000, "p": 100.0}, {"t": 2000, "p": 250.0}]
+
+        with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=[activity, []]), patch(
+            "poly_monitor.wallet_metrics.fetch_closed_positions", return_value=[]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_pnl_history", side_effect=[history_1d, history_1w, history_1m]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_profit",
+            side_effect=[
+                {"amount": 12.5, "name": "profile"},
+                {"amount": 34.5, "name": "profile"},
+            ],
+        ):
+            metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=2, closed_pages=2)
+
+        self.assertEqual(metrics["pnl_7d"], 80.0)
+        self.assertEqual(metrics["pnl_30d"], 150.0)
+        self.assertEqual(metrics["pnl_source"], "profile_portfolio_pnl")
+        self.assertEqual(metrics["profile_pnl_1d"], 25.0)
+        self.assertEqual(metrics["profile_pnl_7d"], 80.0)
+        self.assertEqual(metrics["profile_pnl_30d"], 150.0)
+        self.assertEqual(metrics["leaderboard_profit_pnl_7d"], 12.5)
+        self.assertEqual(metrics["leaderboard_profit_pnl_30d"], 34.5)
 
     def test_closed_positions_do_not_drive_win_loss_counts(self):
         activity = [
@@ -72,6 +108,8 @@ class WalletMetricsTests(unittest.TestCase):
             "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_pnl_history", return_value=[]
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
@@ -105,6 +143,8 @@ class WalletMetricsTests(unittest.TestCase):
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
         ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_pnl_history", return_value=[]
+        ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
                 {"amount": 1_234.5, "name": "profile"},
@@ -115,9 +155,9 @@ class WalletMetricsTests(unittest.TestCase):
 
         self.assertEqual(metrics["pnl_7d"], 1_234.5)
         self.assertEqual(metrics["pnl_30d"], 3_456.7)
-        self.assertEqual(metrics["pnl_source"], "profile_profit")
-        self.assertEqual(metrics["profile_pnl_7d"], 1_234.5)
-        self.assertEqual(metrics["profile_pnl_30d"], 3_456.7)
+        self.assertEqual(metrics["pnl_source"], "leaderboard_profit")
+        self.assertEqual(metrics["leaderboard_profit_pnl_7d"], 1_234.5)
+        self.assertEqual(metrics["leaderboard_profit_pnl_30d"], 3_456.7)
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 100_000)
 
     def test_negative_profile_profit_overrides_positive_closed_position_estimate_when_positions_are_unavailable(self):
@@ -139,6 +179,8 @@ class WalletMetricsTests(unittest.TestCase):
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
         ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_pnl_history", return_value=[]
+        ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
                 {"amount": 25.0, "name": "profile"},
@@ -149,7 +191,7 @@ class WalletMetricsTests(unittest.TestCase):
 
         self.assertEqual(metrics["pnl_7d"], 25.0)
         self.assertEqual(metrics["pnl_30d"], -31.0)
-        self.assertEqual(metrics["pnl_source"], "profile_profit")
+        self.assertEqual(metrics["pnl_source"], "leaderboard_profit")
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 5_000)
 
     def test_profile_profit_overrides_incomplete_position_diagnostics(self):
@@ -195,6 +237,8 @@ class WalletMetricsTests(unittest.TestCase):
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_positions", side_effect=[positions, []]
         ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_pnl_history", return_value=[]
+        ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
                 {"amount": 25.0, "name": "profile"},
@@ -205,7 +249,7 @@ class WalletMetricsTests(unittest.TestCase):
 
         self.assertEqual(metrics["pnl_7d"], 25.0)
         self.assertEqual(metrics["pnl_30d"], -31.0)
-        self.assertEqual(metrics["pnl_source"], "profile_profit")
+        self.assertEqual(metrics["pnl_source"], "leaderboard_profit")
         self.assertEqual(metrics["crypto_settled_positions_pnl_30d"], -10.0)
         self.assertEqual(metrics["crypto_settled_positions_markets_30d"], 2)
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 5_000)
@@ -221,6 +265,8 @@ class WalletMetricsTests(unittest.TestCase):
             "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_pnl_history", return_value=[]
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
@@ -247,6 +293,8 @@ class WalletMetricsTests(unittest.TestCase):
             "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_pnl_history", return_value=[]
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
