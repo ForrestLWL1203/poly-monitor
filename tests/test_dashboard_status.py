@@ -185,6 +185,54 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(detail["name"], "frontrow-user")
         self.assertEqual(detail["metrics"]["name"], "frontrow-user")
 
+    def test_dashboard_enriches_cached_scores_with_local_symbol_window_counts(self):
+        from poly_monitor.dashboard.status import build_dashboard_status, wallet_detail
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0x5555555555555555555555555555555555555555"
+            now_ts = int(dt.datetime.now(dt.timezone.utc).timestamp())
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            for tx_hash, slug, symbol in [
+                ("0xb1", "btc-updown-5m-1770000000", "BTC"),
+                ("0xb2", "btc-updown-5m-1770000300", "BTC"),
+                ("0xe1", "eth-updown-5m-1770000000", "ETH"),
+            ]:
+                store.insert_trade(
+                    {
+                        "tx_hash": tx_hash,
+                        "wallet": wallet,
+                        "market_slug": slug,
+                        "condition_id": f"cond-{slug}",
+                        "symbol": symbol,
+                        "exchange_ts": now_ts - 60,
+                        "outcome": "Up",
+                        "price": 0.5,
+                        "size": 10,
+                        "usdc": 5,
+                    }
+                )
+            store.upsert_score(
+                CandidateScore(
+                    wallet=wallet,
+                    status="active_candidate",
+                    rank_score=10,
+                    reasons=[],
+                    metrics={"wallet": wallet, "markets_24h": 999, "pnl_7d": 1, "pnl_30d": 1, "wins_7d": 1, "losses_7d": 0},
+                )
+            )
+            store.close()
+
+            status = build_dashboard_status(data_dir, now=dt.datetime.now(dt.timezone.utc))
+            detail = wallet_detail(data_dir, wallet)
+
+        metrics = status["candidates"]["active_candidate"][0]["metrics"]
+        self.assertEqual(metrics["markets_24h"], 3)
+        self.assertEqual(metrics["btc_markets_24h"], 2)
+        self.assertEqual(metrics["eth_markets_24h"], 1)
+        self.assertEqual(detail["metrics"]["btc_markets_24h"], 2)
+        self.assertEqual(detail["metrics"]["eth_markets_24h"], 1)
+
     def test_wallet_detail_uses_profile_name_without_recent_trades(self):
         from poly_monitor.dashboard.status import wallet_detail
 

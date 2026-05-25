@@ -29,6 +29,12 @@ class DashboardStaticTests(unittest.TestCase):
         self.assertIn("SQLite 大小", html)
         self.assertIn("data.sqlite.total_bytes", html)
 
+    def test_dashboard_window_count_caps_list_and_shows_symbol_split_in_detail(self):
+        html = (ROOT / "poly_monitor" / "dashboard" / "static" / "index.html").read_text()
+
+        self.assertIn("capped ? 288 : value", html)
+        self.assertIn("BTC ${fmt(btc, 0)} / ETH ${fmt(eth, 0)}", html)
+
 
 if __name__ == "__main__":
     unittest.main()

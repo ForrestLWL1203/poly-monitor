@@ -502,8 +502,22 @@
 
     function windowCount(row) {
       const value = metricAny(row, ["markets_24h", "markets_7d"]);
-      const suffix = metric(row, "markets_24h_lower_bound") ? "+" : "";
-      return `${fmt(value, 0)}${suffix}`;
+      const n = Number(value || 0);
+      const capped = Number.isFinite(n) && n > 288;
+      const suffix = metric(row, "markets_24h_lower_bound") || capped ? "+" : "";
+      return `${fmt(capped ? 288 : value, 0)}${suffix}`;
+    }
+
+    function windowCountDetail(m) {
+      const value = m.markets_24h ?? m.markets_7d;
+      const n = Number(value || 0);
+      const capped = Number.isFinite(n) && n > 288;
+      const suffix = m.markets_24h_lower_bound || capped ? "+" : "";
+      const total = `${fmt(capped ? 288 : value, 0)}${suffix}`;
+      const btc = m.btc_markets_24h;
+      const eth = m.eth_markets_24h;
+      if (btc === null || btc === undefined || eth === null || eth === undefined) return total;
+      return `${total}，BTC ${fmt(btc, 0)} / ETH ${fmt(eth, 0)}`;
     }
 
     function ageSince(v) {
@@ -812,7 +826,7 @@
         ["盈亏来源", pnlSourceLabel(m.pnl_source)],
         ["7天交易", fmt(m.trades_7d, 0)],
         ["30天交易", fmt(m.trades_30d, 0)],
-        ["24h窗口", `${fmt(m.markets_24h ?? m.markets_7d, 0)}${m.markets_24h_lower_bound ? "+" : ""}`],
+        ["24h窗口", windowCountDetail(m)],
         ["最后交易距今", ageSince(m.last_active_age_hours)],
         ["低价票占比", pct(m.longshot_profit_share)],
         ["双边率", pct(m.dual_side_rate)],

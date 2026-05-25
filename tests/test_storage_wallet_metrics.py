@@ -754,9 +754,9 @@ class StorageWalletMetricsTests(unittest.TestCase):
                 now_ts = 2_000_000
                 store.insert_trades(
                     [
-                        trade_row("0xabc", "btc-1", now_ts - 100, tx_hash="tx-1"),
-                        trade_row("0xabc", "btc-1", now_ts - 200, tx_hash="tx-2"),
-                        trade_row("0xabc", "eth-1", now_ts - 2 * 86400, tx_hash="tx-3"),
+                        trade_row("0xabc", "btc-updown-5m-1999500", now_ts - 100, tx_hash="tx-1"),
+                        trade_row("0xabc", "eth-updown-5m-1999500", now_ts - 200, tx_hash="tx-2"),
+                        trade_row("0xabc", "eth-updown-5m-1800000", now_ts - 2 * 86400, tx_hash="tx-3"),
                         trade_row("0xabc", "sol-1", now_ts - 20 * 86400, tx_hash="tx-4"),
                         trade_row("0xabc", "xrp-1", now_ts - 40 * 86400, tx_hash="tx-5"),
                         trade_row("0xdef", "btc-1", now_ts - 50, tx_hash="tx-6"),
@@ -767,13 +767,15 @@ class StorageWalletMetricsTests(unittest.TestCase):
 
                 self.assertEqual(metrics["wallet"], "0xabc")
                 self.assertEqual(metrics["trades_24h"], 2)
-                self.assertEqual(metrics["markets_24h"], 1)
+                self.assertEqual(metrics["markets_24h"], 2)
+                self.assertEqual(metrics["btc_markets_24h"], 1)
+                self.assertEqual(metrics["eth_markets_24h"], 1)
                 self.assertEqual(metrics["trades_7d"], 3)
-                self.assertEqual(metrics["markets_7d"], 2)
+                self.assertEqual(metrics["markets_7d"], 3)
                 self.assertEqual(metrics["trades_30d"], 4)
-                self.assertEqual(metrics["markets_30d"], 3)
+                self.assertEqual(metrics["markets_30d"], 4)
                 self.assertEqual(metrics["historical_trades"], 5)
-                self.assertEqual(metrics["historical_markets"], 4)
+                self.assertEqual(metrics["historical_markets"], 5)
                 self.assertAlmostEqual(metrics["last_active_age_hours"], round(100 / 3600, 3))
             finally:
                 store.close()
@@ -786,12 +788,16 @@ class StorageWalletMetricsTests(unittest.TestCase):
                 store.insert_trades(
                     [
                         trade_row("0xabc", "btc-1", now_ts - 100, tx_hash="tx-1"),
-                        trade_row("0xabc", "btc-2", now_ts - 200, tx_hash="tx-2"),
+                        trade_row("0xabc", "btc-updown-5m-1999500", now_ts - 150, tx_hash="tx-btc"),
+                        trade_row("0xabc", "eth-updown-5m-1999500", now_ts - 200, tx_hash="tx-eth"),
                         trade_row("0xabc", "btc-3", now_ts - 2 * 86400, tx_hash="tx-3"),
                     ]
                 )
 
-                self.assertEqual(store.wallet_24h_counts("0xABC", now_ts=now_ts), {"trades_24h": 2, "markets_24h": 2})
+                self.assertEqual(
+                    store.wallet_24h_counts("0xABC", now_ts=now_ts),
+                    {"trades_24h": 3, "markets_24h": 3, "btc_markets_24h": 1, "eth_markets_24h": 1},
+                )
             finally:
                 store.close()
 

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 ACTIVITY_CASHFLOW_TYPES = ("SPLIT", "MERGE", "REDEEM")
+BTC_5M_WINDOW_KEY_SQL = "substr(market_slug, length('btc-updown-5m-') + 1)"
+ETH_5M_WINDOW_KEY_SQL = "substr(market_slug, length('eth-updown-5m-') + 1)"
 
 
 def utc_now() -> dt.datetime:
@@ -861,10 +863,12 @@ class ObserverStore:
         cutoff_30d = now_value - 30 * 86400
         cutoff_24h = now_value - 86400
         row = self.conn.execute(
-            """
+            f"""
             SELECT
                 SUM(CASE WHEN exchange_ts >= ? THEN 1 ELSE 0 END) AS trades_24h,
                 COUNT(DISTINCT CASE WHEN exchange_ts >= ? THEN market_slug END) AS markets_24h,
+                COUNT(DISTINCT CASE WHEN exchange_ts >= ? AND market_slug LIKE 'btc-updown-5m-%' THEN {BTC_5M_WINDOW_KEY_SQL} END) AS btc_markets_24h,
+                COUNT(DISTINCT CASE WHEN exchange_ts >= ? AND market_slug LIKE 'eth-updown-5m-%' THEN {ETH_5M_WINDOW_KEY_SQL} END) AS eth_markets_24h,
                 SUM(CASE WHEN exchange_ts >= ? THEN 1 ELSE 0 END) AS trades_7d,
                 COUNT(DISTINCT CASE WHEN exchange_ts >= ? THEN market_slug END) AS markets_7d,
                 SUM(CASE WHEN exchange_ts >= ? THEN 1 ELSE 0 END) AS trades_30d,
@@ -878,6 +882,8 @@ class ObserverStore:
             (
                 cutoff_24h,
                 cutoff_24h,
+                cutoff_24h,
+                cutoff_24h,
                 cutoff_7d,
                 cutoff_7d,
                 cutoff_30d,
@@ -889,6 +895,8 @@ class ObserverStore:
             "wallet": wallet.lower(),
             "trades_24h": 0,
             "markets_24h": 0,
+            "btc_markets_24h": 0,
+            "eth_markets_24h": 0,
             "markets_24h_source": "local_observed",
             "trades_7d": 0,
             "markets_7d": 0,
@@ -911,6 +919,8 @@ class ObserverStore:
             return metrics
         metrics["trades_24h"] = int(row["trades_24h"] or 0)
         metrics["markets_24h"] = int(row["markets_24h"] or 0)
+        metrics["btc_markets_24h"] = int(row["btc_markets_24h"] or 0)
+        metrics["eth_markets_24h"] = int(row["eth_markets_24h"] or 0)
         metrics["trades_7d"] = int(row["trades_7d"] or 0)
         metrics["markets_7d"] = int(row["markets_7d"] or 0)
         metrics["trades_30d"] = int(row["trades_30d"] or 0)
@@ -1138,10 +1148,12 @@ class ObserverStore:
         now_value = now_ts if now_ts is not None else int(dt.datetime.now(dt.timezone.utc).timestamp())
         cutoff_24h = now_value - 86400
         row = self.conn.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) AS trades_24h,
-                COUNT(DISTINCT market_slug) AS markets_24h
+                COUNT(DISTINCT market_slug) AS markets_24h,
+                COUNT(DISTINCT CASE WHEN market_slug LIKE 'btc-updown-5m-%' THEN {BTC_5M_WINDOW_KEY_SQL} END) AS btc_markets_24h,
+                COUNT(DISTINCT CASE WHEN market_slug LIKE 'eth-updown-5m-%' THEN {ETH_5M_WINDOW_KEY_SQL} END) AS eth_markets_24h
             FROM trades
             WHERE wallet=? AND exchange_ts >= ?
             """,
@@ -1150,6 +1162,8 @@ class ObserverStore:
         return {
             "trades_24h": int(row["trades_24h"] or 0) if row else 0,
             "markets_24h": int(row["markets_24h"] or 0) if row else 0,
+            "btc_markets_24h": int(row["btc_markets_24h"] or 0) if row else 0,
+            "eth_markets_24h": int(row["eth_markets_24h"] or 0) if row else 0,
         }
 
     def upsert_score(self, score) -> None:

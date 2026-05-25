@@ -942,6 +942,8 @@ class CryptoWalletObserver:
         if local_markets > api_markets:
             metrics["markets_24h"] = int(local_markets)
             metrics["trades_24h"] = int(metrics.get("local_observed_trades_24h") or 0)
+            metrics["btc_markets_24h"] = int(metrics.get("local_observed_btc_markets_24h") or 0)
+            metrics["eth_markets_24h"] = int(metrics.get("local_observed_eth_markets_24h") or 0)
             metrics["markets_24h_source"] = "local_observed"
             metrics["markets_24h_lower_bound"] = False
         else:

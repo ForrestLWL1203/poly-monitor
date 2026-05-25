@@ -280,6 +280,8 @@ def build_metrics_from_api(
     total_profit_30d = sum(value for value in concentration_pnls_30d if value > 0)
     last_ts = max([int(row.get("timestamp") or 0) for row in trades] or [0])
     trade_markets_24h = {row_slug(row) for row in trades_24h if row_slug(row)}
+    btc_trade_markets_24h = {slug for slug in trade_markets_24h if slug.startswith("btc-updown-5m-")}
+    eth_trade_markets_24h = {slug for slug in trade_markets_24h if slug.startswith("eth-updown-5m-")}
     trade_markets_7d = {row_slug(row) for row in trades_7d if row_slug(row)}
     trade_markets_30d = {row_slug(row) for row in trades_30d if row_slug(row)}
     all_trade_markets = {row_slug(row) for row in trades if row_slug(row)}
@@ -292,6 +294,8 @@ def build_metrics_from_api(
         "wallet": wallet.lower(),
         "trades_24h": len(trades_24h),
         "markets_24h": markets_24h,
+        "btc_markets_24h": len(btc_trade_markets_24h),
+        "eth_markets_24h": len(eth_trade_markets_24h),
         "markets_24h_lower_bound": markets_24h_lower_bound,
         "activity_page_cap_hit": activity_page_cap_hit,
         "activity_rows_sampled": len(activity),
