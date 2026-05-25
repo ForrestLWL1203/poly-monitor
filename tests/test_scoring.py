@@ -311,6 +311,41 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(score.status, "active_candidate")
         self.assertNotIn("markets_24h_below_threshold", score.reasons)
 
+    def test_local_observed_quality_can_override_negative_historical_positions(self):
+        metrics = {
+            "wallet": "0xrecovering",
+            "trades_24h": 900,
+            "markets_24h": 120,
+            "trades_7d": 1200,
+            "markets_7d": 180,
+            "trades_30d": 1500,
+            "markets_30d": 260,
+            "pnl_7d": -500,
+            "pnl_30d": -3000,
+            "pnl_source": "crypto_settled_positions",
+            "wins_7d": 30,
+            "losses_7d": 10,
+            "local_observed_pnl_7d": 250,
+            "local_observed_settled_markets_7d": 40,
+            "local_observed_wins_7d": 30,
+            "local_observed_losses_7d": 10,
+            "top1_concentration": 0.9,
+            "top3_concentration": 0.95,
+            "longshot_profit_share": 0.8,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.2,
+            "historical_trades": 1500,
+            "historical_markets": 260,
+            "historical_pnl": -3000,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "active_candidate")
+        self.assertNotIn("pnl_7d_not_positive", score.reasons)
+        self.assertNotIn("pnl_30d_not_positive", score.reasons)
+        self.assertNotIn("top1_concentration_high", score.reasons)
+
     def test_rank_penalizes_extreme_frequency_when_quality_is_similar(self):
         moderate_frequency = {
             "wallet": "0xmoderate",

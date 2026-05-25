@@ -82,6 +82,7 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
     else:
         market_activity_failed = markets_24h < thresholds.min_markets_24h
     check_pnl_7d = metrics.get("pnl_source") != "local_observed_ledger" or _num(metrics, "settled_markets_7d") >= 1
+    use_historical_quality_gates = not local_quality_passes
     checks = [
         ("trades_7d_below_threshold", _num(metrics, "trades_7d") < thresholds.min_trades_7d),
         ("markets_24h_below_threshold", market_activity_failed),
@@ -91,17 +92,17 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
             metrics.get("pnl_source") == "local_observed_ledger"
             and _num(metrics, "settled_markets_7d") < thresholds.min_settled_markets_for_local_active,
         ),
-        ("pnl_7d_not_positive", check_pnl_7d and _num(metrics, "pnl_7d") <= 0),
+        ("pnl_7d_not_positive", use_historical_quality_gates and check_pnl_7d and _num(metrics, "pnl_7d") <= 0),
         ("local_observed_pnl_7d_not_positive", has_local_quality_sample and _local_pnl_7d(metrics) <= 0),
         (
             "local_observed_wins_7d_not_above_losses",
             has_local_quality_sample and _local_wins_7d(metrics) <= _local_losses_7d(metrics),
         ),
-        ("pnl_30d_not_positive", _num(metrics, "pnl_30d") <= 0),
+        ("pnl_30d_not_positive", use_historical_quality_gates and _num(metrics, "pnl_30d") <= 0),
         ("wins_7d_below_losses", win_loss_failed),
-        ("top1_concentration_high", _num(metrics, "top1_concentration") > thresholds.max_top1_concentration),
-        ("top3_concentration_high", _num(metrics, "top3_concentration") > thresholds.max_top3_concentration),
-        ("longshot_profit_share_high_without_repetition", longshot_high and not repeat_longshot),
+        ("top1_concentration_high", use_historical_quality_gates and _num(metrics, "top1_concentration") > thresholds.max_top1_concentration),
+        ("top3_concentration_high", use_historical_quality_gates and _num(metrics, "top3_concentration") > thresholds.max_top3_concentration),
+        ("longshot_profit_share_high_without_repetition", use_historical_quality_gates and longshot_high and not repeat_longshot),
         ("inactive_for_active", _num(metrics, "last_active_age_hours", 999999) > thresholds.active_max_age_hours),
     ]
     return [reason for reason, failed in checks if failed]
