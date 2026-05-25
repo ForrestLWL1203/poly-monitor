@@ -171,6 +171,11 @@ def fetch_closed_positions(wallet: str, *, limit: int = 500, offset: int = 0) ->
     return data if isinstance(data, list) else []
 
 
+def fetch_user_positions(wallet: str, *, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
+    data = _get_json("/positions", {"user": wallet, "limit": limit, "offset": offset})
+    return data if isinstance(data, list) else []
+
+
 def fetch_user_profit(wallet: str, *, window: str) -> dict[str, Any] | None:
     data = _get_url_json(LB_API, "/profit", {"address": wallet, "window": window, "limit": 1})
     if isinstance(data, list) and data:

@@ -33,6 +33,8 @@ class WalletMetricsTests(unittest.TestCase):
         with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=[activity, []]), patch(
             "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
         ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
+        ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
                 {"amount": 12.5, "name": "profile"},
@@ -69,6 +71,8 @@ class WalletMetricsTests(unittest.TestCase):
         with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=[activity, []]), patch(
             "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
         ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
+        ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
                 {"amount": -100, "name": "profile"},
@@ -82,7 +86,7 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["closed_position_wins_7d"], 2)
         self.assertEqual(metrics["closed_position_losses_7d"], 0)
 
-    def test_build_metrics_uses_profile_profit_as_primary_pnl(self):
+    def test_build_metrics_uses_profile_profit_when_settled_positions_are_unavailable(self):
         activity = [
             {"type": "TRADE", "slug": "btc-updown-5m-100", "timestamp": 1000, "outcome": "Up", "usdcSize": 10},
         ]
@@ -99,6 +103,8 @@ class WalletMetricsTests(unittest.TestCase):
         with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=[activity, []]), patch(
             "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
         ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
+        ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
                 {"amount": 1_234.5, "name": "profile"},
@@ -114,7 +120,7 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["profile_pnl_30d"], 3_456.7)
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 100_000)
 
-    def test_negative_profile_profit_overrides_positive_closed_position_estimate(self):
+    def test_negative_profile_profit_overrides_positive_closed_position_estimate_when_positions_are_unavailable(self):
         activity = [
             {"type": "TRADE", "slug": "btc-updown-5m-100", "timestamp": 1000, "outcome": "Up", "usdcSize": 10},
         ]
@@ -131,6 +137,8 @@ class WalletMetricsTests(unittest.TestCase):
         with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=[activity, []]), patch(
             "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
         ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
+        ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
                 {"amount": 25.0, "name": "profile"},
@@ -144,6 +152,64 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["pnl_source"], "profile_profit")
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 5_000)
 
+    def test_settled_positions_drive_real_crypto_pnl(self):
+        activity = [
+            {"type": "TRADE", "slug": "btc-updown-5m-1000", "timestamp": 1000, "outcome": "Up", "usdcSize": 10},
+        ]
+        closed = [
+            {"slug": "btc-updown-5m-1000", "endDate": "1970-01-01T00:16:40+00:00", "realizedPnl": 5_000, "avgPrice": 0.2, "outcome": "Up"},
+        ]
+        positions = [
+            {
+                "slug": "btc-updown-5m-1000",
+                "eventSlug": "btc-updown-5m-1000",
+                "cashPnl": -50.0,
+                "curPrice": 0,
+                "outcome": "Down",
+            },
+            {
+                "slug": "btc-updown-5m-1000",
+                "eventSlug": "btc-updown-5m-1000",
+                "cashPnl": 10.0,
+                "curPrice": 1,
+                "outcome": "Up",
+            },
+            {
+                "slug": "eth-updown-5m-1500",
+                "eventSlug": "eth-updown-5m-1500",
+                "cashPnl": 30.0,
+                "curPrice": 1,
+                "outcome": "Up",
+            },
+            {
+                "slug": "btc-updown-5m-1600",
+                "eventSlug": "btc-updown-5m-1600",
+                "cashPnl": 999.0,
+                "curPrice": 0.44,
+                "outcome": "Up",
+            },
+        ]
+
+        with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=[activity, []]), patch(
+            "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_positions", side_effect=[positions, []]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_profit",
+            side_effect=[
+                {"amount": 25.0, "name": "profile"},
+                {"amount": -31.0, "name": "profile"},
+            ],
+        ):
+            metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=2, closed_pages=2)
+
+        self.assertEqual(metrics["pnl_7d"], -10.0)
+        self.assertEqual(metrics["pnl_30d"], -10.0)
+        self.assertEqual(metrics["pnl_source"], "crypto_settled_positions")
+        self.assertEqual(metrics["crypto_settled_positions_pnl_30d"], -10.0)
+        self.assertEqual(metrics["crypto_settled_positions_markets_30d"], 2)
+        self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 5_000)
+
     def test_activity_metrics_saturate_24h_windows_for_high_frequency_page_cap(self):
         first_page = [
             {"type": "TRADE", "slug": f"btc-updown-5m-{100 + idx}", "timestamp": 1000 + idx, "outcome": "Up", "usdcSize": 1}
@@ -153,6 +219,8 @@ class WalletMetricsTests(unittest.TestCase):
 
         with patch("poly_monitor.wallet_metrics.fetch_user_activity", return_value=first_page), patch(
             "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[
@@ -177,6 +245,8 @@ class WalletMetricsTests(unittest.TestCase):
 
         with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=pages) as activity, patch(
             "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_positions", return_value=[]
         ), patch(
             "poly_monitor.wallet_metrics.fetch_user_profit",
             side_effect=[

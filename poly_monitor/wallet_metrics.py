@@ -4,7 +4,7 @@ import datetime as dt
 from collections import defaultdict
 from typing import Any
 
-from .data_api import fetch_closed_positions, fetch_user_activity, fetch_user_profit
+from .data_api import fetch_closed_positions, fetch_user_activity, fetch_user_positions, fetch_user_profit
 
 DEFAULT_ACTIVITY_PAGES = 3
 SATURATED_MARKETS_24H = 288
@@ -29,6 +29,29 @@ def _timestamp_from_end_date(row: dict[str, Any]) -> int | None:
     except ValueError:
         return None
     return int(value.timestamp())
+
+
+def _timestamp_from_slug(row: dict[str, Any]) -> int | None:
+    slug = row_slug(row)
+    try:
+        return int(slug.rsplit("-", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _position_is_settled(row: dict[str, Any]) -> bool:
+    try:
+        cur_price = float(row.get("curPrice"))
+    except (TypeError, ValueError):
+        return False
+    return cur_price in (0.0, 1.0)
+
+
+def _pnl_value(row: dict[str, Any]) -> float:
+    try:
+        return float(row.get("cashPnl") if row.get("cashPnl") is not None else row.get("realizedPnl") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _concentration(values: list[float], top_n: int) -> float:
@@ -137,7 +160,23 @@ def build_metrics_from_api(
         closed_raw.extend(batch)
         if len(batch) < 50:
             break
+    positions_raw: list[dict[str, Any]] = []
+    positions_error = ""
+    for page in range(closed_pages):
+        try:
+            batch = fetch_user_positions(wallet, limit=100, offset=page * 100)
+        except Exception as exc:
+            positions_error = f"{type(exc).__name__}: {exc}"
+            if positions_raw:
+                break
+            batch = []
+        if not batch:
+            break
+        positions_raw.extend(batch)
+        if len(batch) < 100:
+            break
     closed = [row for row in closed_raw if is_crypto_5m_row(row)]
+    settled_positions = [row for row in positions_raw if is_crypto_5m_row(row) and _position_is_settled(row)]
     cutoff_7d = now - 7 * 86400
     cutoff_30d = now - 30 * 86400
     cutoff_24h = now - 86400
@@ -146,10 +185,14 @@ def build_metrics_from_api(
     trades_30d = [row for row in trades if int(row.get("timestamp") or 0) >= cutoff_30d]
     pnl_by_market_7d: dict[str, float] = defaultdict(float)
     pnl_by_market_30d: dict[str, float] = defaultdict(float)
+    settled_pnl_by_market_7d: dict[str, float] = defaultdict(float)
+    settled_pnl_by_market_30d: dict[str, float] = defaultdict(float)
     longshot_profit_30d = 0.0
     longshot_profit_markets: set[str] = set()
+    settled_longshot_profit_30d = 0.0
+    settled_longshot_profit_markets: set[str] = set()
     for row in closed:
-        end_ts = _timestamp_from_end_date(row) or now
+        end_ts = _timestamp_from_slug(row) or _timestamp_from_end_date(row) or now
         pnl = float(row.get("realizedPnl") or row.get("cashPnl") or 0.0)
         slug = row_slug(row)
         if end_ts >= cutoff_7d:
@@ -159,18 +202,46 @@ def build_metrics_from_api(
             if pnl > 0 and float(row.get("avgPrice") or 1.0) < 0.15:
                 longshot_profit_30d += pnl
                 longshot_profit_markets.add(slug)
+    for row in settled_positions:
+        end_ts = _timestamp_from_slug(row) or _timestamp_from_end_date(row) or now
+        pnl = _pnl_value(row)
+        slug = row_slug(row)
+        if end_ts >= cutoff_7d:
+            settled_pnl_by_market_7d[slug] += pnl
+        if end_ts >= cutoff_30d:
+            settled_pnl_by_market_30d[slug] += pnl
+            if pnl > 0 and float(row.get("avgPrice") or 1.0) < 0.15:
+                settled_longshot_profit_30d += pnl
+                settled_longshot_profit_markets.add(slug)
     market_pnls_7d = list(pnl_by_market_7d.values())
     market_pnls_30d = list(pnl_by_market_30d.values())
+    settled_market_pnls_7d = list(settled_pnl_by_market_7d.values())
+    settled_market_pnls_30d = list(settled_pnl_by_market_30d.values())
     closed_position_wins_7d = sum(1 for value in market_pnls_7d if value > 0)
     closed_position_losses_7d = sum(1 for value in market_pnls_7d if value < 0)
     crypto_closed_pnl_estimate_7d = round(sum(market_pnls_7d), 6)
     crypto_closed_pnl_estimate_30d = round(sum(market_pnls_30d), 6)
+    crypto_settled_positions_pnl_7d = round(sum(settled_market_pnls_7d), 6)
+    crypto_settled_positions_pnl_30d = round(sum(settled_market_pnls_30d), 6)
+    settled_positions_available = bool(settled_market_pnls_7d or settled_market_pnls_30d)
     profile_pnl_7d, profile_name_7d, profile_error_7d = _profile_profit(wallet, "7d")
     profile_pnl_30d, profile_name_30d, profile_error_30d = _profile_profit(wallet, "30d")
-    pnl_7d = profile_pnl_7d if profile_pnl_7d is not None else crypto_closed_pnl_estimate_7d
-    pnl_30d = profile_pnl_30d if profile_pnl_30d is not None else crypto_closed_pnl_estimate_30d
-    pnl_source = "profile_profit" if profile_pnl_7d is not None or profile_pnl_30d is not None else "crypto_closed_positions"
-    total_profit_30d = sum(value for value in market_pnls_30d if value > 0)
+    if settled_positions_available:
+        pnl_7d = crypto_settled_positions_pnl_7d
+        pnl_30d = crypto_settled_positions_pnl_30d
+        pnl_source = "crypto_settled_positions"
+    elif profile_pnl_7d is not None or profile_pnl_30d is not None:
+        pnl_7d = profile_pnl_7d if profile_pnl_7d is not None else 0.0
+        pnl_30d = profile_pnl_30d if profile_pnl_30d is not None else 0.0
+        pnl_source = "profile_profit"
+    else:
+        pnl_7d = crypto_closed_pnl_estimate_7d
+        pnl_30d = crypto_closed_pnl_estimate_30d
+        pnl_source = "crypto_closed_positions"
+    concentration_pnls_30d = settled_market_pnls_30d if settled_positions_available else market_pnls_30d
+    source_longshot_profit_30d = settled_longshot_profit_30d if settled_positions_available else longshot_profit_30d
+    source_longshot_profit_markets = settled_longshot_profit_markets if settled_positions_available else longshot_profit_markets
+    total_profit_30d = sum(value for value in concentration_pnls_30d if value > 0)
     last_ts = max([int(row.get("timestamp") or 0) for row in trades] or [0])
     trade_markets_24h = {row_slug(row) for row in trades_24h if row_slug(row)}
     trade_markets_7d = {row_slug(row) for row in trades_7d if row_slug(row)}
@@ -199,20 +270,25 @@ def build_metrics_from_api(
         "profile_pnl_30d": round(profile_pnl_30d, 6) if profile_pnl_30d is not None else None,
         "profile_name": profile_name_30d or profile_name_7d,
         "profile_pnl_error": "; ".join(error for error in [profile_error_7d, profile_error_30d] if error),
+        "crypto_settled_positions_pnl_7d": crypto_settled_positions_pnl_7d,
+        "crypto_settled_positions_pnl_30d": crypto_settled_positions_pnl_30d,
+        "crypto_settled_positions_markets_7d": len(settled_market_pnls_7d),
+        "crypto_settled_positions_markets_30d": len(settled_market_pnls_30d),
+        "crypto_settled_positions_error": positions_error,
         "crypto_closed_pnl_estimate_7d": crypto_closed_pnl_estimate_7d,
         "crypto_closed_pnl_estimate_30d": crypto_closed_pnl_estimate_30d,
         "wins_7d": 0,
         "losses_7d": 0,
         "closed_position_wins_7d": closed_position_wins_7d,
         "closed_position_losses_7d": closed_position_losses_7d,
-        "top1_concentration": round(_concentration(market_pnls_30d, 1), 6),
-        "top3_concentration": round(_concentration(market_pnls_30d, 3), 6),
-        "longshot_profit_share": round(longshot_profit_30d / total_profit_30d, 6) if total_profit_30d > 0 else 0.0,
-        "longshot_profit_markets": len(longshot_profit_markets),
+        "top1_concentration": round(_concentration(concentration_pnls_30d, 1), 6),
+        "top3_concentration": round(_concentration(concentration_pnls_30d, 3), 6),
+        "longshot_profit_share": round(source_longshot_profit_30d / total_profit_30d, 6) if total_profit_30d > 0 else 0.0,
+        "longshot_profit_markets": len(source_longshot_profit_markets),
         "last_active_age_hours": round((now - last_ts) / 3600.0, 3) if last_ts else 999999.0,
         "historical_trades": len(trades),
         "historical_markets": len(all_trade_markets),
         "historical_pnl": round(pnl_30d, 6),
     }
-    metrics.update(behavior_metrics(trades, closed))
+    metrics.update(behavior_metrics(trades, settled_positions or closed))
     return metrics
