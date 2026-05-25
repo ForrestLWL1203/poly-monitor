@@ -114,6 +114,10 @@ Watchlisted wallets are treated as manually protected research targets:
   are available. `watchlist_market_pnl` applies `TRADE`, `SPLIT`, `MERGE`, and
   `REDEEM` cashflows per wallet/market, then the dashboard prefers that result
   for watchlist local observed PnL.
+- `SPLIT`, `MERGE`, and `REDEEM` assume Polymarket's activity `usdcSize` matches
+  `size`. If a future API response breaks that invariant, the observer writes a
+  `watchlist_activity_value_warning` raw event and the dashboard surfaces it in
+  recent events without stopping collection.
 - Activity rows are retained for 30 days while the wallet remains watchlisted
   and 7 days after it is no longer watchlisted; derived `watchlist_market_pnl`
   rows are removed when their underlying activity rows age out.

@@ -586,6 +586,20 @@ def _compact_event(row: dict[str, Any], *, wallet_names: dict[str, str] | None =
         )
     elif event in {"api_error", "observer_error", "score_error"}:
         base.update({"message": row.get("message") or row.get("error") or row.get("reason")})
+    elif event == "watchlist_activity_value_warning":
+        wallet = str(row.get("wallet") or "").lower()
+        base.update(
+            {
+                "wallet": wallet,
+                "wallet_short": compact_wallet(wallet),
+                "name": wallet_names.get(wallet, ""),
+                "activity_type": row.get("activity_type"),
+                "size": row.get("size"),
+                "usdc": row.get("usdc"),
+                "delta": row.get("delta"),
+                "message": row.get("message"),
+            }
+        )
     elif event == "sqlite_cleanup":
         base.update(
             {
@@ -612,7 +626,15 @@ def _is_dashboard_event(row: dict[str, Any]) -> bool:
     event = str(row.get("event") or "")
     if event == "candidate_score":
         return False
-    return event in {"trade_observed", "api_error", "observer_error", "score_error", "archive_pruned", "sqlite_cleanup"}
+    return event in {
+        "trade_observed",
+        "api_error",
+        "observer_error",
+        "score_error",
+        "archive_pruned",
+        "sqlite_cleanup",
+        "watchlist_activity_value_warning",
+    }
 
 
 def _event_label(event: str) -> str:
@@ -624,6 +646,7 @@ def _event_label(event: str) -> str:
         "score_error": "评分异常",
         "archive_pruned": "归档清理",
         "sqlite_cleanup": "数据清理",
+        "watchlist_activity_value_warning": "Activity 金额异常",
     }
     return labels.get(event, event)
 

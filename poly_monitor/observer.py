@@ -466,6 +466,9 @@ class CryptoWalletObserver:
             if trade_rows:
                 self.store.insert_trades(trade_rows)
             for event in inserted:
+                warning = self._activity_value_warning(event)
+                if warning:
+                    self.writer.write(warning)
                 self.writer.write({
                     "event": "watchlist_activity_observed",
                     "observed_at": event["observed_at"],
@@ -481,6 +484,30 @@ class CryptoWalletObserver:
                     "usdc": event["usdc"],
                     "tx_hash": event["tx_hash"],
                 })
+
+    def _activity_value_warning(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        activity_type = str(event.get("activity_type") or "").upper()
+        if activity_type not in {"SPLIT", "MERGE", "REDEEM"}:
+            return None
+        size = float(event.get("size") or 0.0)
+        usdc = float(event.get("usdc") or 0.0)
+        delta = abs(usdc - size)
+        if delta <= 0.01:
+            return None
+        return {
+            "event": "watchlist_activity_value_warning",
+            "observed_at": event.get("observed_at") or dt.datetime.now(dt.timezone.utc).isoformat(),
+            "wallet": str(event.get("wallet") or "").lower(),
+            "activity_type": activity_type,
+            "market_slug": event.get("market_slug"),
+            "condition_id": event.get("condition_id"),
+            "exchange_ts": event.get("exchange_ts"),
+            "size": size,
+            "usdc": usdc,
+            "delta": round(delta, 6),
+            "tx_hash": event.get("tx_hash"),
+            "message": "activity cashflow invariant mismatch: expected usdcSize to match size",
+        }
 
     def _trade_from_activity_event(self, event: dict[str, Any]) -> dict[str, Any]:
         return {

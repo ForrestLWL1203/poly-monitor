@@ -747,6 +747,51 @@ class ObserverContextTests(unittest.TestCase):
         self.assertEqual(trades_count, 1)
         self.assertIn("start", kwargs)
 
+    def test_watchlist_activity_poll_warns_on_cashflow_size_mismatch(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(
+                    ObserverConfig(
+                        data_dir=Path(tmp),
+                        watchlist_activity_poll_sec=0,
+                        watchlist_activity_lookback_sec=600,
+                    )
+                )
+                observer.store.add_watchlist_wallet("0xabc")
+                observer.data_api.fetch_user_activity = AsyncMock(
+                    return_value=[
+                        {
+                            "transactionHash": "0xmerge",
+                            "proxyWallet": "0xabc",
+                            "timestamp": 110,
+                            "conditionId": "0xcond",
+                            "type": "MERGE",
+                            "outcomeIndex": 999,
+                            "slug": "btc-updown-5m-1",
+                            "size": 25,
+                            "usdcSize": 0,
+                        },
+                    ]
+                )
+                try:
+                    with patch.object(observer.writer, "write") as write:
+                        await observer._poll_watchlist_activity_once()
+                    events = [call.args[0] for call in write.call_args_list]
+                    rows = observer.store.wallet_activity_events("0xabc")
+                finally:
+                    observer.store.close()
+                    observer.writer.close()
+                return events, rows
+
+        events, rows = asyncio.run(run_case())
+        warnings = [event for event in events if event["event"] == "watchlist_activity_value_warning"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["activity_type"], "MERGE")
+        self.assertEqual(warnings[0]["size"], 25)
+        self.assertEqual(warnings[0]["usdc"], 0)
+        self.assertEqual(warnings[0]["delta"], 25)
+
     def test_watchlist_activity_poll_uses_last_seen_with_safety_window(self):
         async def run_case():
             with tempfile.TemporaryDirectory() as tmp:

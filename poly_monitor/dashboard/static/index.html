@@ -847,7 +847,8 @@
         candidate_score: "评分",
         api_error: "API异常",
         archive_pruned: "归档清理",
-        sqlite_cleanup: "数据清理"
+        sqlite_cleanup: "数据清理",
+        watchlist_activity_value_warning: "金额异常"
       };
       $("eventCounts").textContent = Object.entries(counts)
         .filter(([k]) => countLabels[k])
@@ -863,6 +864,8 @@
           main = `清理 ${fmt(e.removed, 0)} 个低优先级归档`;
         } else if (e.event === "sqlite_cleanup") {
           main = `清理 ${fmt(e.removed_wallets, 0)} 个钱包 / ${fmt(e.removed_trades, 0)} 笔成交`;
+        } else if (e.event === "watchlist_activity_value_warning") {
+          main = `${e.name || e.wallet_short || ""} ${e.activity_type || ""} size=${fmt(e.size)} usdc=${fmt(e.usdc)} Δ=${fmt(e.delta)}`;
         }
         return `<div class="event">
           <div>${shortTime(e.observed_at || e.exchange_at)}</div>

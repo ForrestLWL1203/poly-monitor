@@ -565,6 +565,35 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(len(status["events"]["recent"]), 1)
         self.assertEqual(status["events"]["recent"][0]["event_label"], "数据清理")
 
+    def test_recent_events_include_watchlist_value_warning(self):
+        from poly_monitor.dashboard.status import build_dashboard_status
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            writer = JsonlEventWriter(data_dir)
+            now = dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc)
+            writer.write(
+                {
+                    "event": "watchlist_activity_value_warning",
+                    "observed_at": now.isoformat(),
+                    "wallet": "0x1111111111111111111111111111111111111111",
+                    "activity_type": "MERGE",
+                    "market_slug": "btc-updown-5m-1",
+                    "size": 25,
+                    "usdc": 0,
+                    "delta": 25,
+                },
+                now=now,
+            )
+            writer.close()
+
+            status = build_dashboard_status(data_dir, now=now + dt.timedelta(seconds=1))
+
+        event = status["events"]["recent"][0]
+        self.assertEqual(event["event_label"], "Activity 金额异常")
+        self.assertEqual(event["activity_type"], "MERGE")
+        self.assertEqual(event["delta"], 25)
+
     def test_tail_raw_events_reads_only_recent_lines(self):
         from poly_monitor.dashboard.status import _tail_raw_events
 
