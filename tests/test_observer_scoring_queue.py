@@ -10,6 +10,53 @@ from poly_monitor.scoring import CandidateScore
 
 
 class ObserverScoringQueueTests(unittest.TestCase):
+    def test_merge_activity_ledger_overrides_profile_pnl_for_primary_scoring_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp)))
+            try:
+                api_metrics = {
+                    "wallet": "0xmerge",
+                    "pnl_7d": 9339.61,
+                    "pnl_30d": 66175.756,
+                    "historical_pnl": 66175.756,
+                    "pnl_source": "profile_portfolio_pnl",
+                    "wins_7d": 0,
+                    "losses_7d": 0,
+                    "closed_position_wins_7d": 9,
+                    "closed_position_losses_7d": 0,
+                }
+                local_metrics = {
+                    "wallet": "0xmerge",
+                    "pnl_7d": -684.776326,
+                    "pnl_30d": -684.776326,
+                    "pnl_total": -684.776326,
+                    "historical_pnl": -684.776326,
+                    "pnl_source": "local_observed_ledger",
+                    "wins_7d": 82,
+                    "losses_7d": 83,
+                    "settled_markets_7d": 165,
+                    "settled_markets_30d": 165,
+                    "settled_markets_total": 165,
+                    "activity_ledger_markets_total": 148,
+                    "merge_or_split_markets_total": 138,
+                    "observed_span_hours": 24.0,
+                }
+
+                metrics = observer._merge_api_and_local_metrics(api_metrics, local_metrics)
+            finally:
+                observer.writer.close()
+                observer.store.close()
+
+        self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
+        self.assertEqual(metrics["pnl_display_source"], "local_window_ledger")
+        self.assertAlmostEqual(metrics["pnl_7d"], -684.776326)
+        self.assertAlmostEqual(metrics["pnl_30d"], -684.776326)
+        self.assertAlmostEqual(metrics["historical_pnl"], -684.776326)
+        self.assertAlmostEqual(metrics["profile_reference_pnl_7d"], 9339.61)
+        self.assertAlmostEqual(metrics["profile_reference_pnl_30d"], 66175.756)
+        self.assertEqual(metrics["activity_ledger_markets_total"], 148)
+        self.assertEqual(metrics["merge_or_split_markets_total"], 138)
+
     def test_score_batch_reserves_a_slot_for_discovery_wallets(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

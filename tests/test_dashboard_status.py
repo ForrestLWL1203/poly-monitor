@@ -354,7 +354,7 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertAlmostEqual(detail["ledger_summary"]["realized_pnl"], 0.0)
         self.assertTrue(detail["settled_markets"][0]["incomplete"])
 
-    def test_watchlist_dashboard_keeps_official_pnl_and_activity_detail(self):
+    def test_watchlist_dashboard_uses_local_window_pnl_for_activity_ledger_wallet(self):
         from poly_monitor.dashboard.status import build_dashboard_status, wallet_detail
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -369,7 +369,26 @@ class DashboardStatusTests(unittest.TestCase):
                     status="active_candidate",
                     rank_score=10,
                     reasons=[],
-                    metrics={"wallet": wallet, "pnl_total": -999, "pnl_7d": 7, "pnl_30d": 30, "wins_7d": 0, "losses_7d": 1},
+                    metrics={
+                        "wallet": wallet,
+                        "pnl_total": 30,
+                        "pnl_7d": 30,
+                        "pnl_30d": 30,
+                        "historical_pnl": 30,
+                        "pnl_source": "profile_portfolio_pnl",
+                        "profile_reference_pnl_7d": 30,
+                        "profile_reference_pnl_30d": 30,
+                        "local_observed_pnl_total": 4,
+                        "local_observed_pnl_7d": 4,
+                        "local_observed_pnl_30d": 4,
+                        "local_observed_historical_pnl": 4,
+                        "local_observed_pnl_source": "local_observed_ledger",
+                        "activity_ledger_markets_total": 1,
+                        "merge_or_split_markets_total": 1,
+                        "pnl_display_source": "local_window_ledger",
+                        "wins_7d": 1,
+                        "losses_7d": 0,
+                    },
                 )
             )
             store.upsert_market_settlement(
@@ -437,10 +456,15 @@ class DashboardStatusTests(unittest.TestCase):
             detail = wallet_detail(data_dir, wallet)
 
         row = status["candidates"]["watchlist"][0]
-        self.assertEqual(row["metrics"]["pnl_7d"], 7)
-        self.assertEqual(row["metrics"]["pnl_30d"], 30)
-        self.assertNotIn("local_observed_pnl_total", row["metrics"])
-        self.assertNotIn("local_observed_pnl_source", row["metrics"])
+        self.assertEqual(row["metrics"]["pnl_7d"], 4)
+        self.assertEqual(row["metrics"]["pnl_30d"], 4)
+        self.assertEqual(row["metrics"]["historical_pnl"], 4)
+        self.assertEqual(row["metrics"]["pnl_source"], "local_observed_ledger")
+        self.assertEqual(row["metrics"]["pnl_display_source"], "local_window_ledger")
+        self.assertEqual(row["metrics"]["profile_reference_pnl_7d"], 30)
+        self.assertEqual(row["metrics"]["local_observed_pnl_total"], 4)
+        self.assertEqual(row["metrics"]["activity_ledger_markets_total"], 1)
+        self.assertEqual(row["metrics"]["merge_or_split_markets_total"], 1)
         self.assertEqual([event["activity_type"] for event in detail["activity_events"]], ["MERGE", "TRADE", "TRADE"])
         self.assertEqual(detail["activity_events"][0]["tx_hash"], "0xmerge")
 

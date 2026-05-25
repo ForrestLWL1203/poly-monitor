@@ -1046,6 +1046,12 @@ class CryptoWalletObserver:
             "incomplete_settled_markets_7d",
             "incomplete_settled_markets_30d",
             "incomplete_settled_markets_total",
+            "activity_ledger_markets_7d",
+            "activity_ledger_markets_30d",
+            "activity_ledger_markets_total",
+            "merge_or_split_markets_7d",
+            "merge_or_split_markets_30d",
+            "merge_or_split_markets_total",
             "historical_trades",
             "historical_markets",
             "historical_pnl",
@@ -1061,6 +1067,26 @@ class CryptoWalletObserver:
             metrics["wins_7d"] = local_metrics.get("wins_7d", 0)
             metrics["losses_7d"] = local_metrics.get("losses_7d", 0)
         metrics["local_observed_pnl_source"] = local_metrics.get("pnl_source", "local_observed")
+        if int(local_metrics.get("activity_ledger_markets_total") or 0) > 0:
+            metrics.setdefault("profile_reference_pnl_7d", api_metrics.get("pnl_7d"))
+            metrics.setdefault("profile_reference_pnl_30d", api_metrics.get("pnl_30d"))
+            metrics.setdefault("profile_reference_historical_pnl", api_metrics.get("historical_pnl"))
+            for key in (
+                "pnl_7d",
+                "pnl_30d",
+                "pnl_total",
+                "historical_pnl",
+                "pnl_source",
+                "activity_ledger_markets_7d",
+                "activity_ledger_markets_30d",
+                "activity_ledger_markets_total",
+                "merge_or_split_markets_7d",
+                "merge_or_split_markets_30d",
+                "merge_or_split_markets_total",
+            ):
+                if key in local_metrics:
+                    metrics[key] = local_metrics[key]
+            metrics["pnl_display_source"] = "local_window_ledger"
         return metrics
 
     def _apply_local_observed_24h_override(self, metrics: dict[str, Any]) -> None:

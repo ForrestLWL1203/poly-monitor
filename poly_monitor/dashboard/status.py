@@ -255,15 +255,49 @@ def _normalize_candidate(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-_DASHBOARD_LOCAL_OBSERVED_ALLOWLIST: frozenset[str] = frozenset()
+_DASHBOARD_LOCAL_OBSERVED_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "local_observed_pnl_7d",
+        "local_observed_pnl_30d",
+        "local_observed_pnl_total",
+        "local_observed_historical_pnl",
+        "local_observed_pnl_source",
+        "local_observed_wins_7d",
+        "local_observed_losses_7d",
+        "local_observed_settled_markets_7d",
+        "local_observed_settled_markets_30d",
+        "local_observed_settled_markets_total",
+    }
+)
 
 
 def _dashboard_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
-    return {
+    filtered = {
         key: value
         for key, value in metrics.items()
         if not key.startswith("local_observed_") or key in _DASHBOARD_LOCAL_OBSERVED_ALLOWLIST
     }
+    if int(filtered.get("activity_ledger_markets_total") or 0) > 0:
+        filtered.setdefault("profile_reference_pnl_7d", metrics.get("pnl_7d"))
+        filtered.setdefault("profile_reference_pnl_30d", metrics.get("pnl_30d"))
+        filtered.setdefault("profile_reference_historical_pnl", metrics.get("historical_pnl"))
+        local_key_pairs = (
+            ("local_observed_pnl_7d", "pnl_7d"),
+            ("local_observed_pnl_30d", "pnl_30d"),
+            ("local_observed_pnl_total", "pnl_total"),
+            ("local_observed_historical_pnl", "historical_pnl"),
+            ("local_observed_pnl_source", "pnl_source"),
+            ("local_observed_wins_7d", "wins_7d"),
+            ("local_observed_losses_7d", "losses_7d"),
+            ("local_observed_settled_markets_7d", "settled_markets_7d"),
+            ("local_observed_settled_markets_30d", "settled_markets_30d"),
+            ("local_observed_settled_markets_total", "settled_markets_total"),
+        )
+        for local_key, target_key in local_key_pairs:
+            if local_key in filtered:
+                filtered[target_key] = filtered[local_key]
+        filtered["pnl_display_source"] = "local_window_ledger"
+    return filtered
 
 
 def _wallet_24h_symbol_counts(conn: sqlite3.Connection, wallet: str) -> dict[str, int]:
