@@ -202,6 +202,139 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["pnl_total"], 16.115315)
         self.assertEqual(metrics["pnl_source"], "watchlist_activity_ledger")
 
+    def test_watchlist_cashflow_activity_suppresses_traditional_pnl_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "observer.sqlite"
+            store = ObserverStore(path)
+            try:
+                wallet = "0xa6896d11f76dfa2820662c1f441496f51553559b"
+                market = "btc-updown-5m-split"
+                store.add_watchlist_wallet(wallet)
+                store.insert_trades(
+                    [
+                        {
+                            **trade_row(wallet, market, 100, tx_hash="tx-up", outcome="Up", price=0.0, size=10),
+                            "usdc": 0.0,
+                        },
+                        {
+                            **trade_row(wallet, market, 101, tx_hash="tx-down", outcome="Down", price=0.0, size=10),
+                            "usdc": 0.0,
+                        },
+                    ]
+                )
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": f"cond-{market}",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-25T07:40:00+00:00",
+                        "completed": True,
+                    }
+                )
+                self.assertAlmostEqual(store.wallet_market_pnl_rows(wallet)[0]["realized_pnl"], 10.0)
+
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xsplit",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": f"cond-{market}",
+                            "symbol": "BTC",
+                            "exchange_ts": 99,
+                            "activity_type": "SPLIT",
+                            "outcome_index": 999,
+                            "size": 10,
+                            "usdc": 10,
+                            "observed_at": "2026-05-25T07:30:00+00:00",
+                        },
+                    ]
+                )
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": f"cond-{market}",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-25T07:40:00+00:00",
+                        "completed": True,
+                    }
+                )
+                traditional_rows = store.wallet_market_pnl_rows(wallet)
+                watchlist_rows = store.watchlist_market_pnl_rows(wallet)
+            finally:
+                store.close()
+
+        self.assertEqual(traditional_rows, [])
+        self.assertEqual(len(watchlist_rows), 1)
+        self.assertAlmostEqual(watchlist_rows[0]["realized_pnl"], 0.0)
+        self.assertAlmostEqual(watchlist_rows[0]["split_usdc"], 10.0)
+
+    def test_store_startup_purges_traditional_pnl_shadowed_by_activity_cashflows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "observer.sqlite"
+            wallet = "0xa6896d11f76dfa2820662c1f441496f51553559b"
+            market = "btc-updown-5m-split"
+            store = ObserverStore(path)
+            try:
+                store.insert_trade(
+                    {
+                        **trade_row(wallet, market, 100, tx_hash="tx-up", outcome="Up", price=0.0, size=10),
+                        "usdc": 0.0,
+                    }
+                )
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": f"cond-{market}",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-25T07:40:00+00:00",
+                        "completed": True,
+                    }
+                )
+                store.conn.execute(
+                    """
+                    INSERT INTO wallet_activity_events(
+                        tx_hash,wallet,market_slug,condition_id,symbol,exchange_ts,activity_type,
+                        side,outcome,outcome_index,price,size,usdc,asset,name,pseudonym,raw_json,observed_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        "0xsplit",
+                        wallet,
+                        market,
+                        f"cond-{market}",
+                        "BTC",
+                        99,
+                        "SPLIT",
+                        "",
+                        "",
+                        999,
+                        0.0,
+                        10.0,
+                        10.0,
+                        "",
+                        "",
+                        "",
+                        "{}",
+                        "2026-05-25T07:30:00+00:00",
+                    ),
+                )
+                store.conn.commit()
+                self.assertEqual(len(store.wallet_market_pnl_rows(wallet)), 1)
+            finally:
+                store.close()
+
+            store = ObserverStore(path)
+            try:
+                rows = store.wallet_market_pnl_rows(wallet)
+            finally:
+                store.close()
+
+        self.assertEqual(rows, [])
+
     def test_watchlist_store_initializes_only_watchlist_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"

@@ -118,6 +118,10 @@ Watchlisted wallets are treated as manually protected research targets:
   `size`. If a future API response breaks that invariant, the observer writes a
   `watchlist_activity_value_warning` raw event and the dashboard surfaces it in
   recent events without stopping collection.
+- When a wallet/market has watchlist `SPLIT`, `MERGE`, or `REDEEM` rows, the
+  legacy `wallet_market_pnl` row is removed and future settlement recomputes skip
+  it. The activity ledger is the source of truth for that wallet/market because
+  the legacy trade table cannot represent those cashflows.
 - Activity rows are retained for 30 days while the wallet remains watchlisted
   and 7 days after it is no longer watchlisted; derived `watchlist_market_pnl`
   rows are removed when their underlying activity rows age out.

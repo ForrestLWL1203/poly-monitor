@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+ACTIVITY_CASHFLOW_TYPES = ("SPLIT", "MERGE", "REDEEM")
+
 
 def utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
@@ -360,6 +362,7 @@ class ObserverStore:
             CREATE INDEX IF NOT EXISTS idx_watchlist_market_pnl_market ON watchlist_market_pnl(market_slug);
             """
         )
+        self._purge_traditional_pnl_shadowed_by_activity_cashflows()
         self.conn.commit()
 
     def add_watchlist_wallet(self, wallet: str, *, note: str = "") -> None:
@@ -511,6 +514,8 @@ class ObserverStore:
         if not rows:
             self.conn.execute("DELETE FROM watchlist_market_pnl WHERE wallet=? AND market_slug=?", (wallet, market_slug))
             return
+        if self._has_activity_cashflow_rows(wallet, market_slug):
+            self.conn.execute("DELETE FROM wallet_market_pnl WHERE wallet=? AND market_slug=?", (wallet, market_slug))
         settlement = self.conn.execute(
             """
             SELECT *
@@ -851,6 +856,9 @@ class ObserverStore:
             item["trades"] += 1
         winning_side = str(settlement["winning_side"])
         for wallet, item in by_wallet.items():
+            if self._has_activity_cashflow_rows(wallet, market_slug):
+                self.conn.execute("DELETE FROM wallet_market_pnl WHERE wallet=? AND market_slug=?", (wallet, market_slug))
+                continue
             settled_value = float(item["up"] if winning_side.lower() == "up" else item["down"])
             realized = float(item["cash"]) + settled_value
             incomplete = int(float(item["up"]) < -1e-6 or float(item["down"]) < -1e-6)
@@ -879,6 +887,34 @@ class ObserverStore:
                     incomplete,
                 ),
             )
+
+    def _has_activity_cashflow_rows(self, wallet: str, market_slug: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM wallet_activity_events
+            WHERE wallet=? AND market_slug=? AND activity_type IN (?, ?, ?)
+            LIMIT 1
+            """,
+            (wallet.lower(), market_slug, *ACTIVITY_CASHFLOW_TYPES),
+        ).fetchone()
+        return row is not None
+
+    def _purge_traditional_pnl_shadowed_by_activity_cashflows(self) -> int:
+        cursor = self.conn.execute(
+            """
+            DELETE FROM wallet_market_pnl
+            WHERE EXISTS (
+                SELECT 1
+                FROM wallet_activity_events AS events
+                WHERE events.wallet = wallet_market_pnl.wallet
+                  AND events.market_slug = wallet_market_pnl.market_slug
+                  AND events.activity_type IN (?, ?, ?)
+            )
+            """,
+            ACTIVITY_CASHFLOW_TYPES,
+        )
+        return int(cursor.rowcount or 0)
 
     def wallet_market_pnl_rows(self, wallet: str | None = None) -> list[dict[str, Any]]:
         if wallet is None:
