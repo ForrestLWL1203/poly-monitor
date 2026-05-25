@@ -224,7 +224,7 @@
     .score_error { color: var(--bad); }
     .split {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(320px, 430px);
+      grid-template-columns: minmax(0, 1fr);
       gap: 18px;
     }
     .events {
@@ -253,6 +253,52 @@
       padding: 14px;
       display: grid;
       gap: 14px;
+    }
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: grid;
+      place-items: center;
+      padding: 22px;
+      background: rgba(5, 8, 10, 0.72);
+    }
+    .modal-panel {
+      width: min(920px, 100%);
+      max-height: min(86vh, 900px);
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+      overflow: hidden;
+    }
+    .modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #151a1e;
+    }
+    .modal-title {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+    }
+    .modal-title h2 {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .modal-panel .detail {
+      overflow: auto;
+      max-height: 100%;
+    }
+    body.modal-open {
+      overflow: hidden;
     }
     .kv {
       display: grid;
@@ -301,6 +347,9 @@
       .health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .split { grid-template-columns: 1fr; }
       main { padding: 12px; }
+      .modal-overlay { padding: 10px; align-items: end; }
+      .modal-panel { max-height: 92vh; }
+      .kv { grid-template-columns: 1fr; }
       .event { grid-template-columns: 90px 54px 1fr; }
       .event .optional { display: none; }
     }
@@ -368,10 +417,6 @@
           </div>
         </section>
 
-        <section class="band">
-          <div class="band-head"><h2>钱包详情</h2><span id="detailTitle" class="subtle"></span></div>
-          <div id="walletDetail" class="detail"><div class="empty">选择一个地址查看细节</div></div>
-        </section>
       </section>
 
       <section class="band">
@@ -379,6 +424,19 @@
         <div id="events" class="events"></div>
       </section>
     </main>
+
+    <div id="detailOverlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="detailHeading">
+      <section class="modal-panel">
+        <div class="modal-head">
+          <div class="modal-title">
+            <h2 id="detailHeading">钱包详情</h2>
+            <span id="detailTitle" class="subtle"></span>
+          </div>
+          <button id="detailClose" class="icon-button" title="关闭">×</button>
+        </div>
+        <div id="walletDetail" class="detail"></div>
+      </section>
+    </div>
   </section>
 
   <script>
@@ -588,7 +646,6 @@
       if (watchlisted) currentGroup = "watchlist";
       else if (currentGroup === "watchlist") currentGroup = "active_candidate";
       await load();
-      await loadWallet(wallet);
     }
 
     async function load() {
@@ -697,7 +754,8 @@
 
     async function loadWallet(wallet) {
       const detail = await api(`/api/wallet?address=${encodeURIComponent(wallet)}`);
-      $("detailTitle").textContent = detail.metrics?.name || detail.wallet_short || "";
+      $("detailHeading").textContent = shortName(detail.metrics?.name || detail.wallet_short || "钱包详情", 36);
+      $("detailTitle").textContent = detail.wallet || "";
       const m = detail.metrics || {};
       const ledger = detail.ledger_summary || {};
       const kv = [
@@ -727,6 +785,21 @@
         <div class="addr" title="${detail.wallet}">${detail.wallet}</div>
         <div class="kv">${kv.map(([k, v]) => `<div><div class="subtle">${k}</div><strong>${v}</strong></div>`).join("")}</div>
         <div class="subtle">${reasonText(detail)}</div>`;
+      openWalletModal();
+    }
+
+    function openWalletModal() {
+      $("detailOverlay").classList.remove("hidden");
+      document.body.classList.add("modal-open");
+      $("detailClose").focus();
+    }
+
+    function closeWalletModal() {
+      $("detailOverlay").classList.add("hidden");
+      document.body.classList.remove("modal-open");
+      $("walletDetail").innerHTML = "";
+      $("detailTitle").textContent = "";
+      $("detailHeading").textContent = "钱包详情";
     }
 
     function renderEvents(events) {
@@ -769,6 +842,13 @@
     $("stopObserver").addEventListener("click", () => stopObserver().catch(() => alert("停止失败，请检查 dashboard 日志")));
     $("refresh").addEventListener("click", load);
     $("logout").addEventListener("click", logout);
+    $("detailClose").addEventListener("click", closeWalletModal);
+    $("detailOverlay").addEventListener("click", (event) => {
+      if (event.target === $("detailOverlay")) closeWalletModal();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !$("detailOverlay").classList.contains("hidden")) closeWalletModal();
+    });
     load().catch(() => showLogin());
     setInterval(() => { if (!$("app").classList.contains("hidden")) load().catch(() => {}); }, 15000);
   </script>
