@@ -242,6 +242,117 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(score.status, "dormant_candidate")
         self.assertIn("markets_24h_below_threshold", score.reasons)
 
+    def test_local_observed_losses_downgrade_high_frequency_wallet(self):
+        metrics = {
+            "wallet": "0x95fa",
+            "trades_24h": 1349,
+            "markets_24h": 288,
+            "markets_24h_lower_bound": True,
+            "trades_7d": 1349,
+            "markets_7d": 182,
+            "trades_30d": 1349,
+            "markets_30d": 182,
+            "pnl_7d": 13705.24,
+            "pnl_30d": 24602.39,
+            "pnl_source": "crypto_closed_positions",
+            "wins_7d": 6,
+            "losses_7d": 7,
+            "local_observed_pnl_7d": -7.09,
+            "local_observed_settled_markets_7d": 13,
+            "local_observed_wins_7d": 6,
+            "local_observed_losses_7d": 7,
+            "top1_concentration": 0.014,
+            "top3_concentration": 0.038,
+            "longshot_profit_share": 0.003,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.05,
+            "historical_trades": 1349,
+            "historical_markets": 182,
+            "historical_pnl": 24602.39,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "dormant_candidate")
+        self.assertIn("local_observed_pnl_7d_not_positive", score.reasons)
+        self.assertIn("local_observed_wins_7d_not_above_losses", score.reasons)
+
+    def test_local_observed_quality_can_promote_moderate_frequency_wallet(self):
+        metrics = {
+            "wallet": "0xcbcf",
+            "trades_24h": 229,
+            "markets_24h": 73,
+            "markets_24h_lower_bound": True,
+            "trades_7d": 568,
+            "markets_7d": 170,
+            "trades_30d": 1057,
+            "markets_30d": 359,
+            "pnl_7d": 6486.59,
+            "pnl_30d": 23841.49,
+            "pnl_source": "crypto_closed_positions",
+            "wins_7d": 9,
+            "losses_7d": 2,
+            "local_observed_pnl_7d": 529.42,
+            "local_observed_settled_markets_7d": 11,
+            "local_observed_wins_7d": 9,
+            "local_observed_losses_7d": 2,
+            "top1_concentration": 0.039,
+            "top3_concentration": 0.101,
+            "longshot_profit_share": 0.023,
+            "longshot_profit_markets": 3,
+            "last_active_age_hours": 0.8,
+            "historical_trades": 1057,
+            "historical_markets": 359,
+            "historical_pnl": 23841.49,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "active_candidate")
+        self.assertNotIn("markets_24h_below_threshold", score.reasons)
+
+    def test_rank_penalizes_extreme_frequency_when_quality_is_similar(self):
+        moderate_frequency = {
+            "wallet": "0xmoderate",
+            "trades_24h": 220,
+            "markets_24h": 60,
+            "markets_24h_lower_bound": True,
+            "trades_7d": 700,
+            "trades_30d": 1200,
+            "pnl_7d": 500,
+            "pnl_30d": 1500,
+            "wins_7d": 18,
+            "losses_7d": 6,
+            "local_observed_pnl_7d": 500,
+            "local_observed_settled_markets_7d": 24,
+            "local_observed_wins_7d": 18,
+            "local_observed_losses_7d": 6,
+            "top1_concentration": 0.08,
+            "top3_concentration": 0.2,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 1200,
+            "historical_markets": 220,
+            "historical_pnl": 1500,
+        }
+        extreme_frequency = {
+            **moderate_frequency,
+            "wallet": "0xextreme",
+            "trades_24h": 1800,
+            "markets_24h": 288,
+            "trades_7d": 4000,
+            "trades_30d": 8000,
+            "historical_trades": 8000,
+        }
+
+        moderate = score_wallet(moderate_frequency, CandidateThresholds())
+        extreme = score_wallet(extreme_frequency, CandidateThresholds())
+
+        self.assertEqual(moderate.status, "active_candidate")
+        self.assertEqual(extreme.status, "active_candidate")
+        self.assertGreater(moderate.rank_score, extreme.rank_score)
+
     def test_score_wallet_rejects_negative_7d_pnl_on_api_metrics(self):
         metrics = {
             "wallet": "0xabc",

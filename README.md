@@ -116,6 +116,14 @@ Watchlisted wallets are treated as manually protected research targets:
 - Dashboard win/loss counts use locally observed settled markets. Polymarket
   closed-position rows are not used for win/loss because that endpoint can be
   biased toward winning outcome positions and does not match profile daily PnL.
+- Once a wallet has enough local settled markets, local observed PnL and
+  win/loss quality gate active status. Locally losing wallets can drop out of
+  active even if they trade frequently, and they can return after their local
+  ledger turns positive again.
+- Very high frequency is capped and penalized in ranking because it is harder to
+  follow under realistic network and execution delay. Moderate-frequency
+  wallets with stable local profit can qualify for active with a lower 24h
+  market-count threshold.
 - A wallet can become an active candidate soon after it is first observed if the
   historical API metrics already satisfy the activity and profitability gates.
   It still needs local follow/replay evidence before any paper or live copy

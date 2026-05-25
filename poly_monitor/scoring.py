@@ -16,6 +16,8 @@ class CandidateThresholds:
     min_repeat_longshot_profit_markets: int = 3
     min_resolved_markets_for_win_loss_check: int = 20
     min_settled_markets_for_local_active: int = 5
+    min_local_quality_markets_for_gate: int = 10
+    min_quality_markets_24h: int = 30
     active_max_age_hours: float = 48.0
     archive_age_hours: float = 14 * 24.0
     dormant_min_historical_trades: int = 500
@@ -39,6 +41,32 @@ def _num(metrics: dict[str, Any], key: str, default: float = 0.0) -> float:
         return default
 
 
+def _local_settled_7d(metrics: dict[str, Any]) -> float:
+    return _num(metrics, "local_observed_settled_markets_7d", _num(metrics, "settled_markets_7d"))
+
+
+def _local_pnl_7d(metrics: dict[str, Any]) -> float:
+    return _num(metrics, "local_observed_pnl_7d", _num(metrics, "pnl_7d"))
+
+
+def _local_wins_7d(metrics: dict[str, Any]) -> float:
+    return _num(metrics, "local_observed_wins_7d", _num(metrics, "wins_7d"))
+
+
+def _local_losses_7d(metrics: dict[str, Any]) -> float:
+    return _num(metrics, "local_observed_losses_7d", _num(metrics, "losses_7d"))
+
+
+def _has_local_quality_sample(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
+    return _local_settled_7d(metrics) >= thresholds.min_local_quality_markets_for_gate
+
+
+def _local_quality_passes(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
+    if not _has_local_quality_sample(metrics, thresholds):
+        return False
+    return _local_pnl_7d(metrics) > 0 and _local_wins_7d(metrics) > _local_losses_7d(metrics)
+
+
 def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -> list[str]:
     longshot_high = _num(metrics, "longshot_profit_share") > thresholds.max_longshot_profit_share
     repeat_longshot = _num(metrics, "longshot_profit_markets") >= thresholds.min_repeat_longshot_profit_markets
@@ -47,10 +75,16 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
     losses = _num(metrics, "losses_7d")
     resolved_markets = wins + losses
     win_loss_failed = resolved_markets >= thresholds.min_resolved_markets_for_win_loss_check and wins < losses
+    has_local_quality_sample = _has_local_quality_sample(metrics, thresholds)
+    local_quality_passes = _local_quality_passes(metrics, thresholds)
+    if local_quality_passes:
+        market_activity_failed = markets_24h < thresholds.min_quality_markets_24h
+    else:
+        market_activity_failed = markets_24h < thresholds.min_markets_24h
     check_pnl_7d = metrics.get("pnl_source") != "local_observed_ledger" or _num(metrics, "settled_markets_7d") >= 1
     checks = [
         ("trades_7d_below_threshold", _num(metrics, "trades_7d") < thresholds.min_trades_7d),
-        ("markets_24h_below_threshold", markets_24h < thresholds.min_markets_24h),
+        ("markets_24h_below_threshold", market_activity_failed),
         ("trades_30d_below_threshold", _num(metrics, "trades_30d") < thresholds.min_trades_30d),
         (
             "settled_markets_7d_below_threshold",
@@ -58,6 +92,11 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
             and _num(metrics, "settled_markets_7d") < thresholds.min_settled_markets_for_local_active,
         ),
         ("pnl_7d_not_positive", check_pnl_7d and _num(metrics, "pnl_7d") <= 0),
+        ("local_observed_pnl_7d_not_positive", has_local_quality_sample and _local_pnl_7d(metrics) <= 0),
+        (
+            "local_observed_wins_7d_not_above_losses",
+            has_local_quality_sample and _local_wins_7d(metrics) <= _local_losses_7d(metrics),
+        ),
         ("pnl_30d_not_positive", _num(metrics, "pnl_30d") <= 0),
         ("wins_7d_below_losses", win_loss_failed),
         ("top1_concentration_high", _num(metrics, "top1_concentration") > thresholds.max_top1_concentration),
@@ -116,12 +155,12 @@ def _active_rank_score(metrics: dict[str, Any]) -> float:
         markets_24h = max(markets_24h, min(120.0, _num(metrics, "trades_24h") / 10.0))
     last_active_age = _num(metrics, "last_active_age_hours", 999999)
 
-    quality = win_rate * 360.0
-    sample_confidence = _capped(resolved_markets, 100.0) * 1.5
+    quality = win_rate * 420.0
+    sample_confidence = _capped(resolved_markets, 80.0) * 2.0
     activity = (
-        _capped(markets_24h, 120.0) * 2.2
-        + _capped(trades_7d, 2500.0) * 0.08
-        + _capped(trades_30d, 6000.0) * 0.025
+        _capped(markets_24h, 80.0) * 0.8
+        + _capped(trades_7d, 1000.0) * 0.025
+        + _capped(trades_30d, 3000.0) * 0.008
     )
     pnl_bonus = (
         _log_bonus(_num(metrics, "pnl_7d"), scale=18.0, cap=75.0)
@@ -131,9 +170,13 @@ def _active_rank_score(metrics: dict[str, Any]) -> float:
         _num(metrics, "top1_concentration") * 130.0
         + _num(metrics, "top3_concentration") * 90.0
     )
+    high_frequency_penalty = (
+        _capped(markets_24h - 80.0, 220.0) * 1.8
+        + _capped(_num(metrics, "trades_24h") - 400.0, 2500.0) * 0.05
+    )
     recency_penalty = _capped(last_active_age, 48.0) * 1.5
 
-    return quality + sample_confidence + activity + pnl_bonus - stability_penalty - recency_penalty
+    return quality + sample_confidence + activity + pnl_bonus - stability_penalty - high_frequency_penalty - recency_penalty
 
 
 def _dormant_rank_score(metrics: dict[str, Any]) -> float:
