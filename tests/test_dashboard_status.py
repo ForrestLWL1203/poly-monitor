@@ -227,7 +227,7 @@ class DashboardStatusTests(unittest.TestCase):
             detail = wallet_detail(data_dir, wallet)
 
         metrics = status["candidates"]["active_candidate"][0]["metrics"]
-        self.assertEqual(metrics["markets_24h"], 3)
+        self.assertEqual(metrics["markets_24h"], 999)
         self.assertEqual(metrics["btc_markets_24h"], 2)
         self.assertEqual(metrics["eth_markets_24h"], 1)
         self.assertEqual(detail["metrics"]["btc_markets_24h"], 2)

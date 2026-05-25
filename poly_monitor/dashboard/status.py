@@ -186,7 +186,7 @@ def _sqlite_candidates(data_dir: Path) -> dict[str, list[dict[str, Any]]]:
             is_watched = wallet in watchlist
             if isinstance(metrics, dict):
                 metrics = _dashboard_metrics(metrics)
-                metrics.update(_wallet_24h_counts(conn, wallet))
+                metrics.update(_wallet_24h_symbol_counts(conn, wallet))
             item = _normalize_candidate(
                 {
                     "wallet": wallet,
@@ -266,13 +266,11 @@ def _dashboard_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _wallet_24h_counts(conn: sqlite3.Connection, wallet: str) -> dict[str, int]:
+def _wallet_24h_symbol_counts(conn: sqlite3.Connection, wallet: str) -> dict[str, int]:
     try:
         row = conn.execute(
             """
             SELECT
-                COUNT(*) AS trades_24h,
-                COUNT(DISTINCT market_slug) AS markets_24h,
                 COUNT(DISTINCT CASE
                     WHEN market_slug LIKE 'btc-updown-5m-%'
                     THEN substr(market_slug, length('btc-updown-5m-') + 1)
@@ -291,11 +289,8 @@ def _wallet_24h_counts(conn: sqlite3.Connection, wallet: str) -> dict[str, int]:
     if row is None:
         return {}
     return {
-        "trades_24h": int(row["trades_24h"] or 0),
-        "markets_24h": int(row["markets_24h"] or 0),
         "btc_markets_24h": int(row["btc_markets_24h"] or 0),
         "eth_markets_24h": int(row["eth_markets_24h"] or 0),
-        "markets_24h_source": "local_observed",
     }
 
 
@@ -862,7 +857,7 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
         metrics = _safe_json_loads(score_row["metrics_json"], {}) if score_row else _wallet_local_metrics(conn, wallet)
         if isinstance(metrics, dict):
             metrics = _dashboard_metrics(metrics)
-            metrics.update(_wallet_24h_counts(conn, wallet))
+            metrics.update(_wallet_24h_symbol_counts(conn, wallet))
         display_name = name_row["name"] if name_row else ""
         if not display_name and isinstance(metrics, dict):
             display_name = str(metrics.get("name") or metrics.get("profile_name") or metrics.get("pseudonym") or "")
