@@ -370,6 +370,82 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertAlmostEqual(detail["ledger_summary"]["realized_pnl"], 4.0)
         self.assertEqual(detail["settled_markets"][0]["pnl_source"], "watchlist_activity_ledger")
 
+    def test_watchlist_dashboard_merges_legacy_observed_pnl(self):
+        from poly_monitor.dashboard.status import build_dashboard_status
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0xa6896d11f76dfa2820662c1f441496f51553559b"
+            old_market = "btc-updown-5m-before-watchlist"
+            new_market = "btc-updown-5m-after-watchlist"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            store.insert_trade(
+                {
+                    "tx_hash": "tx-old",
+                    "fill_id": "",
+                    "wallet": wallet,
+                    "market_slug": old_market,
+                    "condition_id": f"cond-{old_market}",
+                    "symbol": "BTC",
+                    "exchange_ts": 100,
+                    "outcome": "Up",
+                    "side": "BUY",
+                    "price": 0.4,
+                    "size": 10,
+                    "usdc": 4,
+                }
+            )
+            store.upsert_market_settlement(
+                {
+                    "market_slug": old_market,
+                    "condition_id": f"cond-{old_market}",
+                    "symbol": "BTC",
+                    "winning_side": "Up",
+                    "settled_at": "2026-05-25T10:00:00+00:00",
+                    "completed": True,
+                }
+            )
+            store.add_watchlist_wallet(wallet)
+            store.upsert_score(CandidateScore(wallet, "active_candidate", 1.0, [], {"wallet": wallet}))
+            store.upsert_market_settlement(
+                {
+                    "market_slug": new_market,
+                    "condition_id": f"cond-{new_market}",
+                    "symbol": "BTC",
+                    "winning_side": "Up",
+                    "settled_at": "2026-05-25T11:00:00+00:00",
+                    "completed": True,
+                }
+            )
+            store.insert_wallet_activity_events(
+                [
+                    {
+                        "tx_hash": "0xbuy-up",
+                        "wallet": wallet,
+                        "market_slug": new_market,
+                        "condition_id": f"cond-{new_market}",
+                        "symbol": "BTC",
+                        "exchange_ts": 200,
+                        "activity_type": "TRADE",
+                        "side": "BUY",
+                        "outcome": "Up",
+                        "outcome_index": 0,
+                        "price": 0.5,
+                        "size": 10,
+                        "usdc": 5,
+                        "observed_at": "2026-05-25T11:00:00+00:00",
+                    },
+                ]
+            )
+            store.close()
+
+            status = build_dashboard_status(data_dir, now=dt.datetime(2026, 5, 25, 12, tzinfo=dt.timezone.utc))
+
+        metrics = status["candidates"]["watchlist"][0]["metrics"]
+        self.assertAlmostEqual(metrics["local_observed_pnl_total"], 11.0)
+        self.assertEqual(metrics["local_observed_settled_markets_total"], 2)
+        self.assertEqual(metrics["local_observed_pnl_source"], "watchlist_mixed_ledger")
+
     def test_dashboard_caps_archive_candidates(self):
         from poly_monitor.dashboard.status import build_dashboard_status
 

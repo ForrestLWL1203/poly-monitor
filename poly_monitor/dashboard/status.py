@@ -477,29 +477,20 @@ def _watchlist_local_metrics(conn: sqlite3.Connection, wallet: str, *, now: dt.d
     cutoff_7d = (now_value - dt.timedelta(days=7)).isoformat()
     cutoff_30d = (now_value - dt.timedelta(days=30)).isoformat()
     try:
-        rows_7d = conn.execute(
-            "SELECT * FROM watchlist_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=0",
-            (wallet.lower(), cutoff_7d),
-        ).fetchall()
-        rows_30d = conn.execute(
-            "SELECT * FROM watchlist_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=0",
-            (wallet.lower(), cutoff_30d),
-        ).fetchall()
-        rows_total = conn.execute(
-            "SELECT * FROM watchlist_market_pnl WHERE wallet=? AND incomplete=0",
-            (wallet.lower(),),
-        ).fetchall()
+        rows_total, all_rows, source = _combined_watchlist_pnl_rows(conn, wallet)
     except sqlite3.Error:
         return {}
-    if not rows_7d and not rows_30d and not rows_total:
+    if not any(row.get("source") == "watchlist_activity_ledger" for row in all_rows):
         return {}
+    rows_7d = [row for row in rows_total if str(row.get("settled_at") or "") >= cutoff_7d]
+    rows_30d = [row for row in rows_total if str(row.get("settled_at") or "") >= cutoff_30d]
 
-    def pnl(rows: list[sqlite3.Row]) -> float:
-        return round(sum(float(row["realized_pnl"] or 0.0) for row in rows), 6)
+    def pnl(rows: list[dict[str, Any]]) -> float:
+        return round(sum(float(row.get("realized_pnl") or 0.0) for row in rows), 6)
 
     settled_times: list[dt.datetime] = []
     for row in rows_total:
-        raw = str(row["settled_at"] or "")
+        raw = str(row.get("settled_at") or "")
         try:
             settled_times.append(dt.datetime.fromisoformat(raw.replace("Z", "+00:00")))
         except ValueError:
@@ -510,14 +501,34 @@ def _watchlist_local_metrics(conn: sqlite3.Connection, wallet: str, *, now: dt.d
         "local_observed_pnl_7d": pnl(rows_7d),
         "local_observed_pnl_30d": pnl(rows_30d),
         "local_observed_pnl_total": pnl(rows_total),
-        "local_observed_wins_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) > 0),
-        "local_observed_losses_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) < 0),
+        "local_observed_wins_7d": sum(1 for row in rows_7d if float(row.get("realized_pnl") or 0.0) > 0),
+        "local_observed_losses_7d": sum(1 for row in rows_7d if float(row.get("realized_pnl") or 0.0) < 0),
         "local_observed_settled_markets_7d": len(rows_7d),
         "local_observed_settled_markets_30d": len(rows_30d),
         "local_observed_settled_markets_total": len(rows_total),
         "local_observed_span_hours": observed_span_hours,
-        "local_observed_pnl_source": "watchlist_activity_ledger",
+        "local_observed_pnl_source": source,
     }
+
+
+def _combined_watchlist_pnl_rows(conn: sqlite3.Connection, wallet: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    normalized = wallet.lower()
+    watch_rows = [
+        {**dict(row), "source": "watchlist_activity_ledger"}
+        for row in conn.execute("SELECT * FROM watchlist_market_pnl WHERE wallet=?", (normalized,)).fetchall()
+    ]
+    watch_keys = {(str(row["wallet"]), str(row["market_slug"])) for row in watch_rows}
+    legacy_rows: list[dict[str, Any]] = []
+    if _table_exists(conn, "wallet_market_pnl"):
+        legacy_rows = [
+            {**dict(row), "source": "local_observed_ledger"}
+            for row in conn.execute("SELECT * FROM wallet_market_pnl WHERE wallet=?", (normalized,)).fetchall()
+            if (str(row["wallet"]), str(row["market_slug"])) not in watch_keys
+        ]
+    all_rows = watch_rows + legacy_rows
+    complete_rows = [row for row in all_rows if not int(row.get("incomplete") or 0)]
+    source = "watchlist_mixed_ledger" if watch_rows and legacy_rows else "watchlist_activity_ledger"
+    return complete_rows, all_rows, source
 
 
 def recent_trades(data_dir: Path, *, limit: int = 100) -> list[dict[str, Any]]:

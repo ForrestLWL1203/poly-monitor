@@ -113,7 +113,9 @@ Watchlisted wallets are treated as manually protected research targets:
 - Watchlisted wallets use a more precise local activity ledger when those rows
   are available. `watchlist_market_pnl` applies `TRADE`, `SPLIT`, `MERGE`, and
   `REDEEM` cashflows per wallet/market, then the dashboard prefers that result
-  for watchlist local observed PnL.
+  for watchlist local observed PnL. Markets observed before the wallet was added
+  to the watchlist are still included from the legacy local ledger unless the
+  same wallet/market already has a watchlist activity-ledger row.
 - `SPLIT`, `MERGE`, and `REDEEM` assume Polymarket's activity `usdcSize` matches
   `size`. If a future API response breaks that invariant, the observer writes a
   `watchlist_activity_value_warning` raw event and the dashboard surfaces it in

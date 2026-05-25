@@ -202,6 +202,67 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["pnl_total"], 16.115315)
         self.assertEqual(metrics["pnl_source"], "watchlist_activity_ledger")
 
+    def test_watchlist_metrics_merge_pre_watchlist_legacy_markets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                now_ts = int(dt.datetime(2026, 5, 25, 12, 0, tzinfo=dt.timezone.utc).timestamp())
+                wallet = "0xa6896d11f76dfa2820662c1f441496f51553559b"
+                old_market = "btc-updown-5m-before-watchlist"
+                new_market = "btc-updown-5m-after-watchlist"
+                store.insert_trade(trade_row(wallet, old_market, now_ts - 500, tx_hash="tx-old", outcome="Up", price=0.4, size=10))
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": old_market,
+                        "condition_id": f"cond-{old_market}",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-25T10:00:00+00:00",
+                        "completed": True,
+                    }
+                )
+                store.add_watchlist_wallet(wallet)
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": new_market,
+                        "condition_id": f"cond-{new_market}",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-25T11:00:00+00:00",
+                        "completed": True,
+                    }
+                )
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xbuy-up",
+                            "wallet": wallet,
+                            "market_slug": new_market,
+                            "condition_id": f"cond-{new_market}",
+                            "symbol": "BTC",
+                            "exchange_ts": now_ts - 100,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.5,
+                            "size": 10,
+                            "usdc": 5,
+                            "observed_at": "2026-05-25T11:00:00+00:00",
+                        },
+                    ]
+                )
+
+                metrics = store.wallet_trade_metrics(wallet, now_ts=now_ts)
+            finally:
+                store.close()
+
+        self.assertEqual(metrics["pnl_source"], "watchlist_mixed_ledger")
+        self.assertAlmostEqual(metrics["pnl_total"], 11.0)
+        self.assertAlmostEqual(metrics["pnl_7d"], 11.0)
+        self.assertEqual(metrics["settled_markets_total"], 2)
+        self.assertEqual(metrics["wins_7d"], 2)
+
     def test_watchlist_cashflow_activity_suppresses_traditional_pnl_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"

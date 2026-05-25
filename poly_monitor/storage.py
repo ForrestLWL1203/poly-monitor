@@ -947,46 +947,26 @@ class ObserverStore:
         now_value = now_ts if now_ts is not None else int(dt.datetime.now(dt.timezone.utc).timestamp())
         cutoff_7d_iso = dt.datetime.fromtimestamp(now_value - 7 * 86400, dt.timezone.utc).isoformat()
         cutoff_30d_iso = dt.datetime.fromtimestamp(now_value - 30 * 86400, dt.timezone.utc).isoformat()
-        rows_7d = self.conn.execute(
-            "SELECT * FROM watchlist_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=0",
-            (wallet.lower(), cutoff_7d_iso),
-        ).fetchall()
-        rows_30d = self.conn.execute(
-            "SELECT * FROM watchlist_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=0",
-            (wallet.lower(), cutoff_30d_iso),
-        ).fetchall()
-        rows_total = self.conn.execute(
-            "SELECT * FROM watchlist_market_pnl WHERE wallet=? AND incomplete=0",
-            (wallet.lower(),),
-        ).fetchall()
-        all_rows = self.conn.execute(
-            "SELECT * FROM watchlist_market_pnl WHERE wallet=?",
-            (wallet.lower(),),
-        ).fetchall()
-        if not all_rows:
+        complete_rows, all_rows, source = self._combined_watchlist_pnl_rows(wallet)
+        if not any(row["source"] == "watchlist_activity_ledger" for row in all_rows):
             return {}
-        incomplete_7d = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM watchlist_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=1",
-            (wallet.lower(), cutoff_7d_iso),
-        ).fetchone()
-        incomplete_30d = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM watchlist_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=1",
-            (wallet.lower(), cutoff_30d_iso),
-        ).fetchone()
-        incomplete_total = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM watchlist_market_pnl WHERE wallet=? AND incomplete=1",
-            (wallet.lower(),),
-        ).fetchone()
+        rows_7d = [row for row in complete_rows if str(row.get("settled_at") or "") >= cutoff_7d_iso]
+        rows_30d = [row for row in complete_rows if str(row.get("settled_at") or "") >= cutoff_30d_iso]
+        rows_total = complete_rows
+        incomplete_rows = [row for row in all_rows if row.get("incomplete")]
+        incomplete_7d = sum(1 for row in incomplete_rows if str(row.get("settled_at") or "") >= cutoff_7d_iso)
+        incomplete_30d = sum(1 for row in incomplete_rows if str(row.get("settled_at") or "") >= cutoff_30d_iso)
+        incomplete_total = len(incomplete_rows)
 
-        def pnl(rows: list[sqlite3.Row]) -> float:
-            return round(sum(float(row["realized_pnl"] or 0.0) for row in rows), 6)
+        def pnl(rows: list[dict[str, Any]]) -> float:
+            return round(sum(float(row.get("realized_pnl") or 0.0) for row in rows), 6)
 
         pnl_7d = pnl(rows_7d)
         pnl_30d = pnl(rows_30d)
         pnl_total = pnl(rows_total)
         settled_times: list[dt.datetime] = []
         for row in rows_total:
-            raw = str(row["settled_at"] or "")
+            raw = str(row.get("settled_at") or "")
             try:
                 settled_times.append(dt.datetime.fromisoformat(raw.replace("Z", "+00:00")))
             except ValueError:
@@ -997,26 +977,43 @@ class ObserverStore:
             if first_settled is not None
             else 0.0
         )
-        positive_30d = sorted([float(row["realized_pnl"] or 0.0) for row in rows_30d if float(row["realized_pnl"] or 0.0) > 0], reverse=True)
+        positive_30d = sorted([float(row.get("realized_pnl") or 0.0) for row in rows_30d if float(row.get("realized_pnl") or 0.0) > 0], reverse=True)
         positive_total = sum(positive_30d)
         return {
             "pnl_7d": pnl_7d,
             "pnl_30d": pnl_30d,
             "pnl_total": pnl_total,
-            "pnl_source": "watchlist_activity_ledger",
+            "pnl_source": source,
             "observed_span_hours": observed_span_hours,
-            "wins_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) > 0),
-            "losses_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) < 0),
+            "wins_7d": sum(1 for row in rows_7d if float(row.get("realized_pnl") or 0.0) > 0),
+            "losses_7d": sum(1 for row in rows_7d if float(row.get("realized_pnl") or 0.0) < 0),
             "settled_markets_7d": len(rows_7d),
             "settled_markets_30d": len(rows_30d),
             "settled_markets_total": len(rows_total),
-            "incomplete_settled_markets_7d": int(incomplete_7d["n"] or 0),
-            "incomplete_settled_markets_30d": int(incomplete_30d["n"] or 0),
-            "incomplete_settled_markets_total": int(incomplete_total["n"] or 0),
+            "incomplete_settled_markets_7d": incomplete_7d,
+            "incomplete_settled_markets_30d": incomplete_30d,
+            "incomplete_settled_markets_total": incomplete_total,
             "top1_concentration": round((sum(positive_30d[:1]) / positive_total), 6) if positive_total > 0 else 1.0,
             "top3_concentration": round((sum(positive_30d[:3]) / positive_total), 6) if positive_total > 0 else 1.0,
             "historical_pnl": pnl_total,
         }
+
+    def _combined_watchlist_pnl_rows(self, wallet: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+        normalized = wallet.lower()
+        watch_rows = [
+            {**dict(row), "source": "watchlist_activity_ledger"}
+            for row in self.conn.execute("SELECT * FROM watchlist_market_pnl WHERE wallet=?", (normalized,)).fetchall()
+        ]
+        watch_keys = {(str(row["wallet"]), str(row["market_slug"])) for row in watch_rows}
+        legacy_rows = [
+            {**dict(row), "source": "local_observed_ledger"}
+            for row in self.conn.execute("SELECT * FROM wallet_market_pnl WHERE wallet=?", (normalized,)).fetchall()
+            if (str(row["wallet"]), str(row["market_slug"])) not in watch_keys
+        ]
+        all_rows = watch_rows + legacy_rows
+        complete_rows = [row for row in all_rows if not int(row.get("incomplete") or 0)]
+        source = "watchlist_mixed_ledger" if watch_rows and legacy_rows else "watchlist_activity_ledger"
+        return complete_rows, all_rows, source
 
     def wallet_observed_pnl_metrics(self, wallet: str, *, now_ts: int | None = None) -> dict[str, Any]:
         now_value = now_ts if now_ts is not None else int(dt.datetime.now(dt.timezone.utc).timestamp())
