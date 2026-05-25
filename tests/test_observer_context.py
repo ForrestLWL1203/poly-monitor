@@ -1667,6 +1667,31 @@ class ObserverContextTests(unittest.TestCase):
                 observer.store.close()
                 observer.writer.close()
 
+    def test_cleanup_stale_data_runs_non_focus_research_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(
+                ObserverConfig(
+                    data_dir=Path(tmp),
+                    cleanup_interval_hours=0.001,
+                    research_cleanup_dormant_wallets=2,
+                )
+            )
+            observer._last_data_cleanup = time.monotonic() - 10.0
+            try:
+                with patch.object(
+                    observer.store,
+                    "cleanup_non_focus_research_data",
+                    return_value={
+                        "research_cleanup_keep_wallets": 3,
+                        "removed_non_focus_activity_events": 1,
+                    },
+                ) as cleanup:
+                    observer._cleanup_stale_data_if_due()
+                cleanup.assert_called_once_with(dormant_limit=2)
+            finally:
+                observer.store.close()
+                observer.writer.close()
+
     def test_score_raw_event_is_written_only_for_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp)))

@@ -1154,6 +1154,121 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(second["created_at"], first["created_at"])
         self.assertNotEqual(second["updated_at"], "")
 
+    def test_remove_watchlist_wallet_and_purge_deletes_research_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                wallet = "0xabc0000000000000000000000000000000000000"
+                other = "0xdef0000000000000000000000000000000000000"
+                store.add_watchlist_wallet(wallet)
+                store.add_watchlist_wallet(other)
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xactivity",
+                            "fill_id": "fill-1",
+                            "wallet": wallet,
+                            "market_slug": "btc-updown-5m-1",
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.5,
+                            "size": 10,
+                            "usdc": 5,
+                            "asset": "up",
+                            "name": "Remove Me",
+                            "observed_at": "2026-05-25T00:00:00+00:00",
+                        },
+                        {
+                            "tx_hash": "0xother",
+                            "fill_id": "fill-2",
+                            "wallet": other,
+                            "market_slug": "btc-updown-5m-1",
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 101,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.5,
+                            "size": 10,
+                            "usdc": 5,
+                            "asset": "up",
+                            "observed_at": "2026-05-25T00:00:01+00:00",
+                        },
+                    ]
+                )
+                store.insert_wallet_trade_contexts(
+                    [
+                        {
+                            "wallet": wallet,
+                            "tx_hash": "0xactivity",
+                            "fill_id": "fill-1",
+                            "market_slug": "btc-updown-5m-1",
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "observed_at": "2026-05-25T00:00:00+00:00",
+                            "context_json": {"event": "context_snapshot"},
+                            "book_stale": False,
+                        }
+                    ]
+                )
+                store.conn.execute(
+                    """
+                    INSERT INTO wallet_market_pnl(
+                        wallet, market_slug, condition_id, symbol, realized_pnl, buy_usdc, sell_usdc,
+                        settled_value, net_shares_up, net_shares_down, trades, winning_side, settled_at,
+                        incomplete
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (wallet, "btc-updown-5m-1", "0xcond", "BTC", 1, 0, 0, 0, 0, 0, 1, "Up", "2026-05-25T00:00:00+00:00", 0),
+                )
+                store.upsert_watched_market_window(
+                    {
+                        "market_slug": "btc-updown-5m-1",
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "first_seen_at": "2026-05-25T00:00:00+00:00",
+                        "window_start": "2026-05-25T00:00:00+00:00",
+                        "window_end": "2026-05-25T00:05:00+00:00",
+                        "tracking_reason": "watchlist_activity",
+                        "source_wallet": wallet,
+                        "capture_until": "2026-05-25T00:35:00+00:00",
+                        "status": "tracking",
+                    }
+                )
+
+                result = store.remove_watchlist_wallet_and_purge(wallet)
+                remaining_wallets = store.watchlist_wallets()
+                removed_activity = store.wallet_activity_events(wallet)
+                other_activity = store.wallet_activity_events(other)
+                removed_contexts = store.wallet_trade_contexts(wallet)
+                removed_pnl = store.wallet_market_pnl_rows(wallet)
+                profile = store.conn.execute("SELECT 1 FROM wallet_profiles WHERE wallet=?", (wallet,)).fetchone()
+                watched = store.watched_market_windows()
+            finally:
+                store.close()
+
+        self.assertEqual(result["removed_watchlist_rows"], 1)
+        self.assertEqual(result["removed_activity_events"], 1)
+        self.assertEqual(result["removed_trade_contexts"], 1)
+        self.assertEqual(result["removed_wallet_market_pnl"], 1)
+        self.assertEqual(result["removed_wallet_profiles"], 1)
+        self.assertEqual(result["removed_watched_market_windows"], 1)
+        self.assertEqual(remaining_wallets, [other])
+        self.assertEqual(removed_activity, [])
+        self.assertEqual(len(other_activity), 1)
+        self.assertEqual(removed_contexts, [])
+        self.assertEqual(removed_pnl, [])
+        self.assertIsNone(profile)
+        self.assertEqual(watched, [])
+
     def test_wallet_trade_metrics_counts_time_windows_without_loading_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")

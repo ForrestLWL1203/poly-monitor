@@ -58,6 +58,7 @@ class ObserverConfig:
     watchlist_activity_retention_days: int = 7
     non_watchlist_activity_retention_days: int = 3
     context_retention_days: int = 7
+    research_cleanup_dormant_wallets: int = 3
     market_state_retention_days: int = 7
     strategy_archive_interval_hours: float = 6.0
     market_state_sample_sec: float = 5.0
@@ -1282,12 +1283,22 @@ class CryptoWalletObserver:
             non_watchlist_cutoff_ts=int((now - dt.timedelta(days=self.config.non_watchlist_activity_retention_days)).timestamp()),
         )
         result.update(activity_cleanup)
-        if any(result.values()):
+        research_cleanup = self.store.cleanup_non_focus_research_data(
+            dormant_limit=self.config.research_cleanup_dormant_wallets
+        )
+        result.update(research_cleanup)
+        cleanup_changed = any(
+            value
+            for key, value in result.items()
+            if key != "research_cleanup_keep_wallets"
+        )
+        if cleanup_changed:
             self.writer.write({
                 "event": "sqlite_cleanup",
                 "observed_at": now.isoformat(),
                 "inactive_wallet_ttl_hours": self.config.inactive_wallet_ttl_hours,
                 "max_non_candidate_wallets": self.config.max_non_candidate_wallets,
+                "research_cleanup_dormant_wallets": self.config.research_cleanup_dormant_wallets,
                 "inactive_cutoff_ts": cutoff_ts,
                 **result,
             })

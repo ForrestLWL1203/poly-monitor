@@ -316,6 +316,81 @@ class DashboardServerTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=3)
 
+    def test_watchlist_remove_api_purges_wallet_research_rows(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+        from poly_monitor.storage import ObserverStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.add_watchlist_wallet(wallet)
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xactivity",
+                            "fill_id": "fill-1",
+                            "wallet": wallet,
+                            "market_slug": "btc-updown-5m-1",
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.5,
+                            "size": 10,
+                            "usdc": 5,
+                            "asset": "up",
+                            "observed_at": "2026-05-25T00:00:00+00:00",
+                        }
+                    ]
+                )
+            finally:
+                store.close()
+
+            server = create_server(
+                DashboardConfig(
+                    data_dir=data_dir,
+                    host="127.0.0.1",
+                    port=0,
+                    username="admin",
+                    password="secret",
+                    cookie_secret="test-secret",
+                )
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                body = json.dumps({"wallet": wallet, "action": "remove"}).encode()
+                req = urllib.request.Request(
+                    f"{base}/api/watchlist",
+                    data=body,
+                    headers={"Cookie": cookie, "Content-Type": "application/json"},
+                    method="POST",
+                )
+                payload = json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                activity = store.wallet_activity_events(wallet)
+                watchlist = store.watchlist_wallets()
+            finally:
+                store.close()
+
+        self.assertFalse(payload["watchlisted"])
+        self.assertEqual(payload["purge"]["removed_activity_events"], 1)
+        self.assertEqual(activity, [])
+        self.assertEqual(watchlist, [])
+
     def test_watchlist_get_api_returns_rows(self):
         from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
         from poly_monitor.storage import ObserverStore

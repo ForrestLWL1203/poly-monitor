@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from ..storage import WatchlistStore
+from ..storage import ObserverStore, WatchlistStore
 from ..wallet_export import export_watchlist_wallet
 from .status import build_dashboard_status, recent_trades, wallet_detail
 
@@ -286,11 +286,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not ADDRESS_RE.match(wallet):
             self._json({"error": "invalid_wallet", "hint": "expected 0x + 40 hex chars"}, status=HTTPStatus.BAD_REQUEST)
             return
-        store = WatchlistStore(self.dashboard_config.data_dir / "state" / "observer.sqlite")
+        store_cls = ObserverStore if action == "remove" else WatchlistStore
+        store = store_cls(self.dashboard_config.data_dir / "state" / "observer.sqlite")
         try:
             if action == "remove":
-                removed = store.remove_wallet(wallet)
-                payload = {"ok": True, "wallet": wallet, "watchlisted": False, "removed": removed}
+                purge = store.remove_watchlist_wallet_and_purge(wallet)
+                payload = {"ok": True, "wallet": wallet, "watchlisted": False, "removed": purge["removed_watchlist_rows"], "purge": purge}
             elif action == "add":
                 store.add_wallet(wallet, note=note)
                 payload = {"ok": True, "wallet": wallet, "watchlisted": True}

@@ -388,6 +388,132 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(remaining, {watched, fresh_removed})
         self.assertEqual(pnl_wallets, set())
 
+    def test_cleanup_non_focus_research_data_keeps_watchlist_active_and_top_dormant(self):
+        def event(wallet: str, tx: str, market: str) -> dict:
+            return {
+                "tx_hash": tx,
+                "wallet": wallet,
+                "market_slug": market,
+                "condition_id": f"cond-{market}",
+                "symbol": "BTC",
+                "exchange_ts": 100,
+                "activity_type": "TRADE",
+                "side": "BUY",
+                "outcome": "Up",
+                "outcome_index": 0,
+                "price": 0.5,
+                "size": 10,
+                "usdc": 5,
+                "observed_at": "2026-05-25T00:00:00+00:00",
+            }
+
+        def insert_pnl(store: ObserverStore, wallet: str, market: str) -> None:
+            store.conn.execute(
+                """
+                INSERT OR REPLACE INTO wallet_market_pnl(
+                    wallet,market_slug,condition_id,symbol,realized_pnl,buy_usdc,sell_usdc,
+                    settled_value,net_shares_up,net_shares_down,trades,winning_side,settled_at,
+                    incomplete,pnl_source
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (wallet, market, f"cond-{market}", "BTC", 1.0, 5.0, 0.0, 6.0, 0.0, 0.0, 1, "Up", "2026-05-25T00:05:00+00:00", 0, "activity_ledger"),
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            watched = "0xwatched"
+            active = "0xactive"
+            dormant_keep = "0xdormantkeep"
+            dormant_drop = "0xdormantdrop"
+            archive = "0xarchive"
+            noise = "0xnoise"
+            wallets = [watched, active, dormant_keep, dormant_drop, archive, noise]
+            try:
+                store.add_watchlist_wallet(watched)
+                for wallet, status, score in [
+                    (active, "active_candidate", 10.0),
+                    (dormant_keep, "dormant_candidate", 9.0),
+                    (dormant_drop, "dormant_candidate", 1.0),
+                    (archive, "archive_candidate", 20.0),
+                ]:
+                    store.upsert_score(CandidateScore(wallet, status, score, ["test"], {"wallet": wallet}))
+                for idx, wallet in enumerate(wallets):
+                    market = f"btc-updown-5m-{idx}"
+                    store.insert_wallet_activity_events([event(wallet, f"0x{idx}", market)], recompute=False)
+                    store.insert_wallet_trade_contexts(
+                        [
+                            {
+                                "wallet": wallet,
+                                "tx_hash": f"0x{idx}",
+                                "fill_id": "",
+                                "market_slug": market,
+                                "condition_id": f"cond-{market}",
+                                "symbol": "BTC",
+                                "exchange_ts": 100,
+                                "observed_at": "2026-05-25T00:00:00+00:00",
+                                "context_json": {"wallet": wallet},
+                            }
+                        ]
+                    )
+                    insert_pnl(store, wallet, market)
+                    store.conn.execute(
+                        """
+                        INSERT OR REPLACE INTO wallet_profiles(wallet,name,pseudonym,updated_at)
+                        VALUES(?,?,?,?)
+                        """,
+                        (wallet, f"name-{wallet}", "", "2026-05-25T00:00:00+00:00"),
+                    )
+                    store.upsert_watched_market_window(
+                        {
+                            "market_slug": market,
+                            "condition_id": f"cond-{market}",
+                            "symbol": "BTC",
+                            "first_seen_at": "2026-05-25T00:00:00+00:00",
+                            "window_start": "2026-05-25T00:00:00+00:00",
+                            "window_end": "2026-05-25T00:05:00+00:00",
+                            "source_wallet": wallet,
+                            "capture_until": "2026-05-25T00:35:00+00:00",
+                        }
+                    )
+                store.conn.commit()
+
+                result = store.cleanup_non_focus_research_data(dormant_limit=1)
+                activity_wallets = {
+                    str(row["wallet"])
+                    for row in store.conn.execute("SELECT DISTINCT wallet FROM wallet_activity_events")
+                }
+                context_wallets = {
+                    str(row["wallet"])
+                    for row in store.conn.execute("SELECT DISTINCT wallet FROM wallet_trade_contexts")
+                }
+                pnl_wallets = {
+                    str(row["wallet"])
+                    for row in store.conn.execute("SELECT DISTINCT wallet FROM wallet_market_pnl")
+                }
+                profile_wallets = {
+                    str(row["wallet"])
+                    for row in store.conn.execute("SELECT DISTINCT wallet FROM wallet_profiles")
+                }
+                watched_wallets = {
+                    str(row["source_wallet"])
+                    for row in store.conn.execute("SELECT DISTINCT source_wallet FROM watched_market_windows")
+                }
+            finally:
+                store.close()
+
+        keep = {watched, active, dormant_keep}
+        self.assertEqual(result["research_cleanup_keep_wallets"], 3)
+        self.assertEqual(result["removed_non_focus_activity_events"], 3)
+        self.assertEqual(result["removed_non_focus_trade_contexts"], 3)
+        self.assertEqual(result["removed_non_focus_wallet_market_pnl"], 3)
+        self.assertEqual(result["removed_non_focus_wallet_profiles"], 3)
+        self.assertEqual(result["removed_non_focus_watched_market_windows"], 3)
+        self.assertEqual(activity_wallets, keep)
+        self.assertEqual(context_wallets, keep)
+        self.assertEqual(pnl_wallets, keep)
+        self.assertEqual(profile_wallets, keep)
+        self.assertEqual(watched_wallets, keep)
+
     def test_high_activity_wallets_rank_by_24h_market_count_not_only_recency(self):
         def trade(wallet: str, tx: str, ts: int, market: str) -> dict:
             return {
