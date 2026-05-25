@@ -248,6 +248,19 @@ class ObserverStore:
                 winning_side TEXT NOT NULL,
                 settled_at TEXT NOT NULL,
                 incomplete INTEGER NOT NULL DEFAULT 0,
+                pnl_source TEXT NOT NULL DEFAULT 'trade_ledger',
+                activity_realized_pnl REAL,
+                activity_cash_flow REAL,
+                activity_buy_usdc REAL NOT NULL DEFAULT 0,
+                activity_sell_usdc REAL NOT NULL DEFAULT 0,
+                activity_merge_usdc REAL NOT NULL DEFAULT 0,
+                activity_split_usdc REAL NOT NULL DEFAULT 0,
+                activity_redeem_usdc REAL NOT NULL DEFAULT 0,
+                activity_settled_value REAL,
+                activity_net_shares_up REAL,
+                activity_net_shares_down REAL,
+                activity_events INTEGER NOT NULL DEFAULT 0,
+                has_merge_or_split INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(wallet, market_slug)
             );
             CREATE TABLE IF NOT EXISTS wallet_activity_events (
@@ -365,6 +378,26 @@ class ObserverStore:
         pnl_columns = {str(row["name"]) for row in pnl_table_info}
         if "incomplete" not in pnl_columns:
             self.conn.execute("ALTER TABLE wallet_market_pnl ADD COLUMN incomplete INTEGER NOT NULL DEFAULT 0")
+            pnl_columns.add("incomplete")
+        pnl_column_defaults = {
+            "pnl_source": "TEXT NOT NULL DEFAULT 'trade_ledger'",
+            "activity_realized_pnl": "REAL",
+            "activity_cash_flow": "REAL",
+            "activity_buy_usdc": "REAL NOT NULL DEFAULT 0",
+            "activity_sell_usdc": "REAL NOT NULL DEFAULT 0",
+            "activity_merge_usdc": "REAL NOT NULL DEFAULT 0",
+            "activity_split_usdc": "REAL NOT NULL DEFAULT 0",
+            "activity_redeem_usdc": "REAL NOT NULL DEFAULT 0",
+            "activity_settled_value": "REAL",
+            "activity_net_shares_up": "REAL",
+            "activity_net_shares_down": "REAL",
+            "activity_events": "INTEGER NOT NULL DEFAULT 0",
+            "has_merge_or_split": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, definition in pnl_column_defaults.items():
+            if column not in pnl_columns:
+                self.conn.execute(f"ALTER TABLE wallet_market_pnl ADD COLUMN {column} {definition}")
+                pnl_columns.add(column)
         fill_id_pk = next((int(row["pk"]) for row in table_info if str(row["name"]) == "fill_id"), 0)
         if fill_id_pk == 0:
             self.conn.executescript(
@@ -427,6 +460,7 @@ class ObserverStore:
             """
         )
         self.conn.commit()
+        self._recompute_settled_activity_markets()
 
     def add_watchlist_wallet(self, wallet: str, *, note: str = "") -> None:
         WatchlistStore.add_wallet(self, wallet, note=note)
@@ -506,6 +540,7 @@ class ObserverStore:
 
     def insert_wallet_activity_events(self, rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         inserted: list[dict[str, Any]] = []
+        inserted_markets: set[str] = set()
         for row in rows:
             wallet = str(row.get("wallet") or "").lower()
             market_slug = str(row.get("market_slug") or "")
@@ -539,6 +574,10 @@ class ObserverStore:
             )
             if cursor.rowcount:
                 inserted.append(row)
+                if market_slug:
+                    inserted_markets.add(market_slug)
+        for market_slug in sorted(inserted_markets):
+            self._recompute_market_pnl(market_slug)
         self.conn.commit()
         return inserted
 
@@ -1126,21 +1165,18 @@ class ObserverStore:
             "SELECT * FROM trades WHERE market_slug=? ORDER BY exchange_ts ASC",
             (market_slug,),
         ).fetchall()
-        activity_cashflow_wallets = {
-            str(row["wallet"]).lower()
-            for row in self.conn.execute(
-                """
-                SELECT DISTINCT wallet
-                FROM wallet_activity_events
-                WHERE market_slug=? AND activity_type IN (?, ?, ?)
-                """,
-                (market_slug, *ACTIVITY_CASHFLOW_TYPES),
-            ).fetchall()
-        }
-        by_wallet: dict[str, dict[str, Any]] = {}
+        activity_rows = self.conn.execute(
+            """
+            SELECT * FROM wallet_activity_events
+            WHERE market_slug=? AND activity_type IN ('TRADE', 'SPLIT', 'MERGE', 'REDEEM')
+            ORDER BY exchange_ts ASC, tx_hash ASC
+            """,
+            (market_slug,),
+        ).fetchall()
+        trade_by_wallet: dict[str, dict[str, Any]] = {}
         for row in rows:
             wallet = str(row["wallet"]).lower()
-            item = by_wallet.setdefault(
+            item = trade_by_wallet.setdefault(
                 wallet,
                 {
                     "cash": 0.0,
@@ -1168,21 +1204,130 @@ class ObserverStore:
                 item[share_key] += size
             item["trades"] += 1
         winning_side = str(settlement["winning_side"])
-        for wallet, item in by_wallet.items():
-            settled_value = float(item["up"] if winning_side.lower() == "up" else item["down"])
-            realized = float(item["cash"]) + settled_value
-            incomplete = int(
-                wallet in activity_cashflow_wallets
-                or float(item["up"]) < -1e-6
-                or float(item["down"]) < -1e-6
+
+        activity_by_wallet: dict[str, dict[str, Any]] = {}
+        activity_cashflow_wallets: set[str] = set()
+        for row in activity_rows:
+            wallet = str(row["wallet"]).lower()
+            item = activity_by_wallet.setdefault(
+                wallet,
+                {
+                    "cash": 0.0,
+                    "buy_usdc": 0.0,
+                    "sell_usdc": 0.0,
+                    "merge_usdc": 0.0,
+                    "split_usdc": 0.0,
+                    "redeem_usdc": 0.0,
+                    "up": 0.0,
+                    "down": 0.0,
+                    "trades": 0,
+                    "activity_events": 0,
+                    "has_merge_or_split": 0,
+                    "condition_id": str(row["condition_id"]),
+                    "symbol": str(row["symbol"]).upper(),
+                },
             )
+            activity_type = str(row["activity_type"] or "").upper()
+            outcome = str(row["outcome"] or "")
+            side = str(row["side"] or "").upper()
+            size = float(row["size"] or 0.0)
+            usdc = float(row["usdc"] or 0.0)
+            amount = usdc if usdc > 0 else size
+            share_key = "up" if outcome.lower() == "up" else "down"
+            if activity_type == "TRADE":
+                if side == "SELL":
+                    item["cash"] += usdc
+                    item["sell_usdc"] += usdc
+                    item[share_key] -= size
+                else:
+                    item["cash"] -= usdc
+                    item["buy_usdc"] += usdc
+                    item[share_key] += size
+                item["trades"] += 1
+            elif activity_type == "MERGE":
+                item["cash"] += amount
+                item["merge_usdc"] += amount
+                item["up"] -= amount
+                item["down"] -= amount
+                item["has_merge_or_split"] = 1
+                activity_cashflow_wallets.add(wallet)
+            elif activity_type == "SPLIT":
+                item["cash"] -= amount
+                item["split_usdc"] += amount
+                item["up"] += amount
+                item["down"] += amount
+                item["has_merge_or_split"] = 1
+                activity_cashflow_wallets.add(wallet)
+            elif activity_type == "REDEEM":
+                item["cash"] += amount
+                item["redeem_usdc"] += amount
+                activity_cashflow_wallets.add(wallet)
+            item["activity_events"] += 1
+
+        all_wallets = sorted(set(trade_by_wallet) | set(activity_by_wallet))
+        for wallet in all_wallets:
+            activity_item = activity_by_wallet.get(wallet)
+            if activity_item is not None and int(activity_item["trades"]) > 0:
+                item = activity_item
+                residual_settled = (
+                    0.0
+                    if float(item["redeem_usdc"]) > 0
+                    else max(0.0, float(item["up"] if winning_side.lower() == "up" else item["down"]))
+                )
+                settled_value = float(item["redeem_usdc"]) if float(item["redeem_usdc"]) > 0 else residual_settled
+                realized = float(item["cash"]) + residual_settled
+                incomplete = int(float(item["up"]) < -1e-6 or float(item["down"]) < -1e-6)
+                pnl_source = "activity_ledger"
+                activity_values = {
+                    "activity_realized_pnl": round(realized, 6),
+                    "activity_cash_flow": round(float(item["cash"]), 6),
+                    "activity_buy_usdc": round(float(item["buy_usdc"]), 6),
+                    "activity_sell_usdc": round(float(item["sell_usdc"]), 6),
+                    "activity_merge_usdc": round(float(item["merge_usdc"]), 6),
+                    "activity_split_usdc": round(float(item["split_usdc"]), 6),
+                    "activity_redeem_usdc": round(float(item["redeem_usdc"]), 6),
+                    "activity_settled_value": round(settled_value, 6),
+                    "activity_net_shares_up": round(float(item["up"]), 6),
+                    "activity_net_shares_down": round(float(item["down"]), 6),
+                    "activity_events": int(item["activity_events"]),
+                    "has_merge_or_split": int(item["has_merge_or_split"]),
+                }
+            else:
+                item = trade_by_wallet.get(wallet)
+                if item is None:
+                    continue
+                settled_value = float(item["up"] if winning_side.lower() == "up" else item["down"])
+                realized = float(item["cash"]) + settled_value
+                incomplete = int(
+                    wallet in activity_cashflow_wallets
+                    or float(item["up"]) < -1e-6
+                    or float(item["down"]) < -1e-6
+                )
+                pnl_source = "trade_ledger"
+                activity_values = {
+                    "activity_realized_pnl": None,
+                    "activity_cash_flow": None,
+                    "activity_buy_usdc": 0.0,
+                    "activity_sell_usdc": 0.0,
+                    "activity_merge_usdc": 0.0,
+                    "activity_split_usdc": 0.0,
+                    "activity_redeem_usdc": 0.0,
+                    "activity_settled_value": None,
+                    "activity_net_shares_up": None,
+                    "activity_net_shares_down": None,
+                    "activity_events": 0,
+                    "has_merge_or_split": 0,
+                }
             self.conn.execute(
                 """
                 INSERT OR REPLACE INTO wallet_market_pnl(
                     wallet, market_slug, condition_id, symbol, realized_pnl, buy_usdc, sell_usdc,
                     settled_value, net_shares_up, net_shares_down, trades, winning_side, settled_at,
-                    incomplete
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    incomplete, pnl_source, activity_realized_pnl, activity_cash_flow, activity_buy_usdc,
+                    activity_sell_usdc, activity_merge_usdc, activity_split_usdc, activity_redeem_usdc,
+                    activity_settled_value, activity_net_shares_up, activity_net_shares_down, activity_events,
+                    has_merge_or_split
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     wallet,
@@ -1199,8 +1344,35 @@ class ObserverStore:
                     winning_side,
                     str(settlement["settled_at"]),
                     incomplete,
+                    pnl_source,
+                    activity_values["activity_realized_pnl"],
+                    activity_values["activity_cash_flow"],
+                    activity_values["activity_buy_usdc"],
+                    activity_values["activity_sell_usdc"],
+                    activity_values["activity_merge_usdc"],
+                    activity_values["activity_split_usdc"],
+                    activity_values["activity_redeem_usdc"],
+                    activity_values["activity_settled_value"],
+                    activity_values["activity_net_shares_up"],
+                    activity_values["activity_net_shares_down"],
+                    activity_values["activity_events"],
+                    activity_values["has_merge_or_split"],
                 ),
             )
+
+    def _recompute_settled_activity_markets(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT a.market_slug
+            FROM wallet_activity_events a
+            JOIN market_settlements s ON s.market_slug = a.market_slug
+            WHERE s.completed=1 AND s.winning_side != ''
+            """
+        ).fetchall()
+        for row in rows:
+            self._recompute_market_pnl(str(row["market_slug"]))
+        if rows:
+            self.conn.commit()
 
     def wallet_market_pnl_rows(self, wallet: str | None = None) -> list[dict[str, Any]]:
         if wallet is None:
@@ -1240,6 +1412,12 @@ class ObserverStore:
             "SELECT COUNT(*) AS n FROM wallet_market_pnl WHERE wallet=? AND incomplete=1",
             (wallet.lower(),),
         ).fetchone()
+        activity_7d = sum(1 for row in rows_7d if str(row["pnl_source"] or "") == "activity_ledger")
+        activity_30d = sum(1 for row in rows_30d if str(row["pnl_source"] or "") == "activity_ledger")
+        activity_total = sum(1 for row in rows_total if str(row["pnl_source"] or "") == "activity_ledger")
+        merge_7d = sum(1 for row in rows_7d if int(row["has_merge_or_split"] or 0))
+        merge_30d = sum(1 for row in rows_30d if int(row["has_merge_or_split"] or 0))
+        merge_total = sum(1 for row in rows_total if int(row["has_merge_or_split"] or 0))
 
         def pnl(rows: list[sqlite3.Row]) -> float:
             return round(sum(float(row["realized_pnl"] or 0.0) for row in rows), 6)
@@ -1276,6 +1454,12 @@ class ObserverStore:
             "incomplete_settled_markets_7d": int(incomplete_7d["n"] or 0),
             "incomplete_settled_markets_30d": int(incomplete_30d["n"] or 0),
             "incomplete_settled_markets_total": int(incomplete_total["n"] or 0),
+            "activity_ledger_markets_7d": activity_7d,
+            "activity_ledger_markets_30d": activity_30d,
+            "activity_ledger_markets_total": activity_total,
+            "merge_or_split_markets_7d": merge_7d,
+            "merge_or_split_markets_30d": merge_30d,
+            "merge_or_split_markets_total": merge_total,
             "top1_concentration": round((sum(positive_30d[:1]) / positive_total), 6) if positive_total > 0 else 1.0,
             "top3_concentration": round((sum(positive_30d[:3]) / positive_total), 6) if positive_total > 0 else 1.0,
             "historical_pnl": pnl_total,

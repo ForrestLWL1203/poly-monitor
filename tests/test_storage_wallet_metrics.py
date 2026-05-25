@@ -243,7 +243,7 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(context_rows[0]["tx_hash"], "0xold")
         self.assertEqual({row["data_type"] for row in manifest}, {"wallet_activity_events", "wallet_trade_contexts"})
 
-    def test_watchlist_activity_does_not_create_pnl_rows(self):
+    def test_watchlist_merge_activity_creates_wallet_market_pnl_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
             try:
@@ -323,16 +323,26 @@ class StorageWalletMetricsTests(unittest.TestCase):
                     ]
                 )
 
-                rows = store.watchlist_market_pnl_rows(wallet)
+                rows = store.wallet_market_pnl_rows(wallet)
                 metrics = store.wallet_trade_metrics(wallet, now_ts=1779699600)
             finally:
                 store.close()
 
-        self.assertEqual(rows, [])
-        self.assertNotEqual(metrics.get("pnl_source"), "watchlist_activity_ledger")
-        self.assertNotIn("pnl_total", {key: metrics[key] for key in metrics if metrics[key] == 16.115315})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pnl_source"], "activity_ledger")
+        self.assertEqual(rows[0]["has_merge_or_split"], 1)
+        self.assertEqual(rows[0]["incomplete"], 0)
+        self.assertAlmostEqual(rows[0]["realized_pnl"], 16.115315)
+        self.assertAlmostEqual(rows[0]["activity_realized_pnl"], 16.115315)
+        self.assertAlmostEqual(rows[0]["activity_merge_usdc"], 163.0)
+        self.assertAlmostEqual(rows[0]["activity_redeem_usdc"], 5.0)
+        self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
+        self.assertAlmostEqual(metrics["pnl_total"], 16.115315)
+        self.assertEqual(metrics["settled_markets_total"], 1)
+        self.assertEqual(metrics["activity_ledger_markets_total"], 1)
+        self.assertEqual(metrics["merge_or_split_markets_total"], 1)
 
-    def test_watchlist_activity_redeem_does_not_infer_pnl_winner(self):
+    def test_watchlist_activity_without_settlement_does_not_infer_pnl_winner(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
             try:
@@ -389,16 +399,17 @@ class StorageWalletMetricsTests(unittest.TestCase):
                     ]
                 )
 
-                rows = store.watchlist_market_pnl_rows(wallet)
+                rows = store.wallet_market_pnl_rows(wallet)
                 metrics = store.wallet_trade_metrics(wallet, now_ts=1779708000)
             finally:
                 store.close()
 
         self.assertEqual(rows, [])
-        self.assertNotEqual(metrics.get("pnl_source"), "watchlist_activity_ledger")
+        self.assertEqual(metrics.get("pnl_source"), "local_observed_ledger")
+        self.assertAlmostEqual(metrics["pnl_total"], 0.0)
         self.assertEqual(metrics["settled_markets_total"], 0)
 
-    def test_store_startup_does_not_recompute_watchlist_activity_pnl(self):
+    def test_store_startup_recomputes_settled_activity_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"
             wallet = "0xd950a1a89f3e61a7a9efc85a46e440ce58c15e86"
@@ -438,19 +449,32 @@ class StorageWalletMetricsTests(unittest.TestCase):
                             "2026-05-25T11:05:37+00:00",
                         ),
                     )
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": "0xcond",
+                        "symbol": "ETH",
+                        "winning_side": "Down",
+                        "settled_at": "2026-05-25T11:05:00+00:00",
+                        "completed": True,
+                    }
+                )
                 store.conn.commit()
             finally:
                 store.close()
 
             store = ObserverStore(path)
             try:
-                rows = store.watchlist_market_pnl_rows(wallet)
+                rows = store.wallet_market_pnl_rows(wallet)
             finally:
                 store.close()
 
-        self.assertEqual(rows, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pnl_source"], "activity_ledger")
+        self.assertAlmostEqual(rows[0]["realized_pnl"], 4.807455)
+        self.assertEqual(rows[0]["incomplete"], 0)
 
-    def test_watchlist_activity_settlement_does_not_create_pnl_rows(self):
+    def test_watchlist_activity_settlement_creates_pnl_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
             try:
@@ -504,13 +528,17 @@ class StorageWalletMetricsTests(unittest.TestCase):
                     ]
                 )
 
-                rows = store.watchlist_market_pnl_rows(wallet)
+                rows = store.wallet_market_pnl_rows(wallet)
                 metrics = store.wallet_trade_metrics(wallet, now_ts=1779708000)
             finally:
                 store.close()
 
-        self.assertEqual(rows, [])
-        self.assertNotEqual(metrics.get("pnl_source"), "watchlist_activity_ledger")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pnl_source"], "activity_ledger")
+        self.assertEqual(rows[0]["has_merge_or_split"], 0)
+        self.assertAlmostEqual(rows[0]["realized_pnl"], 4.807455)
+        self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
+        self.assertEqual(metrics["wins_7d"], 1)
 
     def test_watchlist_metrics_do_not_merge_activity_pnl_with_legacy_markets(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -568,12 +596,13 @@ class StorageWalletMetricsTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
-        self.assertAlmostEqual(metrics["pnl_total"], 6.0)
-        self.assertAlmostEqual(metrics["pnl_7d"], 6.0)
-        self.assertEqual(metrics["settled_markets_total"], 1)
-        self.assertEqual(metrics["wins_7d"], 1)
+        self.assertAlmostEqual(metrics["pnl_total"], 11.0)
+        self.assertAlmostEqual(metrics["pnl_7d"], 11.0)
+        self.assertEqual(metrics["settled_markets_total"], 2)
+        self.assertEqual(metrics["wins_7d"], 2)
+        self.assertEqual(metrics["activity_ledger_markets_total"], 1)
 
-    def test_watchlist_cashflow_activity_marks_traditional_pnl_incomplete(self):
+    def test_watchlist_cashflow_without_activity_trades_marks_traditional_pnl_incomplete(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"
             store = ObserverStore(path)
@@ -639,6 +668,8 @@ class StorageWalletMetricsTests(unittest.TestCase):
 
         self.assertEqual(len(traditional_rows), 1)
         self.assertAlmostEqual(traditional_rows[0]["realized_pnl"], 10.0)
+        self.assertEqual(traditional_rows[0]["pnl_source"], "trade_ledger")
+        self.assertEqual(traditional_rows[0]["has_merge_or_split"], 0)
         self.assertEqual(traditional_rows[0]["incomplete"], 1)
         self.assertEqual(watchlist_rows, [])
 
