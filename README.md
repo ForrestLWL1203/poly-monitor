@@ -95,6 +95,12 @@ elite pool: 15 active candidates and 10 dormant candidates by default. Non-core
 wallet trade rows are cleaned periodically and capped to the most recent 100
 wallets.
 
+The candidate score table is also capped to 100 wallets total by default.
+Active and dormant candidates keep their configured top slots first; archive
+only receives the remaining capacity. New archive rows are persisted only when
+they have a minimum activity sample or positive reliable profile/leaderboard PnL,
+so route-through wallets do not crowd out stronger candidates.
+
 Watchlisted wallets are treated as manually protected research targets:
 
 - They are not shown in the active or dormant tabs while watchlisted.

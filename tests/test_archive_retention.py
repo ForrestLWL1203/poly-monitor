@@ -20,7 +20,7 @@ class ArchiveRetentionTests(unittest.TestCase):
             metrics={"wallet": "0xabc", "trades_7d": 3, "markets_24h": 1, "historical_trades": 3},
         )
 
-        self.assertTrue(should_persist_score(score, previous_status=None))
+        self.assertFalse(should_persist_score(score, previous_status=None))
 
     def test_previous_candidate_can_move_to_archive(self):
         score = CandidateScore(
@@ -40,6 +40,25 @@ class ArchiveRetentionTests(unittest.TestCase):
             rank_score=0.0,
             reasons=["pnl_7d_not_positive"],
             metrics={"wallet": "0xabc", "trades_7d": 150, "markets_24h": 4, "historical_trades": 150},
+        )
+
+        self.assertTrue(should_persist_score(score, previous_status=None))
+
+    def test_new_positive_profile_archive_candidate_is_persisted_for_cooldown(self):
+        score = CandidateScore(
+            wallet="0xabc",
+            status="archive_candidate",
+            rank_score=0.0,
+            reasons=["local_observed_pnl_7d_not_positive"],
+            metrics={
+                "wallet": "0xabc",
+                "trades_7d": 20,
+                "markets_24h": 2,
+                "historical_trades": 20,
+                "pnl_source": "profile_portfolio_pnl",
+                "pnl_7d": 100.0,
+                "pnl_30d": 300.0,
+            },
         )
 
         self.assertTrue(should_persist_score(score, previous_status=None))
@@ -176,6 +195,43 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(len(rows["active_candidate"]), 30)
         self.assertEqual(len(rows["dormant_candidate"]), 30)
         self.assertEqual(rows["active_candidate"][0]["rank_score"], 34.0)
+
+    def test_prune_candidate_tables_caps_total_pool_by_priority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = __import__("poly_monitor.observer", fromlist=["CryptoWalletObserver", "ObserverConfig"]).CryptoWalletObserver(
+                __import__("poly_monitor.observer", fromlist=["ObserverConfig"]).ObserverConfig(
+                    data_dir=Path(tmp),
+                    max_active_candidates=48,
+                    max_dormant_candidates=48,
+                    max_archive_candidates=100,
+                )
+            )
+            try:
+                for idx in range(4):
+                    observer.store.upsert_score(CandidateScore(f"0xactive{idx}", "active_candidate", float(idx), [], {"wallet": f"0xactive{idx}"}))
+                    observer.store.upsert_score(CandidateScore(f"0xdormant{idx}", "dormant_candidate", float(idx), [], {"wallet": f"0xdormant{idx}"}))
+                for idx in range(10):
+                    observer.store.upsert_score(
+                        CandidateScore(
+                            f"0xarchive{idx}",
+                            "archive_candidate",
+                            float(idx),
+                            [],
+                            {"wallet": f"0xarchive{idx}", "trades_7d": 200, "markets_24h": 5, "historical_trades": 200},
+                        )
+                    )
+
+                removed = observer._prune_candidate_tables()
+                rows = observer.store.candidate_rows(limit=30)
+            finally:
+                observer.writer.close()
+                observer.store.close()
+
+        self.assertEqual(removed, 6)
+        self.assertEqual(len(rows["active_candidate"]), 4)
+        self.assertEqual(len(rows["dormant_candidate"]), 4)
+        self.assertEqual(len(rows["archive_candidate"]), 4)
+        self.assertEqual(rows["archive_candidate"][0]["wallet"], "0xarchive9")
 
     def test_candidate_rows_use_explicit_status_order(self):
         with tempfile.TemporaryDirectory() as tmp:

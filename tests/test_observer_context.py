@@ -162,7 +162,7 @@ class ObserverContextTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run_case()), "active_candidate")
 
-    def test_scoring_falls_back_to_local_observed_ledger_when_api_metrics_fail(self):
+    def test_scoring_does_not_persist_low_quality_new_archive_when_api_metrics_fail(self):
         async def run_case():
             with tempfile.TemporaryDirectory() as tmp:
                 observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1))
@@ -192,9 +192,8 @@ class ObserverContextTests(unittest.TestCase):
 
         status, metrics = asyncio.run(run_case())
 
-        self.assertEqual(status, "archive_candidate")
-        self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
-        self.assertEqual(metrics["pnl_7d"], 0.0)
+        self.assertIsNone(status)
+        self.assertEqual(metrics, {})
 
     def test_scoring_uses_historical_api_metrics_and_keeps_local_observed_pnl_separate(self):
         async def run_case():

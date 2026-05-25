@@ -66,7 +66,19 @@ class _MetricsCacheEntry:
 
 
 def should_persist_score(score, *, previous_status: str | None = None) -> bool:
-    return True
+    if previous_status is not None:
+        return True
+    if score.status != "archive_candidate":
+        return True
+    metrics = score.metrics
+    if str(metrics.get("pnl_source") or "") in {"profile_portfolio_pnl", "leaderboard_profit", "profile_profit"}:
+        return float(metrics.get("pnl_7d") or 0.0) > 0 or float(metrics.get("pnl_30d") or 0.0) > 0
+    markets_24h = float(metrics.get("markets_24h") or metrics.get("markets_7d") or 0.0)
+    return (
+        float(metrics.get("trades_7d") or 0.0) >= 100.0
+        or markets_24h >= 3.0
+        or float(metrics.get("historical_trades") or 0.0) >= 300.0
+    )
 
 
 def compact_score_event(score) -> dict[str, Any]:
@@ -607,9 +619,15 @@ class CryptoWalletObserver:
         removed += self.store.prune_low_sample_archives(min_age_seconds=self.config.archive_revival_cooldown_sec)
         removed += self.store.prune_candidate_scores("active_candidate", max_rows=self.config.max_active_candidates)
         removed += self.store.prune_candidate_scores("dormant_candidate", max_rows=self.config.max_dormant_candidates)
+        archive_budget = max(
+            0,
+            min(
+                self.config.max_archive_candidates,
+                100 - self.config.max_active_candidates - self.config.max_dormant_candidates,
+            ),
+        )
         removed += self.store.prune_archive_scores(
-            max_archive=self.config.max_archive_candidates,
-            min_age_seconds=self.config.archive_revival_cooldown_sec,
+            max_archive=archive_budget,
         )
         return removed
 
