@@ -20,6 +20,18 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["late_bias_shift"], 1.0)
         self.assertEqual(metrics["winner_add_rate"], 1.0)
 
+    def test_behavior_metrics_detects_terminal_near_certain_buying(self):
+        trades = [
+            {"type": "TRADE", "slug": "btc-updown-5m-1000", "timestamp": 1245, "outcome": "Up", "price": 0.99, "usdcSize": 10},
+            {"type": "TRADE", "slug": "btc-updown-5m-1300", "timestamp": 1541, "outcome": "Down", "price": 0.98, "usdcSize": 20},
+            {"type": "TRADE", "slug": "btc-updown-5m-1600", "timestamp": 1640, "outcome": "Up", "price": 0.99, "usdcSize": 30},
+        ]
+
+        metrics = behavior_metrics(trades, [])
+
+        self.assertEqual(metrics["terminal_near_certain_trades_30d"], 2)
+        self.assertEqual(metrics["terminal_near_certain_trade_share_30d"], 0.666667)
+
     def test_build_metrics_uses_recent_activity_markets_for_activity_counts(self):
         activity = [
             {"type": "TRADE", "slug": "btc-updown-5m-100", "timestamp": 1000, "outcome": "Up", "usdcSize": 10},

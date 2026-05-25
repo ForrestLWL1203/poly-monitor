@@ -1336,6 +1336,8 @@ class ObserverStore:
             "historical_trades": 0,
             "historical_markets": 0,
             "historical_pnl": 0.0,
+            "terminal_near_certain_trades_30d": 0,
+            "terminal_near_certain_trade_share_30d": 0.0,
         }
         if not row or not int(row["historical_trades"] or 0):
             metrics.update(self._preferred_observed_pnl_metrics(wallet, now_ts=now_value))
@@ -1353,6 +1355,7 @@ class ObserverStore:
         metrics["historical_markets"] = int(row["historical_markets"] or 0)
         last_ts = int(row["last_ts"] or 0)
         metrics["last_active_age_hours"] = round((now_value - last_ts) / 3600.0, 3)
+        metrics.update(self._wallet_terminal_thin_edge_metrics(wallet, now_ts=now_value))
         metrics.update(self._preferred_observed_pnl_metrics(wallet, now_ts=now_value))
         return metrics
 
@@ -1383,6 +1386,40 @@ class ObserverStore:
             "max_trades_per_market_24h": int(row["max_trades_per_market_24h"] or 0) if row else 0,
             "max_trades_per_market_7d": int(row["max_trades_per_market_7d"] or 0) if row else 0,
             "max_trades_per_market_30d": int(row["max_trades_per_market_30d"] or 0) if row else 0,
+        }
+
+    def _wallet_terminal_thin_edge_metrics(self, wallet: str, *, now_ts: int) -> dict[str, Any]:
+        cutoff_30d = now_ts - 30 * 86400
+        row = self.conn.execute(
+            """
+            SELECT
+                COUNT(*) AS trades_30d,
+                COALESCE(SUM(
+                    CASE
+                        WHEN side='BUY'
+                         AND price >= 0.97
+                         AND (
+                            CASE
+                                WHEN market_slug LIKE 'btc-updown-5m-%'
+                                    THEN CAST(substr(market_slug, length('btc-updown-5m-') + 1) AS INTEGER) + 300 - exchange_ts
+                                WHEN market_slug LIKE 'eth-updown-5m-%'
+                                    THEN CAST(substr(market_slug, length('eth-updown-5m-') + 1) AS INTEGER) + 300 - exchange_ts
+                                ELSE NULL
+                            END
+                         ) BETWEEN 0 AND 60
+                        THEN 1 ELSE 0
+                    END
+                ), 0) AS terminal_near_certain_trades_30d
+            FROM trades
+            WHERE wallet=? AND exchange_ts >= ?
+            """,
+            (wallet.lower(), cutoff_30d),
+        ).fetchone()
+        trades_30d = int(row["trades_30d"] or 0) if row else 0
+        terminal = int(row["terminal_near_certain_trades_30d"] or 0) if row else 0
+        return {
+            "terminal_near_certain_trades_30d": terminal,
+            "terminal_near_certain_trade_share_30d": round(terminal / trades_30d, 6) if trades_30d > 0 else 0.0,
         }
 
     def upsert_market_settlement(self, row: dict[str, Any]) -> bool:

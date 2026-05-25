@@ -1326,6 +1326,26 @@ class StorageWalletMetricsTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_wallet_trade_metrics_exposes_terminal_thin_edge_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                store.insert_trades(
+                    [
+                        trade_row("0xabc", "btc-updown-5m-1000", 1245, tx_hash="tx-thin-1", side="BUY", price=0.99),
+                        trade_row("0xabc", "eth-updown-5m-1300", 1541, tx_hash="tx-thin-2", side="BUY", price=0.98),
+                        trade_row("0xabc", "btc-updown-5m-1600", 1640, tx_hash="tx-early", side="BUY", price=0.99),
+                        trade_row("0xabc", "btc-updown-5m-1900", 2145, tx_hash="tx-sell", side="SELL", price=0.99),
+                    ]
+                )
+
+                metrics = store.wallet_trade_metrics("0xabc", now_ts=2200)
+
+                self.assertEqual(metrics["terminal_near_certain_trades_30d"], 2)
+                self.assertEqual(metrics["terminal_near_certain_trade_share_30d"], 0.5)
+            finally:
+                store.close()
+
     def test_wallet_trade_metrics_uses_one_max_trades_query(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")

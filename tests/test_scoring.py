@@ -60,6 +60,34 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(score.status, "dormant_candidate")
         self.assertIn("inactive_for_active", score.reasons)
 
+    def test_score_wallet_archives_terminal_thin_edge_wallets(self):
+        metrics = {
+            "wallet": "0x562a11bcd7354ea82a09ed803cb1739d60862ad4",
+            "trades_24h": 120,
+            "markets_24h": 120,
+            "trades_7d": 800,
+            "trades_30d": 1200,
+            "pnl_7d": 20.0,
+            "pnl_30d": 100.0,
+            "wins_7d": 90,
+            "losses_7d": 10,
+            "top1_concentration": 0.05,
+            "top3_concentration": 0.15,
+            "longshot_profit_share": 0.0,
+            "longshot_profit_markets": 0,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 1200,
+            "historical_markets": 300,
+            "historical_pnl": 100.0,
+            "terminal_near_certain_trades_30d": 100,
+            "terminal_near_certain_trade_share_30d": 0.9,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "archive_candidate")
+        self.assertIn("uncopyable_terminal_thin_edge", score.reasons)
+
     def test_active_rank_uses_local_observed_quality_not_cancelled_api_wins(self):
         metrics = {
             "wallet": "0x25f4707c93e4bfdf26cd6c5cc46c5464691cf88e",

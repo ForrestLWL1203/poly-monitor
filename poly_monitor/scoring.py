@@ -24,6 +24,8 @@ class CandidateThresholds:
     dormant_min_historical_trades: int = 500
     dormant_min_historical_markets: int = 5
     max_copyable_trades_per_market_24h: int = 200
+    terminal_thin_edge_min_trades_30d: int = 20
+    terminal_thin_edge_max_share_30d: float = 0.80
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,11 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
             _num(metrics, "local_observed_max_trades_per_market_24h") >= thresholds.max_copyable_trades_per_market_24h
             or _num(metrics, "max_trades_per_market_24h") >= thresholds.max_copyable_trades_per_market_24h,
         ),
+        (
+            "uncopyable_terminal_thin_edge",
+            _num(metrics, "terminal_near_certain_trades_30d") >= thresholds.terminal_thin_edge_min_trades_30d
+            and _num(metrics, "terminal_near_certain_trade_share_30d") >= thresholds.terminal_thin_edge_max_share_30d,
+        ),
         ("trades_7d_below_threshold", _num(metrics, "trades_7d") < thresholds.min_trades_7d),
         ("markets_24h_below_threshold", market_activity_failed),
         ("trades_30d_below_threshold", _num(metrics, "trades_30d") < thresholds.min_trades_30d),
@@ -155,6 +162,11 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
 
 
 def _dormant_ok(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
+    if (
+        _num(metrics, "terminal_near_certain_trades_30d") >= thresholds.terminal_thin_edge_min_trades_30d
+        and _num(metrics, "terminal_near_certain_trade_share_30d") >= thresholds.terminal_thin_edge_max_share_30d
+    ):
+        return False
     if (
         _has_reliable_profile_pnl(metrics)
         and _local_quality_direction_passes(metrics, thresholds)

@@ -39,6 +39,20 @@ def _timestamp_from_slug(row: dict[str, Any]) -> int | None:
         return None
 
 
+def _terminal_near_certain_trade(row: dict[str, Any]) -> bool:
+    start_ts = _timestamp_from_slug(row)
+    if start_ts is None:
+        return False
+    try:
+        timestamp = int(row.get("timestamp") or 0)
+        price = float(row.get("price") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    side = str(row.get("side") or "").upper()
+    remaining_sec = start_ts + 300 - timestamp
+    return (not side or side == "BUY") and price >= 0.97 and 0 <= remaining_sec <= 60
+
+
 def _position_is_settled(row: dict[str, Any]) -> bool:
     try:
         cur_price = float(row.get("curPrice"))
@@ -67,7 +81,13 @@ def behavior_metrics(trades: list[dict[str, Any]], closed: list[dict[str, Any]])
     for row in trades:
         by_market[row_slug(row)].append(row)
     if not by_market:
-        return {"dual_side_rate": 0.0, "late_bias_shift": 0.0, "winner_add_rate": 0.0}
+        return {
+            "dual_side_rate": 0.0,
+            "late_bias_shift": 0.0,
+            "winner_add_rate": 0.0,
+            "terminal_near_certain_trades_30d": 0,
+            "terminal_near_certain_trade_share_30d": 0.0,
+        }
 
     dual_count = 0
     late_bias_count = 0
@@ -100,10 +120,15 @@ def behavior_metrics(trades: list[dict[str, Any]], closed: list[dict[str, Any]])
             if dominant_outcome == winner:
                 winner_match_count += 1
     market_count = len(by_market)
+    terminal_near_certain_trades = sum(1 for row in trades if _terminal_near_certain_trade(row))
     return {
         "dual_side_rate": round(dual_count / market_count, 6),
         "late_bias_shift": round(late_bias_count / market_count, 6),
         "winner_add_rate": round(winner_match_count / winner_known_count, 6) if winner_known_count else 0.0,
+        "terminal_near_certain_trades_30d": terminal_near_certain_trades,
+        "terminal_near_certain_trade_share_30d": round(
+            terminal_near_certain_trades / len(trades), 6
+        ) if trades else 0.0,
     }
 
 
