@@ -264,6 +264,8 @@ class ObserverContextTests(unittest.TestCase):
         self.assertEqual(status, "active_candidate")
         self.assertEqual(metrics["pnl_source"], "crypto_closed_positions")
         self.assertEqual(metrics["pnl_7d"], 100)
+        self.assertEqual(metrics["wins_7d"], 0)
+        self.assertEqual(metrics["losses_7d"], 1)
         self.assertEqual(metrics["local_observed_pnl_7d"], -4.0)
         self.assertEqual(metrics["local_observed_settled_markets_7d"], 1)
 

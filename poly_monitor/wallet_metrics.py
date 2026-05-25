@@ -161,6 +161,8 @@ def build_metrics_from_api(
                 longshot_profit_markets.add(slug)
     market_pnls_7d = list(pnl_by_market_7d.values())
     market_pnls_30d = list(pnl_by_market_30d.values())
+    closed_position_wins_7d = sum(1 for value in market_pnls_7d if value > 0)
+    closed_position_losses_7d = sum(1 for value in market_pnls_7d if value < 0)
     crypto_closed_pnl_estimate_7d = round(sum(market_pnls_7d), 6)
     crypto_closed_pnl_estimate_30d = round(sum(market_pnls_30d), 6)
     profile_pnl_7d, profile_name_7d, profile_error_7d = _profile_profit(wallet, "7d")
@@ -199,8 +201,10 @@ def build_metrics_from_api(
         "profile_pnl_error": "; ".join(error for error in [profile_error_7d, profile_error_30d] if error),
         "crypto_closed_pnl_estimate_7d": crypto_closed_pnl_estimate_7d,
         "crypto_closed_pnl_estimate_30d": crypto_closed_pnl_estimate_30d,
-        "wins_7d": sum(1 for value in market_pnls_7d if value > 0),
-        "losses_7d": sum(1 for value in market_pnls_7d if value < 0),
+        "wins_7d": 0,
+        "losses_7d": 0,
+        "closed_position_wins_7d": closed_position_wins_7d,
+        "closed_position_losses_7d": closed_position_losses_7d,
         "top1_concentration": round(_concentration(market_pnls_30d, 1), 6),
         "top3_concentration": round(_concentration(market_pnls_30d, 3), 6),
         "longshot_profit_share": round(longshot_profit_30d / total_profit_30d, 6) if total_profit_30d > 0 else 0.0,

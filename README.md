@@ -113,6 +113,9 @@ Watchlisted wallets are treated as manually protected research targets:
 - Dashboard historical PnL columns are ranking inputs; the local-observed PnL
   column is the stricter live-monitoring evidence that should drive later
   copyability decisions.
+- Dashboard win/loss counts use locally observed settled markets. Polymarket
+  closed-position rows are not used for win/loss because that endpoint can be
+  biased toward winning outcome positions and does not match profile daily PnL.
 - A wallet can become an active candidate soon after it is first observed if the
   historical API metrics already satisfy the activity and profitability gates.
   It still needs local follow/replay evidence before any paper or live copy

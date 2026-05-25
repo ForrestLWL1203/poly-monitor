@@ -262,6 +262,11 @@ Remote process restart rule:
   those concrete PIDs or use an anchored full-command pattern that cannot match
   the SSH shell. Prefer a two-step flow: inspect PIDs with `pgrep -af`, then
   `kill <pid>` for the actual `/opt/poly-monitor/venv/bin/python ...` processes.
+- Dashboard restart reminder: never start `scripts/run_dashboard.py` bare on the
+  VPS. It requires `POLY_MONITOR_DASH_PASSWORD` and
+  `POLY_MONITOR_DASH_COOKIE_SECRET`. Source the root-only env file first:
+  `/opt/poly-monitor/dashboard.env`. Do not print the values. Example pattern:
+  `set -a; . /opt/poly-monitor/dashboard.env; set +a; nohup /opt/poly-monitor/venv/bin/python scripts/run_dashboard.py ...`.
 
 Useful read-only status checks:
 

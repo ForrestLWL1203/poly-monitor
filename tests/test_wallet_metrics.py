@@ -46,13 +46,41 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["markets_7d"], 1)
         self.assertEqual(metrics["markets_30d"], 1)
         self.assertEqual(metrics["historical_markets"], 1)
-        self.assertEqual(metrics["wins_7d"], 2)
+        self.assertEqual(metrics["wins_7d"], 0)
+        self.assertEqual(metrics["losses_7d"], 0)
+        self.assertEqual(metrics["closed_position_wins_7d"], 2)
+        self.assertEqual(metrics["closed_position_losses_7d"], 0)
         self.assertEqual(metrics["pnl_7d"], 3)
         self.assertEqual(metrics["pnl_30d"], 3)
         self.assertEqual(metrics["pnl_source"], "crypto_closed_positions")
         self.assertEqual(metrics["profile_pnl_7d"], 12.5)
         self.assertEqual(metrics["profile_pnl_30d"], 34.5)
         self.assertEqual(metrics["crypto_closed_pnl_estimate_30d"], 3)
+
+    def test_closed_positions_do_not_drive_win_loss_counts(self):
+        activity = [
+            {"type": "TRADE", "slug": "btc-updown-5m-100", "timestamp": 1000, "outcome": "Up", "usdcSize": 10},
+        ]
+        closed = [
+            {"slug": "btc-updown-5m-100", "endDate": "1970-01-01T00:16:40+00:00", "realizedPnl": 50, "avgPrice": 0.2, "outcome": "Up"},
+            {"slug": "btc-updown-5m-200", "endDate": "1970-01-01T00:16:40+00:00", "realizedPnl": 25, "avgPrice": 0.3, "outcome": "Down"},
+        ]
+
+        with patch("poly_monitor.wallet_metrics.fetch_user_activity", side_effect=[activity, []]), patch(
+            "poly_monitor.wallet_metrics.fetch_closed_positions", side_effect=[closed, []]
+        ), patch(
+            "poly_monitor.wallet_metrics.fetch_user_profit",
+            side_effect=[
+                {"amount": -100, "name": "profile"},
+                {"amount": -100, "name": "profile"},
+            ],
+        ):
+            metrics = build_metrics_from_api("0xabc", now_ts=2000, activity_pages=2, closed_pages=2)
+
+        self.assertEqual(metrics["wins_7d"], 0)
+        self.assertEqual(metrics["losses_7d"], 0)
+        self.assertEqual(metrics["closed_position_wins_7d"], 2)
+        self.assertEqual(metrics["closed_position_losses_7d"], 0)
 
     def test_build_metrics_keeps_profile_profit_as_reference_only(self):
         activity = [
