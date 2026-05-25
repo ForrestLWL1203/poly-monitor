@@ -108,6 +108,10 @@ Watchlisted wallets are treated as manually protected research targets:
   `MERGE`, and `REDEEM` rows in `wallet_activity_events`. This is separate from
   the market `/trades` collector and is the data needed to reconstruct complete
   set locking, merges, and final redemptions.
+- Watchlisted wallets use a more precise local activity ledger when those rows
+  are available. `watchlist_market_pnl` applies `TRADE`, `SPLIT`, `MERGE`, and
+  `REDEEM` cashflows per wallet/market, then the dashboard prefers that result
+  for watchlist local observed PnL.
 
 - Historical BTC/ETH 5m activity is used for candidate discovery and ranking.
   Polymarket profile portfolio-PnL curves are used as the primary historical

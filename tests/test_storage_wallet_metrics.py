@@ -105,6 +105,103 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(saved[1]["usdc"], 10)
         self.assertEqual(saved[2]["outcome_index"], 999)
 
+    def test_watchlist_activity_pnl_counts_merge_and_redeem_cashflows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                wallet = "0xa6896d11f76dfa2820662c1f441496f51553559b"
+                market = "btc-updown-5m-1779694200"
+                store.add_watchlist_wallet(wallet)
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-25T07:40:00+00:00",
+                        "completed": True,
+                    }
+                )
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xbuy-down",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Down",
+                            "outcome_index": 1,
+                            "price": 0.19243,
+                            "size": 247.134302,
+                            "usdc": 47.557265,
+                            "observed_at": "2026-05-25T07:30:00+00:00",
+                        },
+                        {
+                            "tx_hash": "0xbuy-up",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 101,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.621,
+                            "size": 168,
+                            "usdc": 104.32742,
+                            "observed_at": "2026-05-25T07:30:01+00:00",
+                        },
+                        {
+                            "tx_hash": "0xmerge-1",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 110,
+                            "activity_type": "MERGE",
+                            "outcome_index": 999,
+                            "size": 163,
+                            "usdc": 163,
+                            "observed_at": "2026-05-25T07:34:00+00:00",
+                        },
+                        {
+                            "tx_hash": "0xredeem",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 120,
+                            "activity_type": "REDEEM",
+                            "outcome_index": 999,
+                            "size": 5,
+                            "usdc": 5,
+                            "observed_at": "2026-05-25T07:40:00+00:00",
+                        },
+                    ]
+                )
+
+                rows = store.watchlist_market_pnl_rows(wallet)
+                metrics = store.wallet_trade_metrics(wallet, now_ts=1779699600)
+            finally:
+                store.close()
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertAlmostEqual(row["realized_pnl"], 16.115315)
+        self.assertAlmostEqual(row["merge_usdc"], 163.0)
+        self.assertAlmostEqual(row["redeem_usdc"], 5.0)
+        self.assertEqual(row["activity_events"], 4)
+        self.assertTrue(row["has_merge"])
+        self.assertTrue(row["has_redeem"])
+        self.assertFalse(row["incomplete"])
+        self.assertAlmostEqual(metrics["pnl_total"], 16.115315)
+        self.assertEqual(metrics["pnl_source"], "watchlist_activity_ledger")
+
     def test_watchlist_store_initializes_only_watchlist_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"

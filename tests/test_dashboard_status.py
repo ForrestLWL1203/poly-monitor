@@ -282,6 +282,94 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertAlmostEqual(detail["ledger_summary"]["realized_pnl"], 0.0)
         self.assertTrue(detail["settled_markets"][0]["incomplete"])
 
+    def test_watchlist_dashboard_uses_activity_ledger_pnl(self):
+        from poly_monitor.dashboard.status import build_dashboard_status, wallet_detail
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0xa6896d11f76dfa2820662c1f441496f51553559b"
+            market = "btc-updown-5m-1779694200"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            store.add_watchlist_wallet(wallet)
+            store.upsert_score(
+                CandidateScore(
+                    wallet=wallet,
+                    status="active_candidate",
+                    rank_score=10,
+                    reasons=[],
+                    metrics={"wallet": wallet, "pnl_total": -999, "pnl_7d": -999, "pnl_30d": -999, "wins_7d": 0, "losses_7d": 1},
+                )
+            )
+            store.upsert_market_settlement(
+                {
+                    "market_slug": market,
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "winning_side": "Up",
+                    "settled_at": "2026-05-25T07:40:00+00:00",
+                    "completed": True,
+                }
+            )
+            store.insert_wallet_activity_events(
+                [
+                    {
+                        "tx_hash": "0xbuy-up",
+                        "wallet": wallet,
+                        "market_slug": market,
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": 100,
+                        "activity_type": "TRADE",
+                        "side": "BUY",
+                        "outcome": "Up",
+                        "outcome_index": 0,
+                        "price": 0.5,
+                        "size": 10,
+                        "usdc": 5,
+                        "observed_at": "2026-05-25T07:30:00+00:00",
+                    },
+                    {
+                        "tx_hash": "0xbuy-down",
+                        "wallet": wallet,
+                        "market_slug": market,
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": 105,
+                        "activity_type": "TRADE",
+                        "side": "BUY",
+                        "outcome": "Down",
+                        "outcome_index": 1,
+                        "price": 0.2,
+                        "size": 5,
+                        "usdc": 1,
+                        "observed_at": "2026-05-25T07:30:05+00:00",
+                    },
+                    {
+                        "tx_hash": "0xmerge",
+                        "wallet": wallet,
+                        "market_slug": market,
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": 110,
+                        "activity_type": "MERGE",
+                        "outcome_index": 999,
+                        "size": 5,
+                        "usdc": 5,
+                        "observed_at": "2026-05-25T07:35:00+00:00",
+                    },
+                ]
+            )
+            store.close()
+
+            status = build_dashboard_status(data_dir, now=dt.datetime(2026, 5, 25, 8, tzinfo=dt.timezone.utc))
+            detail = wallet_detail(data_dir, wallet)
+
+        row = status["candidates"]["watchlist"][0]
+        self.assertAlmostEqual(row["metrics"]["local_observed_pnl_total"], 4.0)
+        self.assertEqual(row["metrics"]["local_observed_pnl_source"], "watchlist_activity_ledger")
+        self.assertAlmostEqual(detail["ledger_summary"]["realized_pnl"], 4.0)
+        self.assertEqual(detail["settled_markets"][0]["pnl_source"], "watchlist_activity_ledger")
+
     def test_dashboard_caps_archive_candidates(self):
         from poly_monitor.dashboard.status import build_dashboard_status
 

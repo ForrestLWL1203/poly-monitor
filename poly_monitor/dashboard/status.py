@@ -184,6 +184,8 @@ def _sqlite_candidates(data_dir: Path) -> dict[str, list[dict[str, Any]]]:
             if display_name and isinstance(metrics, dict):
                 metrics.setdefault("name", display_name)
             is_watched = wallet in watchlist
+            if is_watched and isinstance(metrics, dict):
+                metrics.update(_watchlist_local_metrics(conn, wallet))
             item = _normalize_candidate(
                 {
                     "wallet": wallet,
@@ -207,6 +209,7 @@ def _sqlite_candidates(data_dir: Path) -> dict[str, list[dict[str, Any]]]:
                 continue
             display_name = trade_names.get(wallet, "")
             metrics = _wallet_local_metrics(conn, wallet)
+            metrics.update(_watchlist_local_metrics(conn, wallet))
             if display_name:
                 metrics["name"] = display_name
             candidates["watchlist"].append(
@@ -378,6 +381,47 @@ def _trade_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _wallet_ledger_rows(conn: sqlite3.Connection, wallet: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    if _table_exists(conn, "watchlist_market_pnl"):
+        try:
+            watch_rows = conn.execute(
+                """
+                SELECT *
+                FROM watchlist_market_pnl
+                WHERE wallet=?
+                ORDER BY settled_at DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (wallet.lower(), limit),
+            ).fetchall()
+        except sqlite3.Error:
+            watch_rows = []
+        if watch_rows:
+            return [
+                {
+                    "wallet": row["wallet"],
+                    "market_slug": row["market_slug"],
+                    "condition_id": row["condition_id"],
+                    "symbol": row["symbol"],
+                    "realized_pnl": row["realized_pnl"],
+                    "buy_usdc": row["buy_usdc"],
+                    "sell_usdc": row["sell_usdc"],
+                    "merge_usdc": row["merge_usdc"],
+                    "redeem_usdc": row["redeem_usdc"],
+                    "cash_flow": row["cash_flow"],
+                    "settled_value": row["settled_value"],
+                    "net_shares_up": row["net_shares_up"],
+                    "net_shares_down": row["net_shares_down"],
+                    "trades": row["activity_events"],
+                    "activity_events": row["activity_events"],
+                    "has_merge": bool(row["has_merge"]),
+                    "has_redeem": bool(row["has_redeem"]),
+                    "winning_side": row["winning_side"],
+                    "settled_at": row["settled_at"],
+                    "incomplete": bool(row["incomplete"]),
+                    "pnl_source": "watchlist_activity_ledger",
+                }
+                for row in watch_rows
+            ]
     try:
         rows = conn.execute(
             """
@@ -423,6 +467,56 @@ def _ledger_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "buy_usdc": round(sum(float(row.get("buy_usdc") or 0.0) for row in complete_rows), 6),
         "sell_usdc": round(sum(float(row.get("sell_usdc") or 0.0) for row in complete_rows), 6),
         "incomplete_markets": sum(1 for row in rows if row.get("incomplete")),
+    }
+
+
+def _watchlist_local_metrics(conn: sqlite3.Connection, wallet: str, *, now: dt.datetime | None = None) -> dict[str, Any]:
+    if not _table_exists(conn, "watchlist_market_pnl"):
+        return {}
+    now_value = now or utc_now()
+    cutoff_7d = (now_value - dt.timedelta(days=7)).isoformat()
+    cutoff_30d = (now_value - dt.timedelta(days=30)).isoformat()
+    try:
+        rows_7d = conn.execute(
+            "SELECT * FROM watchlist_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=0",
+            (wallet.lower(), cutoff_7d),
+        ).fetchall()
+        rows_30d = conn.execute(
+            "SELECT * FROM watchlist_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=0",
+            (wallet.lower(), cutoff_30d),
+        ).fetchall()
+        rows_total = conn.execute(
+            "SELECT * FROM watchlist_market_pnl WHERE wallet=? AND incomplete=0",
+            (wallet.lower(),),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    if not rows_7d and not rows_30d and not rows_total:
+        return {}
+
+    def pnl(rows: list[sqlite3.Row]) -> float:
+        return round(sum(float(row["realized_pnl"] or 0.0) for row in rows), 6)
+
+    settled_times: list[dt.datetime] = []
+    for row in rows_total:
+        raw = str(row["settled_at"] or "")
+        try:
+            settled_times.append(dt.datetime.fromisoformat(raw.replace("Z", "+00:00")))
+        except ValueError:
+            continue
+    first_settled = min(settled_times) if settled_times else None
+    observed_span_hours = round((now_value - first_settled).total_seconds() / 3600.0, 3) if first_settled else 0.0
+    return {
+        "local_observed_pnl_7d": pnl(rows_7d),
+        "local_observed_pnl_30d": pnl(rows_30d),
+        "local_observed_pnl_total": pnl(rows_total),
+        "local_observed_wins_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) > 0),
+        "local_observed_losses_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) < 0),
+        "local_observed_settled_markets_7d": len(rows_7d),
+        "local_observed_settled_markets_30d": len(rows_30d),
+        "local_observed_settled_markets_total": len(rows_total),
+        "local_observed_observed_span_hours": observed_span_hours,
+        "local_observed_pnl_source": "watchlist_activity_ledger",
     }
 
 
@@ -650,6 +744,7 @@ def _wallet_local_metrics(conn: sqlite3.Connection, wallet: str, *, now: dt.date
     if rows:
         last_ts = max(int(row["exchange_ts"]) for row in rows)
         metrics["last_active_age_hours"] = round(max(0, now_ts - last_ts) / 3600.0, 3)
+    metrics.update(_watchlist_local_metrics(conn, wallet, now=now or utc_now()))
     return metrics
 
 
@@ -658,8 +753,8 @@ def build_dashboard_status(data_dir: Path, *, now: dt.datetime | None = None, re
     data_dir = data_dir.expanduser().resolve()
     report, report_candidates = _report_candidates(data_dir / "reports" / "latest_candidates.json")
     sqlite_candidates = _sqlite_candidates(data_dir)
-    has_sqlite_scores = any(sqlite_candidates.get(group) for group in SCORED_GROUPS)
-    candidates = sqlite_candidates if has_sqlite_scores else report_candidates
+    has_sqlite_candidates = any(sqlite_candidates.get(group) for group in CANDIDATE_GROUPS)
+    candidates = sqlite_candidates if has_sqlite_candidates else report_candidates
     sqlite = _sqlite_summary(data_dir)
     events = _tail_raw_events(data_dir / "raw")
     event_summary = _event_summary_from_events(events, now=now, wallet_names=_candidate_wallet_names(candidates))
@@ -724,6 +819,8 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
         if score_row is None and not trade_rows and watch_row is None:
             return None
         metrics = _safe_json_loads(score_row["metrics_json"], {}) if score_row else _wallet_local_metrics(conn, wallet)
+        if watch_row is not None and isinstance(metrics, dict):
+            metrics.update(_watchlist_local_metrics(conn, wallet))
         display_name = name_row["name"] if name_row else ""
         if not display_name and isinstance(metrics, dict):
             display_name = str(metrics.get("name") or metrics.get("profile_name") or metrics.get("pseudonym") or "")
