@@ -706,6 +706,22 @@ class ObserverStore:
         ).fetchall()
         return [str(row["wallet"]) for row in rows]
 
+    def high_activity_wallets_24h(self, *, now_ts: int | None = None, limit: int = 200) -> list[str]:
+        now_value = now_ts if now_ts is not None else int(dt.datetime.now(dt.timezone.utc).timestamp())
+        cutoff_ts = now_value - 86400
+        rows = self.conn.execute(
+            """
+            SELECT wallet, COUNT(*) AS trades_24h, COUNT(DISTINCT market_slug) AS markets_24h, MAX(exchange_ts) AS last_ts
+            FROM trades
+            WHERE exchange_ts >= ?
+            GROUP BY wallet
+            ORDER BY markets_24h DESC, trades_24h DESC, last_ts DESC
+            LIMIT ?
+            """,
+            (cutoff_ts, limit),
+        ).fetchall()
+        return [str(row["wallet"]) for row in rows]
+
     def market_last_exchange_ts(self, condition_id: str) -> int:
         row = self.conn.execute(
             "SELECT MAX(exchange_ts) AS last_ts FROM trades WHERE condition_id=?",

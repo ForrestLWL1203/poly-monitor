@@ -233,6 +233,46 @@ class ObserverScoringQueueTests(unittest.TestCase):
             ("0xrecent", None),
         ])
 
+    def test_score_batch_discovers_high_activity_wallets_beyond_recent_limit(self):
+        def trade(wallet: str, tx: str, ts: int, market: str) -> dict:
+            return {
+                "tx_hash": tx,
+                "wallet": wallet,
+                "market_slug": market,
+                "condition_id": f"cond-{market}",
+                "symbol": "BTC",
+                "exchange_ts": ts,
+                "outcome": "Up",
+                "side": "BUY",
+                "price": 0.5,
+                "size": 2,
+                "usdc": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            observer = CryptoWalletObserver(
+                ObserverConfig(
+                    data_dir=data_dir,
+                    score_wallets_per_cycle=1,
+                    max_active_candidates=0,
+                    score_wallet_pool_limit=3,
+                )
+            )
+            try:
+                strong = "0xstrong"
+                for idx in range(6):
+                    observer.store.insert_trade(trade(strong, f"0xs{idx}", 100 + idx, f"btc-updown-5m-strong-{idx}"))
+                for idx in range(4):
+                    observer.store.insert_trade(trade(f"0xrecent{idx}", f"0xr{idx}", 1_000 + idx, "btc-updown-5m-recent"))
+
+                batch = observer._score_batch(now=dt.datetime.fromtimestamp(1_100, dt.timezone.utc))
+            finally:
+                observer.writer.close()
+                observer.store.close()
+
+        self.assertEqual(batch, [(strong, None)])
+
     def test_score_batch_skips_fresh_dormant_and_archived_wallets(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

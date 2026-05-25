@@ -332,6 +332,39 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(remaining, {watched, fresh_removed})
         self.assertEqual(pnl_wallets, {watched, fresh_removed})
 
+    def test_high_activity_wallets_rank_by_24h_market_count_not_only_recency(self):
+        def trade(wallet: str, tx: str, ts: int, market: str) -> dict:
+            return {
+                "tx_hash": tx,
+                "wallet": wallet,
+                "market_slug": market,
+                "condition_id": f"cond-{market}",
+                "symbol": "BTC",
+                "exchange_ts": ts,
+                "outcome": "Up",
+                "side": "BUY",
+                "price": 0.5,
+                "size": 2,
+                "usdc": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                now_ts = 10_000
+                strong = "0xstrong"
+                for idx in range(6):
+                    store.insert_trade(trade(strong, f"0xs{idx}", now_ts - 600 + idx, f"btc-updown-5m-strong-{idx}"))
+                for idx in range(5):
+                    store.insert_trade(trade(f"0xrecent{idx}", f"0xr{idx}", now_ts - idx, "btc-updown-5m-recent"))
+
+                wallets = store.high_activity_wallets_24h(now_ts=now_ts, limit=3)
+            finally:
+                store.close()
+
+        self.assertEqual(wallets[0], strong)
+        self.assertEqual(len(wallets), 3)
+
     def test_cleanup_does_not_make_observed_pnl_reset_on_settlement_refresh(self):
         def trade(wallet: str, tx: str, ts: int) -> dict:
             return {

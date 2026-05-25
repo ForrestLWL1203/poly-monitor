@@ -762,6 +762,10 @@ class CryptoWalletObserver:
             discovery_wallets = list(
                 dict.fromkeys(
                     list(due_dormant)
+                    + self.store.high_activity_wallets_24h(
+                        now_ts=int(now.timestamp()),
+                        limit=self.config.score_wallet_pool_limit,
+                    )
                     + self.store.recent_wallets(limit=self.config.score_wallet_pool_limit)
                     + list(reactivatable_archives)
                 )
