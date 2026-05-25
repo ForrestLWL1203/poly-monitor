@@ -55,9 +55,9 @@ class ObserverConfig:
     watchlist_activity_lookback_sec: int = 6 * 3600
     watchlist_activity_safety_window_sec: int = 300
     watchlist_activity_pages: int = 2
-    watchlist_activity_retention_days: int = 30
-    non_watchlist_activity_retention_days: int = 7
-    context_retention_days: int = 30
+    watchlist_activity_retention_days: int = 7
+    non_watchlist_activity_retention_days: int = 3
+    context_retention_days: int = 7
     market_state_retention_days: int = 7
     strategy_archive_interval_hours: float = 6.0
     market_state_sample_sec: float = 5.0
@@ -204,6 +204,8 @@ class CryptoWalletObserver:
         self._last_market_state_sample: dict[str, tuple[dt.datetime, tuple[Any, ...]]] = {}
         self._last_score_event_state: dict[str, tuple[str, float]] = {}
         self._market_trade_backoff_until: dict[str, float] = {}
+        self._cycle_watched_rows: list[dict[str, Any]] | None = None
+        self._cycle_watched_slugs: set[str] | None = None
         self._refresh_candidate_caches()
 
     async def run(self) -> int:
@@ -214,6 +216,7 @@ class CryptoWalletObserver:
             self._last_window_refresh = time.monotonic()
             await self.stream.connect(self._all_tokens())
             while True:
+                self._begin_cycle()
                 await self._refresh_windows_if_due()
                 await self._refresh_window_open_prices_if_due()
                 await self._write_pending_settlements_if_due()
@@ -269,6 +272,24 @@ class CryptoWalletObserver:
         self._last_watchlist_activity_poll = time.monotonic()
         await self._poll_watchlist_activity_once()
 
+    def _begin_cycle(self) -> None:
+        self._cycle_watched_rows = None
+        self._cycle_watched_slugs = None
+
+    def _active_watched_rows(self, *, now: dt.datetime | None = None) -> list[dict[str, Any]]:
+        if self._cycle_watched_rows is None:
+            self._cycle_watched_rows = self.store.watched_market_windows(active_only=True, now=now)
+        return self._cycle_watched_rows
+
+    def _active_watched_slugs(self, *, now: dt.datetime | None = None) -> set[str]:
+        if self._cycle_watched_slugs is None:
+            self._cycle_watched_slugs = {str(row.get("market_slug") or "") for row in self._active_watched_rows(now=now)}
+        return self._cycle_watched_slugs
+
+    def _invalidate_active_watched_cache(self) -> None:
+        self._cycle_watched_rows = None
+        self._cycle_watched_slugs = None
+
     def _next_sleep_delay(self, started: float) -> float:
         now = time.monotonic()
         due_times = [
@@ -278,6 +299,13 @@ class CryptoWalletObserver:
             self._last_report_refresh + self.config.report_refresh_sec,
             self._last_watchlist_activity_poll + self.config.watchlist_activity_poll_sec,
         ]
+        if self._has_active_watched_market():
+            watched_cadence = min(
+                max(0.05, float(self.config.watched_market_state_sample_sec)),
+                max(0.05, float(self.config.watched_market_state_terminal_sample_sec)),
+                max(0.05, float(self.config.watched_market_state_heartbeat_sec)),
+            )
+            due_times.append(now + watched_cadence)
         if self._has_missing_open_prices():
             due_times.append(self._last_open_price_refresh + self.config.open_price_refresh_sec)
         if self.pending_settlements:
@@ -295,6 +323,9 @@ class CryptoWalletObserver:
             due_times.append(started + self.config.seconds)
         delay = min(due_times) - now
         return max(0.05, min(delay, 5.0))
+
+    def _has_active_watched_market(self) -> bool:
+        return bool(self._active_watched_rows())
 
     def _has_missing_open_prices(self) -> bool:
         return any(
@@ -383,7 +414,7 @@ class CryptoWalletObserver:
             for slug, item in self.pending_settlements.items()
             if item[1] <= now
         }
-        for row in self.store.watched_market_windows(active_only=True, now=now):
+        for row in self._active_watched_rows(now=now):
             slug = str(row.get("market_slug") or "")
             if not slug or slug in due:
                 continue
@@ -462,7 +493,7 @@ class CryptoWalletObserver:
             backoff_until = self._market_trade_backoff_until.get(window.condition_id, 0.0)
             if monotonic_now < backoff_until:
                 continue
-            is_watched = self.store.is_watched_market_active(window.slug)
+            is_watched = window.slug in self._active_watched_slugs()
             pages = self.config.watched_market_trade_pages if is_watched else self.config.market_trade_pages
             page_size = max(1, min(100, int(pages) * 100))
             try:
@@ -513,7 +544,7 @@ class CryptoWalletObserver:
             if window.condition_id:
                 by_condition[window.condition_id] = (symbol, window)
             by_slug[window.slug] = window
-        for row in self.store.watched_market_windows(active_only=True):
+        for row in self._active_watched_rows():
             condition_id = str(row.get("condition_id") or "")
             if not condition_id or condition_id in by_condition:
                 continue
@@ -551,6 +582,7 @@ class CryptoWalletObserver:
         observed_at = dt.datetime.now(dt.timezone.utc).isoformat()
         page_size = 500
         page_count = max(1, int(self.config.watchlist_activity_pages))
+        touched_activity_markets: set[str] = set()
         for wallet in wallets:
             lookback_start = now_ts - max(60, int(self.config.watchlist_activity_lookback_sec))
             last_seen = self.store.last_wallet_activity_ts(wallet)
@@ -586,7 +618,8 @@ class CryptoWalletObserver:
                     "error": str(exc),
                 })
                 continue
-            inserted = self.store.insert_wallet_activity_events(normalized)
+            inserted = self.store.insert_wallet_activity_events(normalized, recompute=False)
+            touched_activity_markets.update(str(event.get("market_slug") or "") for event in inserted)
             self._register_watchlist_market_windows(inserted)
             await self._backfill_watchlist_activity_settlements(inserted)
             trade_rows = [
@@ -600,10 +633,6 @@ class CryptoWalletObserver:
                 if context_rows:
                     capped_context_rows = context_rows[: max(0, self.config.max_context_writes_per_cycle)]
                     self.store.insert_wallet_trade_contexts(capped_context_rows)
-                    for row in capped_context_rows:
-                        context = row.get("context_json")
-                        if isinstance(context, dict):
-                            self.writer.write(context)
             for event in inserted:
                 warning = self._activity_value_warning(event)
                 if warning:
@@ -623,6 +652,7 @@ class CryptoWalletObserver:
                     "usdc": event["usdc"],
                     "tx_hash": event["tx_hash"],
                 })
+        self.store.recompute_market_pnl_for_markets(touched_activity_markets)
 
     def _register_watchlist_market_windows(self, events: list[dict[str, Any]]) -> None:
         now = dt.datetime.now(dt.timezone.utc)
@@ -633,10 +663,10 @@ class CryptoWalletObserver:
             window = self._activity_window_from_slug(event)
             if window is None:
                 continue
-            capture_until = max(
-                now + dt.timedelta(seconds=max(0.0, self.config.watchlist_market_capture_after_end_sec)),
-                window.end_time + dt.timedelta(seconds=max(0.0, self.config.watchlist_market_capture_after_end_sec)),
-            )
+            if window.end_time <= now:
+                continue
+            capture_after_end_sec = max(0.0, self.config.watchlist_market_capture_after_end_sec)
+            capture_until = window.end_time + dt.timedelta(seconds=capture_after_end_sec)
             created = self.store.upsert_watched_market_window(
                 {
                     "market_slug": window.slug,
@@ -651,6 +681,7 @@ class CryptoWalletObserver:
                     "status": "tracking",
                 }
             )
+            self._invalidate_active_watched_cache()
             if created:
                 self.writer.write(
                     {
@@ -845,7 +876,7 @@ class CryptoWalletObserver:
         )
         last = self._last_market_state_sample.get(window.slug)
         remaining_sec = (window.end_time - now).total_seconds()
-        watched = self.store.is_watched_market_active(window.slug, now=now)
+        watched = window.slug in self._active_watched_slugs(now=now)
         if watched:
             cadence = (
                 self.config.watched_market_state_terminal_sample_sec

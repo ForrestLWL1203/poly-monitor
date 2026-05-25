@@ -99,7 +99,6 @@ def normalize_activity_event(raw: dict[str, Any], *, wallet: str, observed_at: s
         "fill_id": str(raw.get("id") or raw.get("fillId") or raw.get("logIndex") or raw.get("transactionIndex") or ""),
         "name": str(raw.get("name") or ""),
         "pseudonym": str(raw.get("pseudonym") or ""),
-        "raw_json": json.dumps(raw, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
     }
 
 

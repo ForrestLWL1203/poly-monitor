@@ -1,9 +1,11 @@
 import datetime as dt
 import gzip
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from poly_monitor.storage import ObserverStore, WatchlistStore
 
@@ -57,7 +59,6 @@ class StorageWalletMetricsTests(unittest.TestCase):
                         "usdc": 5.2,
                         "asset": "token-up",
                         "observed_at": "2026-05-25T00:00:00+00:00",
-                        "raw_json": '{"type":"TRADE"}',
                     },
                     {
                         "tx_hash": "0xmerge",
@@ -75,7 +76,6 @@ class StorageWalletMetricsTests(unittest.TestCase):
                         "usdc": 10,
                         "asset": "",
                         "observed_at": "2026-05-25T00:00:01+00:00",
-                        "raw_json": '{"type":"MERGE"}',
                     },
                     {
                         "tx_hash": "0xredeem",
@@ -93,7 +93,6 @@ class StorageWalletMetricsTests(unittest.TestCase):
                         "usdc": 5,
                         "asset": "",
                         "observed_at": "2026-05-25T00:00:02+00:00",
-                        "raw_json": '{"type":"REDEEM"}',
                     },
                 ]
 
@@ -106,6 +105,47 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual([row["activity_type"] for row in saved], ["TRADE", "MERGE", "REDEEM"])
         self.assertEqual(saved[1]["usdc"], 10)
         self.assertEqual(saved[2]["outcome_index"], 999)
+
+    def test_wallet_activity_events_use_compact_fill_id_primary_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                base = {
+                    "tx_hash": "0xtrade",
+                    "wallet": "0xabc",
+                    "market_slug": "btc-updown-5m-1",
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "exchange_ts": 100,
+                    "activity_type": "TRADE",
+                    "side": "BUY",
+                    "outcome": "Up",
+                    "outcome_index": 0,
+                    "price": 0.52,
+                    "size": 10,
+                    "usdc": 5.2,
+                    "asset": "token-up",
+                    "fill_id": "fill-1",
+                    "observed_at": "2026-05-25T00:00:00+00:00",
+                }
+                inserted = store.insert_wallet_activity_events(
+                    [
+                        base,
+                        {**base, "price": 0.53, "size": 11, "usdc": 5.83},
+                        {**base, "fill_id": "fill-2", "price": 0.53, "size": 11, "usdc": 5.83},
+                    ]
+                )
+                pk = {
+                    str(row["name"]): int(row["pk"] or 0)
+                    for row in store.conn.execute("PRAGMA table_info(wallet_activity_events)").fetchall()
+                }
+                saved = store.wallet_activity_events("0xabc")
+            finally:
+                store.close()
+
+        self.assertEqual((pk["tx_hash"], pk["fill_id"], pk["activity_type"]), (1, 2, 3))
+        self.assertEqual(len(inserted), 2)
+        self.assertEqual([row["fill_id"] for row in saved], ["fill-1", "fill-2"])
 
     def test_wallet_trade_contexts_store_compact_context_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,6 +204,182 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["sample_reason"], "heartbeat")
         self.assertEqual(json.loads(rows[0]["up_json"])["ask"], 0.51)
+
+    def test_market_state_samples_store_stale_empty_books_as_null(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                inserted = store.insert_market_state_samples(
+                    [
+                        {
+                            "market_slug": "btc-updown-5m-1770000000",
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "sampled_ts": 1770000010,
+                            "observed_at": "2026-05-25T00:00:00+00:00",
+                            "up_json": {},
+                            "down_json": {},
+                            "book_stale": True,
+                            "sample_reason": "heartbeat",
+                        }
+                    ]
+                )
+                rows = store.market_state_samples("btc-updown-5m-1770000000")
+            finally:
+                store.close()
+
+        self.assertEqual(len(inserted), 1)
+        self.assertIsNone(rows[0]["up_json"])
+        self.assertIsNone(rows[0]["down_json"])
+        self.assertEqual(rows[0]["book_stale"], 1)
+
+    def test_wallet_activity_profiles_are_deduplicated_from_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xtrade",
+                            "wallet": "0xabc",
+                            "market_slug": "btc-updown-5m-1",
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.52,
+                            "size": 10,
+                            "usdc": 5.2,
+                            "asset": "token-up",
+                            "name": "Joe Trader",
+                            "pseudonym": "joe",
+                            "observed_at": "2026-05-25T00:00:00+00:00",
+                        }
+                    ]
+                )
+                activity_columns = {
+                    str(row["name"])
+                    for row in store.conn.execute("PRAGMA table_info(wallet_activity_events)").fetchall()
+                }
+                profile = store.conn.execute("SELECT * FROM wallet_profiles WHERE wallet='0xabc'").fetchone()
+                activity = store.wallet_activity_events("0xabc")[0]
+            finally:
+                store.close()
+
+        self.assertNotIn("name", activity_columns)
+        self.assertNotIn("pseudonym", activity_columns)
+        self.assertEqual(profile["name"], "Joe Trader")
+        self.assertEqual(profile["pseudonym"], "joe")
+        self.assertNotIn("name", activity)
+
+    def test_wallet_activity_profile_migration_preserves_latest_legacy_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "observer.sqlite"
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE wallet_activity_events (
+                        tx_hash TEXT NOT NULL,
+                        wallet TEXT NOT NULL,
+                        market_slug TEXT NOT NULL,
+                        condition_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        exchange_ts INTEGER NOT NULL,
+                        activity_type TEXT NOT NULL,
+                        side TEXT NOT NULL DEFAULT '',
+                        outcome TEXT NOT NULL DEFAULT '',
+                        outcome_index INTEGER NOT NULL DEFAULT -1,
+                        price REAL NOT NULL DEFAULT 0,
+                        size REAL NOT NULL DEFAULT 0,
+                        usdc REAL NOT NULL DEFAULT 0,
+                        asset TEXT NOT NULL DEFAULT '',
+                        name TEXT NOT NULL DEFAULT '',
+                        pseudonym TEXT NOT NULL DEFAULT '',
+                        raw_json TEXT NOT NULL DEFAULT '{}',
+                        observed_at TEXT NOT NULL,
+                        PRIMARY KEY(tx_hash, wallet, condition_id, activity_type, outcome_index, asset, price, size)
+                    );
+                    INSERT INTO wallet_activity_events(
+                        tx_hash,wallet,market_slug,condition_id,symbol,exchange_ts,activity_type,
+                        side,outcome,outcome_index,price,size,usdc,asset,name,pseudonym,raw_json,observed_at
+                    ) VALUES
+                    ('0xold','0xabc','btc-updown-5m-1','0xcond','BTC',100,'TRADE','BUY','Up',0,0.5,10,5,'up','Old Name','old','{}','2026-05-25T00:00:00+00:00'),
+                    ('0xnew','0xabc','btc-updown-5m-2','0xcond2','BTC',200,'TRADE','BUY','Up',0,0.5,10,5,'up','New Name','new','{}','2026-05-25T00:01:00+00:00');
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = ObserverStore(path)
+            try:
+                profile = store.conn.execute("SELECT * FROM wallet_profiles WHERE wallet='0xabc'").fetchone()
+                activity_columns = {
+                    str(row["name"])
+                    for row in store.conn.execute("PRAGMA table_info(wallet_activity_events)").fetchall()
+                }
+            finally:
+                store.close()
+
+        self.assertEqual(profile["name"], "New Name")
+        self.assertEqual(profile["pseudonym"], "new")
+        self.assertNotIn("name", activity_columns)
+        self.assertNotIn("raw_json", activity_columns)
+
+    def test_wallet_activity_schema_migration_adds_fill_id_and_compact_pk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "observer.sqlite"
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE wallet_activity_events (
+                        tx_hash TEXT NOT NULL,
+                        wallet TEXT NOT NULL,
+                        market_slug TEXT NOT NULL,
+                        condition_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        exchange_ts INTEGER NOT NULL,
+                        activity_type TEXT NOT NULL,
+                        side TEXT NOT NULL DEFAULT '',
+                        outcome TEXT NOT NULL DEFAULT '',
+                        outcome_index INTEGER NOT NULL DEFAULT -1,
+                        price REAL NOT NULL DEFAULT 0,
+                        size REAL NOT NULL DEFAULT 0,
+                        usdc REAL NOT NULL DEFAULT 0,
+                        asset TEXT NOT NULL DEFAULT '',
+                        observed_at TEXT NOT NULL,
+                        PRIMARY KEY(tx_hash, wallet, condition_id, activity_type, outcome_index, asset, price, size)
+                    );
+                    INSERT INTO wallet_activity_events(
+                        tx_hash,wallet,market_slug,condition_id,symbol,exchange_ts,activity_type,
+                        side,outcome,outcome_index,price,size,usdc,asset,observed_at
+                    ) VALUES
+                    ('0xtrade','0xabc','btc-updown-5m-1','0xcond','BTC',100,'TRADE','BUY','Up',0,0.5,10,5,'up','2026-05-25T00:00:00+00:00'),
+                    ('0xtrade','0xabc','btc-updown-5m-1','0xcond','BTC',101,'TRADE','BUY','Down',1,0.4,12,4.8,'down','2026-05-25T00:00:01+00:00');
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = ObserverStore(path)
+            try:
+                pk = {
+                    str(row["name"]): int(row["pk"] or 0)
+                    for row in store.conn.execute("PRAGMA table_info(wallet_activity_events)").fetchall()
+                }
+                rows = store.wallet_activity_events("0xabc")
+            finally:
+                store.close()
+
+        self.assertEqual((pk["tx_hash"], pk["fill_id"], pk["activity_type"]), (1, 2, 3))
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(str(row["fill_id"]).startswith("legacy:") for row in rows))
 
     def test_archive_strategy_rows_exports_gzip_and_deletes_old_rows_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -470,6 +686,67 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(row["activity_net_shares_up"], 70.0)
         self.assertAlmostEqual(row["activity_net_shares_down"], 0.0)
 
+    def test_activity_ledger_marks_bad_cashflow_value_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                wallet = "0xbadvalue"
+                market = "btc-updown-5m-bad-cashflow"
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-25T07:40:00+00:00",
+                        "completed": True,
+                    }
+                )
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xbuy-up",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.4,
+                            "size": 100,
+                            "usdc": 40,
+                            "observed_at": "2026-05-25T07:30:00+00:00",
+                        },
+                        {
+                            "tx_hash": "0xbad-merge",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 120,
+                            "activity_type": "MERGE",
+                            "outcome_index": 999,
+                            "size": 100,
+                            "usdc": 0,
+                            "observed_at": "2026-05-25T07:35:00+00:00",
+                        },
+                    ]
+                )
+
+                row = store.wallet_market_pnl_rows(wallet)[0]
+            finally:
+                store.close()
+
+        self.assertEqual(row["pnl_source"], "activity_ledger")
+        self.assertEqual(row["incomplete"], 1)
+        self.assertAlmostEqual(row["activity_merge_usdc"], 0.0)
+        self.assertAlmostEqual(row["activity_cash_flow"], -40.0)
+        self.assertAlmostEqual(row["activity_net_shares_up"], 100.0)
+        self.assertAlmostEqual(row["activity_net_shares_down"], 0.0)
+
     def test_store_startup_recomputes_settled_activity_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observer.sqlite"
@@ -486,8 +763,8 @@ class StorageWalletMetricsTests(unittest.TestCase):
                         """
                         INSERT INTO wallet_activity_events(
                             tx_hash,wallet,market_slug,condition_id,symbol,exchange_ts,activity_type,
-                            side,outcome,outcome_index,price,size,usdc,asset,name,pseudonym,raw_json,observed_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            side,outcome,outcome_index,price,size,usdc,asset,observed_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             tx_hash,
@@ -504,9 +781,6 @@ class StorageWalletMetricsTests(unittest.TestCase):
                             size,
                             usdc,
                             "",
-                            "",
-                            "",
-                            "{}",
                             "2026-05-25T11:05:37+00:00",
                         ),
                     )
@@ -534,6 +808,50 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(rows[0]["pnl_source"], "activity_ledger")
         self.assertAlmostEqual(rows[0]["realized_pnl"], 4.807455)
         self.assertEqual(rows[0]["incomplete"], 0)
+
+    def test_store_startup_does_not_recompute_activity_pnl_after_migration_version_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "observer.sqlite"
+            store = ObserverStore(path)
+            try:
+                wallet = "0xstartupskip"
+                market = "btc-updown-5m-startup-skip"
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": market,
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-05-25T07:40:00+00:00",
+                        "completed": True,
+                    }
+                )
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xbuy-up",
+                            "wallet": wallet,
+                            "market_slug": market,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.5,
+                            "size": 10,
+                            "usdc": 5,
+                            "observed_at": "2026-05-25T07:30:00+00:00",
+                        }
+                    ]
+                )
+            finally:
+                store.close()
+
+            with patch.object(ObserverStore, "_recompute_market_pnl", side_effect=AssertionError("unexpected startup recompute")):
+                store = ObserverStore(path)
+                store.close()
 
     def test_watchlist_activity_settlement_creates_pnl_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -761,8 +1079,8 @@ class StorageWalletMetricsTests(unittest.TestCase):
                     """
                     INSERT INTO wallet_activity_events(
                         tx_hash,wallet,market_slug,condition_id,symbol,exchange_ts,activity_type,
-                        side,outcome,outcome_index,price,size,usdc,asset,name,pseudonym,raw_json,observed_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        side,outcome,outcome_index,price,size,usdc,asset,observed_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         "0xsplit",
@@ -779,9 +1097,6 @@ class StorageWalletMetricsTests(unittest.TestCase):
                         10.0,
                         10.0,
                         "",
-                        "",
-                        "",
-                        "{}",
                         "2026-05-25T07:30:00+00:00",
                     ),
                 )
@@ -895,6 +1210,38 @@ class StorageWalletMetricsTests(unittest.TestCase):
                 self.assertEqual(metrics["max_trades_per_market_30d"], 603)
             finally:
                 store.close()
+
+    def test_wallet_trade_metrics_uses_one_max_trades_query(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                now_ts = 2_000_000
+                store.insert_trades(
+                    [
+                        trade_row("0xabc", "btc-updown-5m-hot", now_ts - 100 - idx, tx_hash=f"tx-hot-{idx}")
+                        for idx in range(3)
+                    ]
+                    + [
+                        trade_row("0xabc", "btc-updown-5m-week", now_ts - 2 * 86400 - idx, tx_hash=f"tx-week-{idx}")
+                        for idx in range(5)
+                    ]
+                    + [
+                        trade_row("0xabc", "btc-updown-5m-month", now_ts - 10 * 86400 - idx, tx_hash=f"tx-month-{idx}")
+                        for idx in range(7)
+                    ]
+                )
+                statements: list[str] = []
+                store.conn.set_trace_callback(statements.append)
+                metrics = store.wallet_trade_metrics("0xabc", now_ts=now_ts)
+            finally:
+                store.conn.set_trace_callback(None)
+                store.close()
+
+        grouped_max_queries = [sql for sql in statements if "n_24h" in sql and "GROUP BY market_slug" in sql]
+        self.assertEqual(len(grouped_max_queries), 1)
+        self.assertEqual(metrics["max_trades_per_market_24h"], 3)
+        self.assertEqual(metrics["max_trades_per_market_7d"], 5)
+        self.assertEqual(metrics["max_trades_per_market_30d"], 7)
 
     def test_wallet_24h_counts_returns_observer_override_counts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1110,6 +1457,85 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["pnl_total"], 0.0)
         self.assertAlmostEqual(metrics["historical_pnl"], 0.0)
         self.assertEqual(metrics["settled_markets_total"], 2)
+
+    def test_wallet_observed_metrics_use_one_pnl_query(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                now_ts = int(dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc).timestamp())
+                for idx, pnl in enumerate((10.0, 5.0, -2.0, 1.0), start=1):
+                    store.conn.execute(
+                        """
+                        INSERT INTO wallet_market_pnl(
+                            wallet, market_slug, condition_id, symbol, realized_pnl, buy_usdc, sell_usdc,
+                            settled_value, net_shares_up, net_shares_down, trades, winning_side, settled_at,
+                            incomplete, pnl_source, has_merge_or_split
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            "0xabc",
+                            f"btc-updown-5m-{idx}",
+                            f"0xcond{idx}",
+                            "BTC",
+                            pnl,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            1,
+                            "Up",
+                            dt.datetime.fromtimestamp(now_ts - idx * 3600, dt.timezone.utc).isoformat(),
+                            0,
+                            "activity_ledger" if idx == 1 else "trade_ledger",
+                            1 if idx == 2 else 0,
+                        ),
+                    )
+                store.conn.execute(
+                    """
+                    INSERT INTO wallet_market_pnl(
+                        wallet, market_slug, condition_id, symbol, realized_pnl, buy_usdc, sell_usdc,
+                        settled_value, net_shares_up, net_shares_down, trades, winning_side, settled_at,
+                        incomplete, pnl_source, has_merge_or_split
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        "0xabc",
+                        "btc-updown-5m-bad",
+                        "0xbad",
+                        "BTC",
+                        99.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        1,
+                        "Up",
+                        dt.datetime.fromtimestamp(now_ts - 1800, dt.timezone.utc).isoformat(),
+                        1,
+                        "activity_ledger",
+                        0,
+                    ),
+                )
+                store.conn.commit()
+                statements: list[str] = []
+                store.conn.set_trace_callback(statements.append)
+                metrics = store.wallet_observed_pnl_metrics("0xabc", now_ts=now_ts)
+            finally:
+                store.conn.set_trace_callback(None)
+                store.close()
+
+        pnl_queries = [sql for sql in statements if "FROM wallet_market_pnl" in sql]
+        self.assertEqual(len(pnl_queries), 1)
+        self.assertAlmostEqual(metrics["pnl_30d"], 14.0)
+        self.assertEqual(metrics["wins_7d"], 3)
+        self.assertEqual(metrics["losses_7d"], 1)
+        self.assertEqual(metrics["incomplete_settled_markets_7d"], 1)
+        self.assertEqual(metrics["activity_ledger_markets_7d"], 1)
+        self.assertEqual(metrics["merge_or_split_markets_7d"], 1)
+        self.assertAlmostEqual(metrics["top1_concentration"], round(10.0 / 16.0, 6))
+        self.assertAlmostEqual(metrics["top3_concentration"], 1.0)
 
 
 if __name__ == "__main__":

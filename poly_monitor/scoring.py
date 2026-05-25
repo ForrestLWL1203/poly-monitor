@@ -64,7 +64,7 @@ def _quality_win_loss_counts(metrics: dict[str, Any]) -> tuple[float, float]:
         return _local_wins_7d(metrics), _local_losses_7d(metrics)
     if metrics.get("pnl_source") == "local_observed_ledger":
         return _num(metrics, "wins_7d"), _num(metrics, "losses_7d")
-    return _num(metrics, "closed_position_wins_7d"), _num(metrics, "closed_position_losses_7d")
+    return _num(metrics, "crypto_closed_position_wins_7d"), _num(metrics, "crypto_closed_position_losses_7d")
 
 
 def _local_observed_span_hours(metrics: dict[str, Any]) -> float:

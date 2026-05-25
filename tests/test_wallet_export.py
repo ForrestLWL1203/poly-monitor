@@ -118,9 +118,38 @@ class WalletExportTests(unittest.TestCase):
             self.assertEqual(manifest["windows"][0]["market_state_sample_rows"], 1)
             self.assertFalse(manifest["windows"][0]["settlement_complete"])
             self.assertTrue((manifest_path.parent / "markets" / slug / "market_trades.jsonl").exists())
+            self.assertFalse((manifest_path.parent / "watchlist_market_pnl.jsonl").exists())
+            self.assertNotIn("watchlist_market_pnl_rows", manifest["root_counts"])
             with zipfile.ZipFile(result["zip_path"]) as bundle:
                 self.assertIn("manifest.json", bundle.namelist())
                 self.assertIn(f"markets/{slug}/market_trades.jsonl", bundle.namelist())
+                self.assertNotIn("watchlist_market_pnl.jsonl", bundle.namelist())
+
+    def test_export_watchlist_wallet_prunes_old_timestamped_exports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.add_watchlist_wallet(wallet)
+            finally:
+                store.close()
+            base = data_dir / "exports" / wallet
+            for idx in range(3):
+                old = base / f"20260525-00000{idx}"
+                old.mkdir(parents=True)
+                (old / "manifest.json").write_text("{}\n", encoding="utf-8")
+
+            export_watchlist_wallet(
+                wallet,
+                data_dir=data_dir,
+                now=dt.datetime(2026, 5, 25, 1, 0, tzinfo=dt.timezone.utc),
+                keep_exports=2,
+            )
+
+            remaining = sorted(path.name for path in base.iterdir() if path.is_dir())
+
+        self.assertEqual(remaining, ["20260525-000002", "20260525-010000"])
 
 
 if __name__ == "__main__":

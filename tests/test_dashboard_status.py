@@ -233,6 +233,39 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(detail["metrics"]["btc_markets_24h"], 2)
         self.assertEqual(detail["metrics"]["eth_markets_24h"], 1)
 
+    def test_dashboard_uses_cached_symbol_counts_when_present(self):
+        from poly_monitor.dashboard.status import build_dashboard_status
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0x5555555555555555555555555555555555555555"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            store.upsert_score(
+                CandidateScore(
+                    wallet=wallet,
+                    status="active_candidate",
+                    rank_score=10,
+                    reasons=[],
+                    metrics={
+                        "wallet": wallet,
+                        "markets_24h": 999,
+                        "btc_markets_24h": 7,
+                        "eth_markets_24h": 4,
+                        "pnl_7d": 1,
+                        "pnl_30d": 1,
+                        "wins_7d": 1,
+                        "losses_7d": 0,
+                    },
+                )
+            )
+            store.close()
+
+            status = build_dashboard_status(data_dir, now=dt.datetime.now(dt.timezone.utc))
+
+        metrics = status["candidates"]["active_candidate"][0]["metrics"]
+        self.assertEqual(metrics["btc_markets_24h"], 7)
+        self.assertEqual(metrics["eth_markets_24h"], 4)
+
     def test_wallet_detail_uses_profile_name_without_recent_trades(self):
         from poly_monitor.dashboard.status import wallet_detail
 

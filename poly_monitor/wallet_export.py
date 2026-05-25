@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import shutil
 import sqlite3
 import zipfile
 from pathlib import Path
@@ -160,12 +161,28 @@ def _zip_dir(source_dir: Path, zip_path: Path) -> None:
             bundle.write(path, path.relative_to(source_dir))
 
 
+def _prune_export_dirs(wallet_export_dir: Path, *, keep: int) -> int:
+    if keep <= 0 or not wallet_export_dir.exists():
+        return 0
+    children = sorted(
+        [path for path in wallet_export_dir.iterdir() if path.is_dir()],
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    removed = 0
+    for path in children[keep:]:
+        shutil.rmtree(path)
+        removed += 1
+    return removed
+
+
 def export_watchlist_wallet(
     wallet: str,
     *,
     data_dir: Path,
     out_dir: Path | None = None,
     now: dt.datetime | None = None,
+    keep_exports: int = 10,
 ) -> dict[str, Any]:
     wallet = wallet.lower()
     now_dt = (now or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc)
@@ -192,18 +209,9 @@ def export_watchlist_wallet(
             "SELECT * FROM wallet_market_pnl WHERE wallet=? ORDER BY settled_at ASC, market_slug ASC",
             (wallet,),
         )
-        watchlist_pnl = (
-            _rows(
-                conn,
-                "SELECT * FROM watchlist_market_pnl WHERE wallet=? ORDER BY settled_at ASC, market_slug ASC",
-                (wallet,),
-            )
-            if _table_exists(conn, "watchlist_market_pnl")
-            else []
-        )
         slugs = {
             str(row.get("market_slug") or "")
-            for row in [*activity, *wallet_trades, *wallet_pnl, *watchlist_pnl]
+            for row in [*activity, *wallet_trades, *wallet_pnl]
             if row.get("market_slug")
         }
         if _table_exists(conn, "watched_market_windows"):
@@ -226,14 +234,13 @@ def export_watchlist_wallet(
             "wallet_activity_rows": _write_jsonl(target / "wallet_activity.jsonl", activity),
             "wallet_trades_rows": _write_jsonl(target / "wallet_trades.jsonl", wallet_trades),
             "wallet_market_pnl_rows": _write_jsonl(target / "wallet_market_pnl.jsonl", wallet_pnl),
-            "watchlist_market_pnl_rows": _write_jsonl(target / "watchlist_market_pnl.jsonl", watchlist_pnl),
         }
         windows: list[dict[str, Any]] = []
         for slug in sorted(slugs):
             market_dir = target / "markets" / slug
             market_activity = [row for row in activity if row.get("market_slug") == slug]
             market_wallet_trades = [row for row in wallet_trades if row.get("market_slug") == slug]
-            market_wallet_pnl = [row for row in [*wallet_pnl, *watchlist_pnl] if row.get("market_slug") == slug]
+            market_wallet_pnl = [row for row in wallet_pnl if row.get("market_slug") == slug]
             market_trades = _rows(
                 conn,
                 "SELECT * FROM trades WHERE market_slug=? ORDER BY exchange_ts ASC, tx_hash ASC",
@@ -290,6 +297,9 @@ def export_watchlist_wallet(
         _write_json(manifest_path, manifest)
         zip_path = target / "bundle.zip"
         _zip_dir(target, zip_path)
+        pruned_exports = 0
+        if out_dir is None:
+            pruned_exports = _prune_export_dirs(data_dir / "exports" / wallet, keep=keep_exports)
         return {
             "wallet": wallet,
             "export_dir": str(target),
@@ -298,6 +308,7 @@ def export_watchlist_wallet(
             "window_count": len(windows),
             "zip_bytes": zip_path.stat().st_size,
             "insufficient_market_capture": manifest["insufficient_market_capture"],
+            "pruned_exports": pruned_exports,
         }
     finally:
         conn.close()

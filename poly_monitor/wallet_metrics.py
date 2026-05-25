@@ -334,6 +334,8 @@ def build_metrics_from_api(
         "crypto_closed_pnl_estimate_30d": crypto_closed_pnl_estimate_30d,
         "wins_7d": 0,
         "losses_7d": 0,
+        "crypto_closed_position_wins_7d": closed_position_wins_7d,
+        "crypto_closed_position_losses_7d": closed_position_losses_7d,
         "closed_position_wins_7d": closed_position_wins_7d,
         "closed_position_losses_7d": closed_position_losses_7d,
         "top1_concentration": round(_concentration(concentration_pnls_30d, 1), 6),

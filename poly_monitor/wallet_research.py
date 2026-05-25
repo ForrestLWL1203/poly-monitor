@@ -189,6 +189,15 @@ def _iter_raw_events(data_dir: Path, *, start_date: dt.date, end_date: dt.date) 
 
 def _load_context_snapshots(data_dir: Path, wallet: str, *, start: dt.datetime, end: dt.datetime) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    def context_key(row: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            str(row.get("wallet") or "").lower(),
+            str(row.get("market_slug") or ""),
+            str(row.get("trade_tx_hash") or row.get("tx_hash") or ""),
+            str(row.get("fill_id") or ""),
+        )
+
     for row in _iter_raw_events(data_dir, start_date=start.date(), end_date=end.date()):
         if row.get("event") != "context_snapshot":
             continue
@@ -197,7 +206,45 @@ def _load_context_snapshots(data_dir: Path, wallet: str, *, start: dt.datetime, 
         observed = _parse_iso(row.get("observed_at"))
         if observed is not None and not (start <= observed <= end):
             continue
+        key = context_key(row)
+        seen.add(key)
         rows.append(row)
+    path = data_dir / "state" / "observer.sqlite"
+    if path.exists():
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            try:
+                sql_rows = conn.execute(
+                    """
+                    SELECT wallet, tx_hash, fill_id, market_slug, exchange_ts, context_json
+                    FROM wallet_trade_contexts
+                    WHERE wallet=? AND exchange_ts >= ? AND exchange_ts <= ?
+                    ORDER BY exchange_ts ASC, tx_hash ASC
+                    """,
+                    (wallet.lower(), int(start.timestamp()), int(end.timestamp())),
+                ).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            sql_rows = []
+        for sql_row in sql_rows:
+            try:
+                context = json.loads(str(sql_row["context_json"] or "{}"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(context, dict):
+                continue
+            context.setdefault("wallet", str(sql_row["wallet"] or "").lower())
+            context.setdefault("market_slug", sql_row["market_slug"])
+            context.setdefault("trade_tx_hash", sql_row["tx_hash"])
+            context.setdefault("fill_id", sql_row["fill_id"])
+            context.setdefault("exchange_ts", sql_row["exchange_ts"])
+            key = context_key(context)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(context)
     return rows
 
 

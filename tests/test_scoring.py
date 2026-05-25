@@ -123,6 +123,36 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(score.status, "active_candidate")
         self.assertNotIn("wins_7d_below_losses", score.reasons)
 
+    def test_quality_gate_uses_only_crypto_closed_position_win_loss_fallback(self):
+        metrics = {
+            "wallet": "0xmixedprofile",
+            "trades_7d": 1000,
+            "markets_24h": 120,
+            "trades_30d": 2000,
+            "pnl_7d": 500,
+            "pnl_30d": 1000,
+            "pnl_source": "profile_portfolio_pnl",
+            "wins_7d": 0,
+            "losses_7d": 0,
+            "closed_position_wins_7d": 200,
+            "closed_position_losses_7d": 0,
+            "crypto_closed_position_wins_7d": 1,
+            "crypto_closed_position_losses_7d": 20,
+            "top1_concentration": 0.05,
+            "top3_concentration": 0.15,
+            "longshot_profit_share": 0.1,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 2000,
+            "historical_markets": 200,
+            "historical_pnl": 1000,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "dormant_candidate")
+        self.assertIn("wins_7d_below_losses", score.reasons)
+
     def test_score_wallet_does_not_reject_repeatable_longshot_edge(self):
         metrics = {
             "wallet": "0xabc",

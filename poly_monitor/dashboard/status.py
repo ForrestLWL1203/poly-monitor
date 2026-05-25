@@ -145,6 +145,20 @@ def _report_candidates(path: Path) -> tuple[dict[str, Any], dict[str, list[dict[
 
 def _wallet_names(conn: sqlite3.Connection) -> dict[str, str]:
     names: dict[str, str] = {}
+    if _table_exists(conn, "wallet_profiles"):
+        rows = conn.execute(
+            """
+            SELECT wallet, name, pseudonym
+            FROM wallet_profiles
+            WHERE (name IS NOT NULL AND name != '') OR (pseudonym IS NOT NULL AND pseudonym != '')
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+        for row in rows:
+            wallet = str(row["wallet"]).lower()
+            label = str(row["name"] or row["pseudonym"] or "")
+            if wallet and label and wallet not in names:
+                names[wallet] = label
     rows = conn.execute(
         """
         SELECT wallet, name, MAX(exchange_ts) AS last_ts
@@ -186,7 +200,8 @@ def _sqlite_candidates(data_dir: Path) -> dict[str, list[dict[str, Any]]]:
             is_watched = wallet in watchlist
             if isinstance(metrics, dict):
                 metrics = _dashboard_metrics(metrics)
-                metrics.update(_wallet_24h_symbol_counts(conn, wallet))
+                if "btc_markets_24h" not in metrics or "eth_markets_24h" not in metrics:
+                    metrics.update(_wallet_24h_symbol_counts(conn, wallet))
             item = _normalize_candidate(
                 {
                     "wallet": wallet,
@@ -474,10 +489,11 @@ def _wallet_activity_rows(conn: sqlite3.Connection, wallet: str, *, limit: int =
     try:
         rows = conn.execute(
             """
-            SELECT *
-            FROM wallet_activity_events
-            WHERE wallet=?
-            ORDER BY exchange_ts DESC, tx_hash DESC
+            SELECT a.*, p.name AS profile_name, p.pseudonym AS profile_pseudonym
+            FROM wallet_activity_events a
+            LEFT JOIN wallet_profiles p ON p.wallet=a.wallet
+            WHERE a.wallet=?
+            ORDER BY a.exchange_ts DESC, a.tx_hash DESC
             LIMIT ?
             """,
             (wallet.lower(), limit),
@@ -511,8 +527,8 @@ def _wallet_activity_rows(conn: sqlite3.Connection, wallet: str, *, limit: int =
                 "size": row["size"],
                 "usdc": row["usdc"],
                 "asset": row["asset"],
-                "name": row["name"],
-                "pseudonym": row["pseudonym"],
+                "name": row["profile_name"],
+                "pseudonym": row["profile_pseudonym"],
                 "observed_at": row["observed_at"],
             }
         )
@@ -797,23 +813,38 @@ def _raw_size_summary(data_dir: Path, *, now: dt.datetime) -> dict[str, Any]:
 
 def _wallet_local_metrics(conn: sqlite3.Connection, wallet: str, *, now: dt.datetime | None = None) -> dict[str, Any]:
     now_ts = int((now or utc_now()).timestamp())
-    rows = conn.execute("SELECT * FROM trades WHERE wallet=?", (wallet,)).fetchall()
     cutoff_7d = now_ts - 7 * 86400
     cutoff_30d = now_ts - 30 * 86400
-    rows_7d = [row for row in rows if int(row["exchange_ts"]) >= cutoff_7d]
-    rows_30d = [row for row in rows if int(row["exchange_ts"]) >= cutoff_30d]
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN exchange_ts >= ? THEN 1 ELSE 0 END) AS trades_7d,
+                COUNT(DISTINCT CASE WHEN exchange_ts >= ? THEN market_slug END) AS markets_7d,
+                SUM(CASE WHEN exchange_ts >= ? THEN 1 ELSE 0 END) AS trades_30d,
+                COUNT(DISTINCT CASE WHEN exchange_ts >= ? THEN market_slug END) AS markets_30d,
+                COUNT(*) AS historical_trades,
+                COUNT(DISTINCT market_slug) AS historical_markets,
+                MAX(exchange_ts) AS last_ts
+            FROM trades
+            WHERE wallet=?
+            """,
+            (cutoff_7d, cutoff_7d, cutoff_30d, cutoff_30d, wallet.lower()),
+        ).fetchone()
+    except sqlite3.Error:
+        row = None
     metrics: dict[str, Any] = {
         "wallet": wallet,
-        "trades_7d": len(rows_7d),
-        "markets_7d": len({row["market_slug"] for row in rows_7d}),
-        "trades_30d": len(rows_30d),
-        "markets_30d": len({row["market_slug"] for row in rows_30d}),
-        "historical_trades": len(rows),
-        "historical_markets": len({row["market_slug"] for row in rows}),
+        "trades_7d": int(row["trades_7d"] or 0) if row else 0,
+        "markets_7d": int(row["markets_7d"] or 0) if row else 0,
+        "trades_30d": int(row["trades_30d"] or 0) if row else 0,
+        "markets_30d": int(row["markets_30d"] or 0) if row else 0,
+        "historical_trades": int(row["historical_trades"] or 0) if row else 0,
+        "historical_markets": int(row["historical_markets"] or 0) if row else 0,
         "last_active_age_hours": None,
     }
-    if rows:
-        last_ts = max(int(row["exchange_ts"]) for row in rows)
+    if row and row["last_ts"] is not None:
+        last_ts = int(row["last_ts"])
         metrics["last_active_age_hours"] = round(max(0, now_ts - last_ts) / 3600.0, 3)
     return metrics
 
@@ -868,15 +899,25 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
             if _table_exists(conn, "watchlist_wallets")
             else None
         )
-        name_row = conn.execute(
-            """
-            SELECT name FROM trades
-            WHERE wallet=? AND name IS NOT NULL AND name != ''
-            ORDER BY exchange_ts DESC
-            LIMIT 1
-            """,
-            (wallet,),
-        ).fetchone()
+        name_row = None
+        if _table_exists(conn, "wallet_profiles"):
+            name_row = conn.execute(
+                """
+                SELECT name, pseudonym FROM wallet_profiles
+                WHERE wallet=? AND ((name IS NOT NULL AND name != '') OR (pseudonym IS NOT NULL AND pseudonym != ''))
+                """,
+                (wallet,),
+            ).fetchone()
+        if name_row is None:
+            name_row = conn.execute(
+                """
+                SELECT name, pseudonym FROM trades
+                WHERE wallet=? AND ((name IS NOT NULL AND name != '') OR (pseudonym IS NOT NULL AND pseudonym != ''))
+                ORDER BY exchange_ts DESC
+                LIMIT 1
+                """,
+                (wallet,),
+            ).fetchone()
         trade_rows = conn.execute(
             """
             SELECT * FROM trades
@@ -891,8 +932,9 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
         metrics = _safe_json_loads(score_row["metrics_json"], {}) if score_row else _wallet_local_metrics(conn, wallet)
         if isinstance(metrics, dict):
             metrics = _dashboard_metrics(metrics)
-            metrics.update(_wallet_24h_symbol_counts(conn, wallet))
-        display_name = name_row["name"] if name_row else ""
+            if "btc_markets_24h" not in metrics or "eth_markets_24h" not in metrics:
+                metrics.update(_wallet_24h_symbol_counts(conn, wallet))
+        display_name = str(name_row["name"] or name_row["pseudonym"] or "") if name_row else ""
         if not display_name and isinstance(metrics, dict):
             display_name = str(metrics.get("name") or metrics.get("profile_name") or metrics.get("pseudonym") or "")
         if display_name and "name" not in metrics:

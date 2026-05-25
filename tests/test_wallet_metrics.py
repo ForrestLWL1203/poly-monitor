@@ -54,6 +54,8 @@ class WalletMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["losses_7d"], 0)
         self.assertEqual(metrics["closed_position_wins_7d"], 2)
         self.assertEqual(metrics["closed_position_losses_7d"], 0)
+        self.assertEqual(metrics["crypto_closed_position_wins_7d"], 2)
+        self.assertEqual(metrics["crypto_closed_position_losses_7d"], 0)
         self.assertEqual(metrics["pnl_7d"], 12.5)
         self.assertEqual(metrics["pnl_30d"], 34.5)
         self.assertEqual(metrics["pnl_source"], "leaderboard_profit")
