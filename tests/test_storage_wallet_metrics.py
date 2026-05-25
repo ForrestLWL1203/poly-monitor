@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from poly_monitor.storage import ObserverStore
+from poly_monitor.storage import ObserverStore, WatchlistStore
 
 
 def trade_row(
@@ -34,6 +34,46 @@ def trade_row(
 
 
 class StorageWalletMetricsTests(unittest.TestCase):
+    def test_watchlist_store_initializes_only_watchlist_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "observer.sqlite"
+            store = WatchlistStore(path)
+            try:
+                wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+                store.add_wallet(wallet, note="manual")
+                rows = store.rows()
+                tables = {
+                    str(row["name"])
+                    for row in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                }
+                journal_mode = store.conn.execute("PRAGMA journal_mode").fetchone()[0]
+                synchronous = store.conn.execute("PRAGMA synchronous").fetchone()[0]
+            finally:
+                store.close()
+
+        self.assertEqual(rows[0]["wallet"], wallet)
+        self.assertEqual(rows[0]["note"], "manual")
+        self.assertEqual(tables, {"watchlist_wallets"})
+        self.assertEqual(journal_mode, "wal")
+        self.assertEqual(synchronous, 1)
+
+    def test_watchlist_store_empty_note_does_not_clear_existing_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "observer.sqlite"
+            store = WatchlistStore(path)
+            try:
+                wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+                store.add_wallet(wallet, note="manual")
+                first = store.rows()[0]
+                store.add_wallet(wallet)
+                second = store.rows()[0]
+            finally:
+                store.close()
+
+        self.assertEqual(second["note"], "manual")
+        self.assertEqual(second["created_at"], first["created_at"])
+        self.assertNotEqual(second["updated_at"], "")
+
     def test_wallet_trade_metrics_counts_time_windows_without_loading_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
@@ -236,6 +276,45 @@ class StorageWalletMetricsTests(unittest.TestCase):
 
         self.assertEqual(row["settled_at"], "2026-05-24T12:00:00+00:00")
         self.assertEqual(metrics["settled_markets_7d"], 1)
+
+    def test_wallet_observed_metrics_include_cumulative_settled_pnl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            try:
+                now_ts = int(dt.datetime(2026, 5, 24, 12, 0, tzinfo=dt.timezone.utc).timestamp())
+                old_market = "btc-updown-5m-old"
+                recent_market = "btc-updown-5m-recent"
+                store.insert_trade(trade_row("0xabc", old_market, now_ts - 40 * 86400, tx_hash="tx-old", outcome="Up", side="BUY", price=0.40, size=10))
+                store.insert_trade(trade_row("0xabc", recent_market, now_ts - 100, tx_hash="tx-recent", outcome="Up", side="BUY", price=0.60, size=10))
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": old_market,
+                        "condition_id": f"cond-{old_market}",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settled_at": "2026-04-14T12:00:00+00:00",
+                        "completed": True,
+                    }
+                )
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": recent_market,
+                        "condition_id": f"cond-{recent_market}",
+                        "symbol": "BTC",
+                        "winning_side": "Down",
+                        "settled_at": "2026-05-24T12:00:00+00:00",
+                        "completed": True,
+                    }
+                )
+
+                metrics = store.wallet_trade_metrics("0xABC", now_ts=now_ts)
+            finally:
+                store.close()
+
+        self.assertAlmostEqual(metrics["pnl_30d"], -6.0)
+        self.assertAlmostEqual(metrics["pnl_total"], 0.0)
+        self.assertAlmostEqual(metrics["historical_pnl"], 0.0)
+        self.assertEqual(metrics["settled_markets_total"], 2)
 
 
 if __name__ == "__main__":

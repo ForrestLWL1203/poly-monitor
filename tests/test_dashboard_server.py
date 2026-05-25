@@ -227,6 +227,136 @@ class DashboardServerTests(unittest.TestCase):
                     server.server_close()
                     thread.join(timeout=3)
 
+    def test_watchlist_api_requires_auth_and_mutates_store(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+        from poly_monitor.storage import ObserverStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            server = create_server(
+                DashboardConfig(
+                    data_dir=data_dir,
+                    host="127.0.0.1",
+                    port=0,
+                    username="admin",
+                    password="secret",
+                    cookie_secret="test-secret",
+                )
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+                body = json.dumps({"wallet": wallet, "action": "add"}).encode()
+                unauth_req = urllib.request.Request(
+                    f"{base}/api/watchlist",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unauth:
+                    urllib.request.urlopen(unauth_req, timeout=3)
+                self.assertEqual(unauth.exception.code, 401)
+
+                cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                req = urllib.request.Request(
+                    f"{base}/api/watchlist",
+                    data=body,
+                    headers={"Cookie": cookie, "Content-Type": "application/json"},
+                    method="POST",
+                )
+                payload = json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+                self.assertTrue(payload["watchlisted"])
+
+                store = ObserverStore(data_dir / "state" / "observer.sqlite")
+                try:
+                    self.assertEqual(store.watchlist_wallets(), [wallet])
+                finally:
+                    store.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_watchlist_api_rejects_partial_wallet_addresses(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+
+        with tempfile.TemporaryDirectory() as tmp:
+            server = create_server(
+                DashboardConfig(
+                    data_dir=Path(tmp),
+                    host="127.0.0.1",
+                    port=0,
+                    username="admin",
+                    password="secret",
+                    cookie_secret="test-secret",
+                )
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                body = json.dumps({"wallet": "0x12345678", "action": "add"}).encode()
+                req = urllib.request.Request(
+                    f"{base}/api/watchlist",
+                    data=body,
+                    headers={"Cookie": cookie, "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(req, timeout=3)
+                self.assertEqual(rejected.exception.code, 400)
+                payload = json.loads(rejected.exception.read().decode())
+                self.assertEqual(payload["error"], "invalid_wallet")
+                self.assertIn("40 hex", payload["hint"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_watchlist_get_api_returns_rows(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+        from poly_monitor.storage import ObserverStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.add_watchlist_wallet(wallet, note="manual")
+            finally:
+                store.close()
+            server = create_server(
+                DashboardConfig(
+                    data_dir=data_dir,
+                    host="127.0.0.1",
+                    port=0,
+                    username="admin",
+                    password="secret",
+                    cookie_secret="test-secret",
+                )
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                unauth_req = urllib.request.Request(f"{base}/api/watchlist")
+                with self.assertRaises(urllib.error.HTTPError) as unauth:
+                    urllib.request.urlopen(unauth_req, timeout=3)
+                self.assertEqual(unauth.exception.code, 401)
+
+                req = urllib.request.Request(f"{base}/api/watchlist", headers={"Cookie": cookie})
+                payload = json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+                self.assertEqual(payload["watchlist"][0]["wallet"], wallet)
+                self.assertEqual(payload["watchlist"][0]["note"], "manual")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
 
 if __name__ == "__main__":
     unittest.main()

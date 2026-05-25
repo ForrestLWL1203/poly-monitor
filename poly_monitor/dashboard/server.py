@@ -6,6 +6,7 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -17,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from ..storage import WatchlistStore
 from .status import build_dashboard_status, recent_trades, wallet_detail
 
 
@@ -25,6 +27,7 @@ FAILED_LOGINS: dict[str, list[float]] = {}
 _STATUS_TTL = 2.0
 _status_cache: tuple[str, float, dict[str, Any]] | None = None
 _status_lock = threading.Lock()
+ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,12 @@ def _cached_status(data_dir: Path, *, ttl: float = _STATUS_TTL) -> dict[str, Any
         return payload
 
 
+def _clear_status_cache() -> None:
+    global _status_cache
+    with _status_lock:
+        _status_cache = None
+
+
 def _stop_observer_processes() -> list[int]:
     try:
         output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
@@ -177,6 +186,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             killed = _stop_observer_processes()
             self._json({"ok": True, "killed_pids": killed, "count": len(killed)})
             return
+        if parsed.path == "/api/watchlist":
+            if not self._authenticated():
+                self._json({"error": "unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            self._watchlist_mutation()
+            return
         self._json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
     def _handle_api_get(self, parsed: urllib.parse.ParseResult) -> None:
@@ -195,6 +210,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json({"error": "wallet_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
             self._json(detail)
+            return
+        if parsed.path == "/api/watchlist":
+            store = WatchlistStore(self.dashboard_config.data_dir / "state" / "observer.sqlite")
+            try:
+                self._json({"watchlist": store.rows()})
+            finally:
+                store.close()
             return
         self._json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -240,6 +262,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Set-Cookie", f"{COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
         self.end_headers()
         self.wfile.write(b'{"ok":true}')
+
+    def _watchlist_mutation(self) -> None:
+        body = self.rfile.read(_int_param(self.headers.get("Content-Length"), default=0, minimum=0, maximum=16384))
+        content_type = self.headers.get("Content-Type", "")
+        if "application/json" in content_type:
+            try:
+                form = json.loads(body.decode() or "{}")
+            except json.JSONDecodeError:
+                form = {}
+        else:
+            form = {key: values[0] for key, values in urllib.parse.parse_qs(body.decode()).items()}
+        wallet = str(form.get("wallet") or form.get("address") or "").lower().strip()
+        action = str(form.get("action") or "add").lower()
+        note = str(form.get("note") or "")
+        if not ADDRESS_RE.match(wallet):
+            self._json({"error": "invalid_wallet", "hint": "expected 0x + 40 hex chars"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        store = WatchlistStore(self.dashboard_config.data_dir / "state" / "observer.sqlite")
+        try:
+            if action == "remove":
+                removed = store.remove_wallet(wallet)
+                payload = {"ok": True, "wallet": wallet, "watchlisted": False, "removed": removed}
+            elif action == "add":
+                store.add_wallet(wallet, note=note)
+                payload = {"ok": True, "wallet": wallet, "watchlisted": True}
+            else:
+                self._json({"error": "invalid_action"}, status=HTTPStatus.BAD_REQUEST)
+                return
+        finally:
+            store.close()
+        _clear_status_cache()
+        self._json(payload)
 
     def _authenticated(self) -> bool:
         token = _cookie_value(self.headers.get("Cookie", ""), COOKIE_NAME)

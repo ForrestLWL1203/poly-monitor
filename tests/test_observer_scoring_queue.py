@@ -52,6 +52,142 @@ class ObserverScoringQueueTests(unittest.TestCase):
         self.assertEqual(first, [("0xactive0", "active_candidate"), ("0xdormant", "dormant_candidate")])
         self.assertEqual(second, [("0xactive1", "active_candidate"), ("0xrecent", None)])
 
+    def test_score_batch_prioritizes_watchlist_wallets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(
+                ObserverConfig(
+                    data_dir=Path(tmp),
+                    score_refresh_sec=0,
+                    score_wallets_per_cycle=2,
+                    max_active_candidates=3,
+                    max_dormant_candidates=1,
+                    score_wallet_pool_limit=5,
+                )
+            )
+            try:
+                observer.store.add_watchlist_wallet("0xwatched")
+                observer.store.upsert_score(CandidateScore("0xactive", "active_candidate", 10, [], {"wallet": "0xactive"}))
+                observer.store.upsert_score(CandidateScore("0xwatched", "dormant_candidate", 1, [], {"wallet": "0xwatched"}))
+                observer.store.insert_trade(
+                    {
+                        "tx_hash": "0xw",
+                        "wallet": "0xwatched",
+                        "market_slug": "btc-updown-5m-1",
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": 100,
+                        "outcome": "Up",
+                        "price": 0.5,
+                        "size": 2,
+                        "usdc": 1,
+                    }
+                )
+
+                batch = observer._score_batch()
+                observer._refresh_candidate_caches()
+            finally:
+                observer.writer.close()
+                observer.store.close()
+
+        self.assertEqual(batch[0], ("0xwatched", "dormant_candidate"))
+        self.assertIn("0xwatched", observer._active_snapshot_wallets)
+
+    def test_watchlist_does_not_starve_active_or_discovery_with_default_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(
+                ObserverConfig(
+                    data_dir=Path(tmp),
+                    score_wallets_per_cycle=2,
+                    max_active_candidates=3,
+                    max_dormant_candidates=1,
+                    dormant_metrics_ttl_sec=0,
+                    score_wallet_pool_limit=5,
+                )
+            )
+            try:
+                for idx in range(5):
+                    observer.store.add_watchlist_wallet(f"0xwatch{idx}")
+                observer.store.upsert_score(CandidateScore("0xactive", "active_candidate", 10, [], {"wallet": "0xactive"}))
+                observer.store.upsert_score(CandidateScore("0xdormant", "dormant_candidate", 1, [], {"wallet": "0xdormant"}))
+                observer.store.insert_trade(
+                    {
+                        "tx_hash": "0xrecent",
+                        "wallet": "0xrecent",
+                        "market_slug": "btc-updown-5m-1",
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "exchange_ts": 100,
+                        "outcome": "Up",
+                        "price": 0.5,
+                        "size": 2,
+                        "usdc": 1,
+                    }
+                )
+
+                batches = [observer._score_batch() for _ in range(4)]
+            finally:
+                observer.writer.close()
+                observer.store.close()
+
+        flattened = [wallet for batch in batches for wallet, _status in batch]
+        self.assertIn("0xactive", flattened)
+        self.assertTrue({"0xdormant", "0xrecent"} & set(flattened))
+        self.assertTrue(any(wallet.startswith("0xwatch") for wallet in flattened))
+        self.assertTrue(all(sum(1 for wallet, _status in batch if wallet.startswith("0xwatch")) <= 1 for batch in batches))
+
+    def test_watchlist_rotates_with_active_and_discovery_when_budget_is_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(
+                ObserverConfig(
+                    data_dir=Path(tmp),
+                    score_wallets_per_cycle=1,
+                    max_active_candidates=3,
+                    max_dormant_candidates=1,
+                    dormant_metrics_ttl_sec=0,
+                    score_wallet_pool_limit=5,
+                )
+            )
+            try:
+                observer.store.add_watchlist_wallet("0xwatch")
+                observer.store.upsert_score(CandidateScore("0xactive", "active_candidate", 10, [], {"wallet": "0xactive"}))
+                observer.store.upsert_score(CandidateScore("0xdormant", "dormant_candidate", 1, [], {"wallet": "0xdormant"}))
+
+                batches = [observer._score_batch() for _ in range(6)]
+            finally:
+                observer.writer.close()
+                observer.store.close()
+
+        flattened = [wallet for batch in batches for wallet, _status in batch]
+        self.assertIn("0xwatch", flattened)
+        self.assertIn("0xactive", flattened)
+        self.assertIn("0xdormant", flattened)
+
+    def test_budget_one_watchlist_rotation_skips_empty_active_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(
+                ObserverConfig(
+                    data_dir=Path(tmp),
+                    score_wallets_per_cycle=1,
+                    max_active_candidates=0,
+                    max_dormant_candidates=1,
+                    dormant_metrics_ttl_sec=0,
+                    score_wallet_pool_limit=5,
+                )
+            )
+            try:
+                observer.store.add_watchlist_wallet("0xwatch")
+                observer.store.upsert_score(CandidateScore("0xdormant", "dormant_candidate", 1, [], {"wallet": "0xdormant"}))
+
+                batches = [observer._score_batch() for _ in range(6)]
+            finally:
+                observer.writer.close()
+                observer.store.close()
+
+        self.assertTrue(all(batch for batch in batches))
+        flattened = [wallet for batch in batches for wallet, _status in batch]
+        self.assertIn("0xwatch", flattened)
+        self.assertIn("0xdormant", flattened)
+
     def test_score_batch_keeps_discovery_slot_when_active_pool_is_full(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

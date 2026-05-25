@@ -34,7 +34,7 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertTrue(status["health"]["ok"])
         self.assertEqual(status["sqlite"]["trade_count"], 0)
         self.assertEqual(status["events"]["counts"], {})
-        self.assertEqual(set(status["candidates"]), {"active_candidate", "dormant_candidate", "archive_candidate"})
+        self.assertEqual(set(status["candidates"]), {"watchlist", "active_candidate", "dormant_candidate", "archive_candidate"})
         self.assertEqual(status["candidates"]["active_candidate"], [])
         self.assertEqual(status["recent_trades"], [])
 
@@ -73,6 +73,44 @@ class DashboardStatusTests(unittest.TestCase):
         dormant = status["candidates"]["dormant_candidate"][0]
         self.assertEqual(dormant["name"], "scored-wallet")
         self.assertEqual(dormant["metrics"]["trades_30d"], 1777)
+
+    def test_watchlist_is_first_tab_and_excluded_from_candidate_tabs(self):
+        from poly_monitor.dashboard.status import build_dashboard_status
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            watched = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            active = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            store.add_watchlist_wallet(watched, note="manual")
+            store.upsert_score(
+                CandidateScore(
+                    watched,
+                    "active_candidate",
+                    100,
+                    [],
+                    {"wallet": watched, "trades_7d": 10, "trades_30d": 20, "pnl_7d": 1, "pnl_30d": 2, "wins_7d": 2, "losses_7d": 0},
+                )
+            )
+            store.upsert_score(
+                CandidateScore(
+                    active,
+                    "active_candidate",
+                    90,
+                    [],
+                    {"wallet": active, "trades_7d": 10, "trades_30d": 20, "pnl_7d": 1, "pnl_30d": 2, "wins_7d": 2, "losses_7d": 0},
+                )
+            )
+            store.close()
+
+            status = build_dashboard_status(data_dir, now=dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc))
+
+        self.assertEqual(list(status["candidates"].keys())[0], "watchlist")
+        self.assertEqual(status["candidate_counts"]["watchlist"], 1)
+        self.assertEqual(status["candidates"]["watchlist"][0]["wallet"], watched)
+        self.assertTrue(status["candidates"]["watchlist"][0]["watchlisted"])
+        self.assertEqual(status["candidates"]["watchlist"][0]["status"], "watchlist")
+        self.assertEqual([row["wallet"] for row in status["candidates"]["active_candidate"]], [active])
 
     def test_candidate_names_fall_back_to_latest_trade_name(self):
         from poly_monitor.dashboard.status import build_dashboard_status, wallet_detail

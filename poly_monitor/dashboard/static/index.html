@@ -154,6 +154,22 @@
       cursor: not-allowed;
       opacity: 0.65;
     }
+    .watch-button.active {
+      border-color: var(--warn);
+      color: #ffe4a3;
+      background: #2e2819;
+    }
+    .watch-cell {
+      width: 42px;
+      min-width: 42px;
+      text-align: center !important;
+    }
+    .watch-cell .icon-button {
+      min-width: 28px;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+    }
     .table-wrap {
       overflow-x: auto;
     }
@@ -169,8 +185,8 @@
       text-align: right;
       white-space: nowrap;
     }
-    th:first-child, td:first-child,
-    th:nth-child(2), td:nth-child(2) {
+    th:nth-child(2), td:nth-child(2),
+    th:nth-child(3), td:nth-child(3) {
       text-align: left;
     }
     tbody tr {
@@ -327,6 +343,7 @@
             <table>
               <thead>
                 <tr>
+                  <th class="watch-cell" title="加入或移出重点关注">★</th>
                   <th>用户</th>
                   <th title="ready 表示已完成复核；pending 表示还在观察或关键字段未齐">评分状态</th>
                   <th title="综合排序分，用来在候选池内排序，不等同于收益">综合分</th>
@@ -365,17 +382,19 @@
   </section>
 
   <script>
-    const groups = ["active_candidate", "dormant_candidate"];
+    const groups = ["watchlist", "active_candidate", "dormant_candidate"];
     const labels = {
+      watchlist: "重点关注",
       active_candidate: "活跃候选",
       dormant_candidate: "休眠候选"
     };
     const labelHints = {
+      watchlist: "人工选定的钱包，不受休眠和归档清理限制",
       active_candidate: "近期高频且评分达标，值得重点持续采样",
       dormant_candidate: "历史活跃期表现较好，但最近活跃度不足"
     };
     let statusData = null;
-    let currentGroup = "active_candidate";
+    let currentGroup = "watchlist";
 
     const $ = (id) => document.getElementById(id);
 
@@ -425,6 +444,7 @@
         active_candidate: "活跃候选",
         dormant_candidate: "休眠候选",
         archive_candidate: "归档候选",
+        watchlist: "重点关注",
         unscored: "未评分"
       };
       return map[value] || value || "pending";
@@ -559,6 +579,18 @@
       }
     }
 
+    async function setWatchlist(wallet, watchlisted) {
+      await api("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wallet, action: watchlisted ? "add" : "remove" })
+      });
+      if (watchlisted) currentGroup = "watchlist";
+      else if (currentGroup === "watchlist") currentGroup = "active_candidate";
+      await load();
+      await loadWallet(wallet);
+    }
+
     async function load() {
       statusData = await api("/api/status");
       showApp();
@@ -610,7 +642,7 @@
     }
 
     function localObservedPnl(metrics) {
-      return metrics.local_observed_pnl_30d ?? metrics.local_observed_pnl_7d;
+      return metrics.local_observed_pnl_total ?? metrics.pnl_total ?? metrics.local_observed_pnl_30d ?? metrics.pnl_30d ?? metrics.local_observed_pnl_7d ?? metrics.pnl_7d;
     }
 
     function renderWallets(rows) {
@@ -623,7 +655,11 @@
         const displayName = row.name || row.wallet_short || row.wallet;
         const visibleName = shortName(displayName);
         const subLine = row.name ? row.wallet_short : "";
+        const watchlisted = Boolean(row.watchlisted);
         return `<tr data-wallet="${row.wallet}">
+          <td class="watch-cell">
+            <button class="icon-button watch-button ${watchlisted ? "active" : ""}" data-watch-wallet="${row.wallet}" data-watchlisted="${watchlisted ? "1" : "0"}" title="${watchlisted ? "移出重点关注" : "加入重点关注"}">${watchlisted ? "★" : "☆"}</button>
+          </td>
           <td class="user-cell" title="${displayName}&#10;${row.wallet}">
             <strong class="user-name">${visibleName}</strong>
             <div class="subtle addr">${subLine}</div>
@@ -648,6 +684,14 @@
       }).join("");
       document.querySelectorAll("#walletRows tr[data-wallet]").forEach((row) => {
         row.addEventListener("click", () => loadWallet(row.dataset.wallet));
+      });
+      document.querySelectorAll("#walletRows button[data-watch-wallet]").forEach((button) => {
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const wallet = button.dataset.watchWallet;
+          const watchlisted = button.dataset.watchlisted === "1";
+          if (wallet) setWatchlist(wallet, !watchlisted).catch(() => alert("重点关注更新失败"));
+        });
       });
     }
 

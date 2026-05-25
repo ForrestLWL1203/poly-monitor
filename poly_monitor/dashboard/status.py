@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-CANDIDATE_GROUPS = ("active_candidate", "dormant_candidate", "archive_candidate")
+CANDIDATE_GROUPS = ("watchlist", "active_candidate", "dormant_candidate", "archive_candidate")
 SCORED_GROUPS = ("active_candidate", "dormant_candidate", "archive_candidate")
 MAX_ARCHIVE_DISPLAY = 0
 MAX_ACTIVE_DISPLAY = 15
@@ -168,25 +168,62 @@ def _sqlite_candidates(data_dir: Path) -> dict[str, list[dict[str, Any]]]:
         return candidates
     try:
         trade_names = _wallet_names(conn)
+        has_watchlist = _table_exists(conn, "watchlist_wallets")
+        watch_rows = (
+            conn.execute("SELECT wallet, note, updated_at FROM watchlist_wallets ORDER BY updated_at DESC, wallet ASC").fetchall()
+            if has_watchlist
+            else []
+        )
+        watchlist = {str(row["wallet"]).lower(): dict(row) for row in watch_rows}
         rows = conn.execute("SELECT * FROM candidate_scores ORDER BY status ASC, rank_score DESC").fetchall()
+        scored_watchlist: set[str] = set()
         for row in rows:
             metrics = _safe_json_loads(row["metrics_json"], {})
             wallet = str(row["wallet"]).lower()
             display_name = trade_names.get(wallet, "") or str(metrics.get("profile_name") or "")
             if display_name and isinstance(metrics, dict):
                 metrics.setdefault("name", display_name)
+            is_watched = wallet in watchlist
             item = _normalize_candidate(
                 {
                     "wallet": wallet,
-                    "status": row["status"],
+                    "status": "watchlist" if is_watched else row["status"],
                     "rank_score": row["rank_score"],
                     "metrics": metrics if isinstance(metrics, dict) else {},
                     "reasons": _safe_json_loads(row["reasons_json"], []),
                     "updated_at": row["updated_at"],
                     "name": display_name,
+                    "watchlisted": is_watched,
+                    "watchlist_note": str(watchlist[wallet].get("note") or "") if is_watched else "",
                 }
             )
-            candidates.setdefault(str(row["status"]), []).append(item)
+            if is_watched:
+                candidates["watchlist"].append(item)
+                scored_watchlist.add(wallet)
+            else:
+                candidates.setdefault(str(row["status"]), []).append(item)
+        for wallet, watch in watchlist.items():
+            if wallet in scored_watchlist:
+                continue
+            display_name = trade_names.get(wallet, "")
+            metrics = _wallet_local_metrics(conn, wallet)
+            if display_name:
+                metrics["name"] = display_name
+            candidates["watchlist"].append(
+                _normalize_candidate(
+                    {
+                        "wallet": wallet,
+                        "status": "watchlist",
+                        "rank_score": None,
+                        "metrics": metrics,
+                        "reasons": [],
+                        "updated_at": watch.get("updated_at") or "",
+                        "name": display_name,
+                        "watchlisted": True,
+                        "watchlist_note": str(watch.get("note") or ""),
+                    }
+                )
+            )
         candidates["active_candidate"] = candidates.get("active_candidate", [])[:MAX_ACTIVE_DISPLAY]
         candidates["dormant_candidate"] = candidates.get("dormant_candidate", [])[:MAX_DORMANT_DISPLAY]
         candidates["archive_candidate"] = candidates.get("archive_candidate", [])[:MAX_ARCHIVE_DISPLAY]
@@ -210,7 +247,17 @@ def _normalize_candidate(row: dict[str, Any]) -> dict[str, Any]:
         "reasons": row.get("reasons") if isinstance(row.get("reasons"), list) else [],
         "updated_at": row.get("updated_at") or "",
         "score_state": _score_state(metrics, row),
+        "watchlisted": bool(row.get("watchlisted")),
+        "watchlist_note": row.get("watchlist_note") or "",
     }
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    try:
+        row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
 
 
 def _score_state(metrics: dict[str, Any], row: dict[str, Any]) -> str:
@@ -651,6 +698,11 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
         return None
     try:
         score_row = conn.execute("SELECT * FROM candidate_scores WHERE wallet=?", (wallet,)).fetchone()
+        watch_row = (
+            conn.execute("SELECT * FROM watchlist_wallets WHERE wallet=?", (wallet,)).fetchone()
+            if _table_exists(conn, "watchlist_wallets")
+            else None
+        )
         name_row = conn.execute(
             """
             SELECT name FROM trades
@@ -669,7 +721,7 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
             """,
             (wallet, trade_limit),
         ).fetchall()
-        if score_row is None and not trade_rows:
+        if score_row is None and not trade_rows and watch_row is None:
             return None
         metrics = _safe_json_loads(score_row["metrics_json"], {}) if score_row else _wallet_local_metrics(conn, wallet)
         display_name = name_row["name"] if name_row else ""
@@ -699,6 +751,8 @@ def wallet_detail(data_dir: Path, address: str, *, trade_limit: int = 100) -> di
             "status": score_row["status"] if score_row else "unscored",
             "rank_score": score_row["rank_score"] if score_row else None,
             "updated_at": score_row["updated_at"] if score_row else None,
+            "watchlisted": watch_row is not None,
+            "watchlist_note": watch_row["note"] if watch_row else "",
             "score_state": _score_state(metrics, dict(score_row) if score_row else {}),
             "metrics": metrics,
             "reasons": reasons if isinstance(reasons, list) else [],

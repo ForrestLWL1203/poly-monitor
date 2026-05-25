@@ -111,6 +111,26 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(removed, 1)
         self.assertEqual(wallets, {"0xbusy", "0xwindow"})
 
+    def test_candidate_prunes_preserve_watchlist_scores(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            watched = "0xwatched"
+            low = "0xlow"
+            store.add_watchlist_wallet(watched)
+            store.upsert_score(CandidateScore(watched, "archive_candidate", 0, ["test"], {"wallet": watched, "trades_7d": 1}))
+            store.upsert_score(CandidateScore(low, "archive_candidate", 0, ["test"], {"wallet": low, "trades_7d": 1}))
+
+            removed_low = store.prune_low_sample_archives()
+            removed_cap = store.prune_archive_scores(max_archive=0)
+            watched_status = store.candidate_status(watched)
+            low_status = store.candidate_status(low)
+            store.close()
+
+        self.assertEqual(removed_low, 1)
+        self.assertEqual(removed_cap, 0)
+        self.assertEqual(watched_status, "archive_candidate")
+        self.assertIsNone(low_status)
+
     def test_prune_low_sample_archives_preserves_cooldown_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")
@@ -218,6 +238,97 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(remaining_wallets, {active, dormant, fresh})
         self.assertIsNone(stale_score)
 
+    def test_cleanup_inactive_wallet_data_keeps_watchlist_wallets(self):
+        def trade(wallet: str, tx: str, ts: int) -> dict:
+            return {
+                "tx_hash": tx,
+                "wallet": wallet,
+                "market_slug": "btc-updown-5m-1",
+                "condition_id": "0xcond",
+                "symbol": "BTC",
+                "exchange_ts": ts,
+                "outcome": "Up",
+                "price": 0.5,
+                "size": 2,
+                "usdc": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            watched = "0xwatched"
+            stale = "0xstale"
+            store.upsert_score(CandidateScore("0xanchor", "active_candidate", 1, [], {"wallet": "0xanchor"}))
+            store.upsert_score(CandidateScore(watched, "archive_candidate", 0, ["test"], {"wallet": watched}))
+            store.upsert_score(CandidateScore(stale, "archive_candidate", 0, ["test"], {"wallet": stale}))
+            store.add_watchlist_wallet(watched)
+            store.insert_trade(trade(watched, "0xw", 100))
+            store.insert_trade(trade(stale, "0xs", 100))
+
+            result = store.cleanup_inactive_wallet_data(inactive_cutoff_ts=500)
+            remaining_wallets = {
+                str(row["wallet"])
+                for row in store.conn.execute("SELECT DISTINCT wallet FROM trades").fetchall()
+            }
+            watched_score = store.candidate_status(watched)
+            stale_score = store.candidate_status(stale)
+            store.close()
+
+        self.assertEqual(result["removed_wallets"], 1)
+        self.assertIn(watched, remaining_wallets)
+        self.assertEqual(watched_score, "archive_candidate")
+        self.assertIsNone(stale_score)
+
+    def test_cleanup_does_not_make_observed_pnl_reset_on_settlement_refresh(self):
+        def trade(wallet: str, tx: str, ts: int) -> dict:
+            return {
+                "tx_hash": tx,
+                "wallet": wallet,
+                "market_slug": "btc-updown-5m-1",
+                "condition_id": "0xcond",
+                "symbol": "BTC",
+                "exchange_ts": ts,
+                "outcome": "Up",
+                "side": "BUY",
+                "price": 0.4,
+                "size": 10,
+                "usdc": 4,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "observer.sqlite")
+            store.upsert_score(CandidateScore("0xanchor", "active_candidate", 1, [], {"wallet": "0xanchor"}))
+            store.insert_trade(trade("0xstrong", "0xold", 100))
+            store.upsert_market_settlement(
+                {
+                    "market_slug": "btc-updown-5m-1",
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "winning_side": "Up",
+                    "settled_at": "2026-05-24T12:00:00+00:00",
+                    "completed": True,
+                }
+            )
+            store.cleanup_inactive_wallet_data(inactive_cutoff_ts=500)
+
+            store.upsert_market_settlement(
+                {
+                    "market_slug": "btc-updown-5m-1",
+                    "condition_id": "0xcond",
+                    "symbol": "BTC",
+                    "winning_side": "Up",
+                    "settled_at": "2026-05-24T12:00:00+00:00",
+                    "completed": True,
+                }
+            )
+            metrics = store.wallet_observed_pnl_metrics(
+                "0xstrong",
+                now_ts=int(dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc).timestamp()),
+            )
+            store.close()
+
+        self.assertAlmostEqual(metrics["pnl_total"], 6.0)
+        self.assertEqual(metrics["settled_markets_total"], 1)
+
     def test_cleanup_inactive_wallet_data_caps_recent_non_candidate_wallets(self):
         def trade(wallet: str, tx: str, ts: int) -> dict:
             return {
@@ -254,7 +365,7 @@ class ArchiveRetentionTests(unittest.TestCase):
         self.assertEqual(result["removed_trades"], 3)
         self.assertEqual(remaining_wallets, ["0xnoise3", "0xnoise4"])
 
-    def test_cleanup_inactive_wallet_data_skips_when_score_table_empty(self):
+    def test_cleanup_inactive_wallet_data_runs_when_score_table_empty(self):
         def trade(wallet: str, tx: str, ts: int) -> dict:
             return {
                 "tx_hash": tx,
@@ -281,10 +392,12 @@ class ArchiveRetentionTests(unittest.TestCase):
             remaining = store.conn.execute("SELECT COUNT(*) AS n FROM trades").fetchone()["n"]
             store.close()
 
-        self.assertEqual(result, {"removed_wallets": 0, "removed_trades": 0, "removed_score_rows": 0})
-        self.assertEqual(remaining, 5)
+        self.assertEqual(result["removed_wallets"], 5)
+        self.assertEqual(result["removed_trades"], 5)
+        self.assertEqual(result["removed_score_rows"], 0)
+        self.assertEqual(remaining, 0)
 
-    def test_cleanup_inactive_wallet_data_skips_without_core_candidates(self):
+    def test_cleanup_inactive_wallet_data_runs_without_core_candidates(self):
         def trade(wallet: str, tx: str, ts: int) -> dict:
             return {
                 "tx_hash": tx,
@@ -312,8 +425,10 @@ class ArchiveRetentionTests(unittest.TestCase):
             remaining = store.conn.execute("SELECT COUNT(*) AS n FROM trades").fetchone()["n"]
             store.close()
 
-        self.assertEqual(result, {"removed_wallets": 0, "removed_trades": 0, "removed_score_rows": 0})
-        self.assertEqual(remaining, 5)
+        self.assertEqual(result["removed_wallets"], 5)
+        self.assertEqual(result["removed_trades"], 5)
+        self.assertEqual(result["removed_score_rows"], 1)
+        self.assertEqual(remaining, 0)
 
     def test_storage_adds_query_indexes_and_market_last_exchange_ts(self):
         with tempfile.TemporaryDirectory() as tmp:

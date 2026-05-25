@@ -484,6 +484,21 @@ class ObserverContextTests(unittest.TestCase):
                 observer.store.close()
                 observer.writer.close()
 
+    def test_watchlist_metrics_cache_uses_active_ttl_even_when_archived(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = CryptoWalletObserver(
+                ObserverConfig(data_dir=Path(tmp), active_metrics_ttl_sec=60, dormant_metrics_ttl_sec=600)
+            )
+            try:
+                wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+                observer.store.add_watchlist_wallet(wallet)
+
+                self.assertEqual(observer._metrics_cache_ttl("archive_candidate", wallet), 60)
+                self.assertEqual(observer._metrics_cache_ttl("archive_candidate", "0xnotwatched"), 600)
+            finally:
+                observer.store.close()
+                observer.writer.close()
+
     def test_score_prune_runs_every_fifth_score_cycle(self):
         async def run_case():
             with tempfile.TemporaryDirectory() as tmp:

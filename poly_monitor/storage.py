@@ -34,6 +34,68 @@ def json_dumps(row: dict[str, Any]) -> str:
     return json.dumps(row, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+WATCHLIST_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS watchlist_wallets (
+    wallet TEXT PRIMARY KEY,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_watchlist_updated ON watchlist_wallets(updated_at);
+"""
+WATCHLIST_UPSERT_SQL = """
+INSERT INTO watchlist_wallets(wallet,note,created_at,updated_at)
+VALUES(?,?,?,?)
+ON CONFLICT(wallet) DO UPDATE SET
+    note=CASE WHEN excluded.note='' THEN watchlist_wallets.note ELSE excluded.note END,
+    updated_at=excluded.updated_at
+"""
+WATCHLIST_DELETE_SQL = "DELETE FROM watchlist_wallets WHERE wallet=?"
+WATCHLIST_WALLETS_SQL = """
+SELECT wallet
+FROM watchlist_wallets
+ORDER BY updated_at DESC, wallet ASC
+"""
+WATCHLIST_ROWS_SQL = """
+SELECT wallet, note, created_at, updated_at
+FROM watchlist_wallets
+ORDER BY updated_at DESC, wallet ASC
+"""
+
+
+class WatchlistStore:
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.executescript(WATCHLIST_SCHEMA_SQL)
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def add_wallet(self, wallet: str, *, note: str = "") -> None:
+        normalized = wallet.lower()
+        now = utc_now().isoformat()
+        self.conn.execute(WATCHLIST_UPSERT_SQL, (normalized, note, now, now))
+        self.conn.commit()
+
+    def remove_wallet(self, wallet: str) -> int:
+        cursor = self.conn.execute(WATCHLIST_DELETE_SQL, (wallet.lower(),))
+        self.conn.commit()
+        return int(cursor.rowcount or 0)
+
+    def wallets(self) -> list[str]:
+        rows = self.conn.execute(WATCHLIST_WALLETS_SQL).fetchall()
+        return [str(row["wallet"]).lower() for row in rows]
+
+    def rows(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(WATCHLIST_ROWS_SQL).fetchall()
+        return [dict(row) for row in rows]
+
+
 class JsonlEventWriter:
     def __init__(self, data_dir: Path, *, flush_interval_sec: float = 2.0, buffer_size: int = 65536) -> None:
         self.data_dir = data_dir
@@ -184,6 +246,7 @@ class ObserverStore:
             );
             """
         )
+        self.conn.executescript(WATCHLIST_SCHEMA_SQL)
         table_info = self.conn.execute("PRAGMA table_info(trades)").fetchall()
         columns = {str(row["name"]) for row in table_info}
         if "fill_id" not in columns:
@@ -248,6 +311,18 @@ class ObserverStore:
             """
         )
         self.conn.commit()
+
+    def add_watchlist_wallet(self, wallet: str, *, note: str = "") -> None:
+        WatchlistStore.add_wallet(self, wallet, note=note)
+
+    def remove_watchlist_wallet(self, wallet: str) -> int:
+        return WatchlistStore.remove_wallet(self, wallet)
+
+    def watchlist_wallets(self) -> list[str]:
+        return WatchlistStore.wallets(self)
+
+    def watchlist_rows(self) -> list[dict[str, Any]]:
+        return WatchlistStore.rows(self)
 
     def upsert_market_window(
         self,
@@ -486,7 +561,6 @@ class ObserverStore:
                 item["buy_usdc"] += usdc
                 item[share_key] += size
             item["trades"] += 1
-        self.conn.execute("DELETE FROM wallet_market_pnl WHERE market_slug=?", (market_slug,))
         winning_side = str(settlement["winning_side"])
         for wallet, item in by_wallet.items():
             settled_value = float(item["up"] if winning_side.lower() == "up" else item["down"])
@@ -537,6 +611,10 @@ class ObserverStore:
             "SELECT * FROM wallet_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=0",
             (wallet.lower(), cutoff_30d_iso),
         ).fetchall()
+        rows_total = self.conn.execute(
+            "SELECT * FROM wallet_market_pnl WHERE wallet=? AND incomplete=0",
+            (wallet.lower(),),
+        ).fetchall()
         incomplete_7d = self.conn.execute(
             "SELECT COUNT(*) AS n FROM wallet_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=1",
             (wallet.lower(), cutoff_7d_iso),
@@ -545,27 +623,35 @@ class ObserverStore:
             "SELECT COUNT(*) AS n FROM wallet_market_pnl WHERE wallet=? AND settled_at >= ? AND incomplete=1",
             (wallet.lower(), cutoff_30d_iso),
         ).fetchone()
+        incomplete_total = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM wallet_market_pnl WHERE wallet=? AND incomplete=1",
+            (wallet.lower(),),
+        ).fetchone()
 
         def pnl(rows: list[sqlite3.Row]) -> float:
             return round(sum(float(row["realized_pnl"] or 0.0) for row in rows), 6)
 
         pnl_7d = pnl(rows_7d)
         pnl_30d = pnl(rows_30d)
+        pnl_total = pnl(rows_total)
         positive_30d = sorted([float(row["realized_pnl"] or 0.0) for row in rows_30d if float(row["realized_pnl"] or 0.0) > 0], reverse=True)
         positive_total = sum(positive_30d)
         return {
             "pnl_7d": pnl_7d,
             "pnl_30d": pnl_30d,
+            "pnl_total": pnl_total,
             "pnl_source": "local_observed_ledger",
             "wins_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) > 0),
             "losses_7d": sum(1 for row in rows_7d if float(row["realized_pnl"] or 0.0) < 0),
             "settled_markets_7d": len(rows_7d),
             "settled_markets_30d": len(rows_30d),
+            "settled_markets_total": len(rows_total),
             "incomplete_settled_markets_7d": int(incomplete_7d["n"] or 0),
             "incomplete_settled_markets_30d": int(incomplete_30d["n"] or 0),
+            "incomplete_settled_markets_total": int(incomplete_total["n"] or 0),
             "top1_concentration": round((sum(positive_30d[:1]) / positive_total), 6) if positive_total > 0 else 1.0,
             "top3_concentration": round((sum(positive_30d[:3]) / positive_total), 6) if positive_total > 0 else 1.0,
-            "historical_pnl": pnl_30d,
+            "historical_pnl": pnl_total,
         }
 
     def wallet_24h_counts(self, wallet: str, *, now_ts: int | None = None) -> dict[str, int]:
@@ -733,8 +819,9 @@ class ObserverStore:
             """,
             (status,),
         ).fetchall()
-        protected = [row for row in rows if str(row["updated_at"]) > cutoff.isoformat()]
-        removable = [row for row in rows if str(row["updated_at"]) <= cutoff.isoformat()]
+        watchlist = set(self.watchlist_wallets())
+        protected = [row for row in rows if str(row["wallet"]).lower() in watchlist or str(row["updated_at"]) > cutoff.isoformat()]
+        removable = [row for row in rows if str(row["wallet"]).lower() not in watchlist and str(row["updated_at"]) <= cutoff.isoformat()]
         # Cooldown rows are protected even if that temporarily lets archive rows exceed max_rows.
         keep_removable = max(0, max_rows - len(protected))
         doomed = [str(row["wallet"]) for row in removable][keep_removable:]
@@ -751,12 +838,15 @@ class ObserverStore:
         now: dt.datetime | None = None,
     ) -> int:
         cutoff = (now or utc_now()) - dt.timedelta(seconds=max(0.0, min_age_seconds))
+        watchlist = set(self.watchlist_wallets())
         rows = self.conn.execute(
             "SELECT wallet, metrics_json, updated_at FROM candidate_scores WHERE status='archive_candidate'"
         ).fetchall()
         doomed: list[str] = []
         for row in rows:
             wallet = str(row["wallet"]).lower()
+            if wallet in watchlist:
+                continue
             if str(row["updated_at"]) > cutoff.isoformat():
                 continue
             try:
@@ -790,14 +880,6 @@ class ObserverStore:
         inactive_cutoff_ts: int,
         max_non_candidate_wallets: int | None = None,
     ) -> dict[str, int]:
-        core_score_count = int(
-            self.conn.execute(
-                "SELECT COUNT(*) AS n FROM candidate_scores WHERE status IN ('active_candidate','dormant_candidate')"
-            ).fetchone()["n"]
-            or 0
-        )
-        if core_score_count == 0:
-            return {"removed_wallets": 0, "removed_trades": 0, "removed_score_rows": 0}
         self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS cleanup_keep(wallet TEXT PRIMARY KEY)")
         self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS cleanup_delete_wallets(wallet TEXT PRIMARY KEY)")
         self.conn.execute("DELETE FROM cleanup_keep")
@@ -806,6 +888,8 @@ class ObserverStore:
             """
             INSERT OR IGNORE INTO cleanup_keep(wallet)
             SELECT wallet FROM candidate_scores WHERE status IN ('active_candidate','dormant_candidate');
+            INSERT OR IGNORE INTO cleanup_keep(wallet)
+            SELECT wallet FROM watchlist_wallets;
             """
         )
         self.conn.execute(
