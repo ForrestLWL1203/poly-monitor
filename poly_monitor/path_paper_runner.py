@@ -39,7 +39,7 @@ class SnapshotStrategy(Protocol):
 
 class SqliteStrategyDataSource:
     def __init__(self, data_dir: Path) -> None:
-        self.store = ObserverStore(data_dir / "observer.db")
+        self.store = ObserverStore(data_dir / "state" / "observer.sqlite")
 
     def load_strategy_rows(self, wallet: str) -> dict[str, list[dict[str, Any]]]:
         return {

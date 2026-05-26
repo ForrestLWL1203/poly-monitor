@@ -58,7 +58,7 @@ class PathPaperRunnerTests(unittest.TestCase):
     def test_tick_reads_live_db_samples_and_appends_paper_execution_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
-            store = ObserverStore(data_dir / "observer.db")
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
             wallet = "0xabc"
             store.insert_wallet_activity_events(
                 [
