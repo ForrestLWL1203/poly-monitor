@@ -48,9 +48,9 @@ class DeepWalletAnalysisTests(unittest.TestCase):
                             "side": "BUY",
                             "outcome": "Up",
                             "price": 0.42,
-                            "size": 10,
-                            "usdc": 4.2,
-                            "exchange_ts": 1770000030,
+                            "size": 100,
+                            "usdc": 42.0,
+                            "exchange_ts": 1770000010,
                         },
                         {
                             "wallet": wallet,
@@ -84,9 +84,9 @@ class DeepWalletAnalysisTests(unittest.TestCase):
                             "wallet": wallet,
                             "market_slug": "btc-updown-5m-1770000000",
                             "tx_hash": "0x1",
-                            "exchange_ts": 1770000030,
+                            "exchange_ts": 1770000010,
                             "context_json": {
-                                "window_remaining_sec": 270,
+                                "window_remaining_sec": 290,
                                 "up": {"spread": 0.02, "book_age_ms": 100, "ask_targets": {"25": {"ok": True, "avg": 0.43}}},
                             },
                         },
@@ -108,8 +108,20 @@ class DeepWalletAnalysisTests(unittest.TestCase):
                     bundle,
                     "wallet_market_pnl.jsonl",
                     [
-                        {"market_slug": "btc-updown-5m-1770000000", "symbol": "BTC", "realized_pnl": 10.5, "incomplete": 0},
-                        {"market_slug": "eth-updown-5m-1770000000", "symbol": "ETH", "realized_pnl": -2.0, "incomplete": 0},
+                        {
+                            "market_slug": "btc-updown-5m-1770000000",
+                            "symbol": "BTC",
+                            "winning_side": "Up",
+                            "realized_pnl": 120.5,
+                            "incomplete": 0,
+                        },
+                        {
+                            "market_slug": "eth-updown-5m-1770000000",
+                            "symbol": "ETH",
+                            "winning_side": "Down",
+                            "realized_pnl": -150.0,
+                            "incomplete": 0,
+                        },
                     ],
                 )
                 _write_jsonl(
@@ -128,12 +140,22 @@ class DeepWalletAnalysisTests(unittest.TestCase):
         self.assertEqual(report["wallet"], wallet)
         self.assertEqual(report["coverage"]["complete_windows"], 2)
         self.assertEqual(report["activity"]["trade_rows"], 3)
-        self.assertEqual(report["pnl"]["total_realized_pnl"], 8.5)
-        self.assertEqual(report["pnl"]["by_symbol"]["BTC"]["realized_pnl"], 10.5)
+        self.assertEqual(report["pnl"]["total_realized_pnl"], -29.5)
+        self.assertEqual(report["pnl"]["by_symbol"]["BTC"]["realized_pnl"], 120.5)
         self.assertEqual(report["market_behavior"]["dual_side_markets"], 1)
         self.assertEqual(report["timing"]["buckets"]["240s+"]["trades"], 1)
         self.assertEqual(report["timing"]["buckets"]["0-30s"]["trades"], 1)
         self.assertEqual(report["copyability"]["targets"]["25"]["ok_rate"], 50.0)
+        self.assertEqual(report["path_analysis"]["summary"]["windows"], 2)
+        self.assertEqual(report["path_analysis"]["summary"]["final_bias_correct"], 1)
+        self.assertEqual(report["path_analysis"]["summary"]["large_win_count"], 1)
+        self.assertEqual(report["path_analysis"]["summary"]["large_loss_count"], 1)
+        btc_path = next(row for row in report["path_analysis"]["windows"] if row["market_slug"].startswith("btc-"))
+        self.assertEqual(btc_path["final_net_side"], "Up")
+        self.assertEqual(btc_path["first_bias_bucket"], "0-30s")
+        self.assertTrue(btc_path["final_bias_correct"])
+        self.assertEqual(btc_path["bucket_flow"]["0-30s"]["up_usdc"], 42.0)
+        self.assertIn("Window Path Analysis", markdown)
         self.assertIn("possible_strategy_hypotheses", report)
         self.assertIn("Wallet Deep Analysis", markdown)
 

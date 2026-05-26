@@ -26,6 +26,18 @@ PRICE_BUCKETS = (
 )
 
 TARGETS = ("5", "25", "100")
+PATH_BUCKETS = (
+    ("0-30s", 0.0, 30.0),
+    ("30-60s", 30.0, 60.0),
+    ("60-120s", 60.0, 120.0),
+    ("120-180s", 120.0, 180.0),
+    ("180-240s", 180.0, 240.0),
+    ("240-300s", 240.0, 300.0),
+)
+PATH_CHECKPOINTS = (30, 60, 120, 180, 240, 300)
+FIRST_BIAS_MIN_USDC = 25.0
+LARGE_WIN_PNL = 100.0
+LARGE_LOSS_PNL = -100.0
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -195,6 +207,55 @@ def _symbol_from_slug(slug: str) -> str:
     return ""
 
 
+def _window_start_from_slug(slug: str) -> int | None:
+    try:
+        return int(slug.rsplit("-", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _side_from_net(net_usdc: float) -> str:
+    if net_usdc > 0:
+        return "Up"
+    if net_usdc < 0:
+        return "Down"
+    return "Flat"
+
+
+def _signed_flow(row: dict[str, Any]) -> float:
+    outcome = str(row.get("outcome") or "").lower()
+    side = str(row.get("side") or "BUY").upper()
+    usdc = _safe_float(row.get("usdc"))
+    if outcome not in {"up", "down"}:
+        return 0.0
+    sign = 1.0 if outcome == "up" else -1.0
+    if side == "SELL":
+        sign *= -1.0
+    return sign * usdc
+
+
+def _flow_fields(row: dict[str, Any]) -> tuple[str, float]:
+    outcome = str(row.get("outcome") or "").lower()
+    side = str(row.get("side") or "BUY").upper()
+    usdc = _safe_float(row.get("usdc"))
+    if outcome not in {"up", "down"}:
+        return ("", 0.0)
+    if side == "SELL":
+        outcome = "down" if outcome == "up" else "up"
+    return (outcome, usdc)
+
+
+def _pnl_by_slug(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if int(row.get("incomplete") or 0):
+            continue
+        slug = str(row.get("market_slug") or "")
+        if slug:
+            out[slug] = row
+    return out
+
+
 def _activity(activity_rows: list[dict[str, Any]]) -> dict[str, Any]:
     trade_rows = [row for row in activity_rows if str(row.get("activity_type") or "").upper() == "TRADE"]
     by_type = Counter(str(row.get("activity_type") or "").upper() for row in activity_rows)
@@ -344,6 +405,168 @@ def _copyability(activity_rows: list[dict[str, Any]], matched: dict[int, dict[st
     }
 
 
+def _window_group(pnl: float) -> str:
+    if pnl >= LARGE_WIN_PNL:
+        return "large_win"
+    if pnl <= LARGE_LOSS_PNL:
+        return "large_loss"
+    return "middle"
+
+
+def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "windows": 0,
+            "avg_pnl": None,
+            "avg_usdc": None,
+            "avg_final_net_usdc": None,
+            "avg_max_abs_net_usdc": None,
+            "avg_late_usdc": None,
+            "final_bias_accuracy": None,
+        }
+    accuracy_rows = [row for row in rows if row.get("final_bias_correct") is not None]
+    correct = sum(1 for row in accuracy_rows if row.get("final_bias_correct"))
+    return {
+        "windows": len(rows),
+        "avg_pnl": _round(sum(_safe_float(row.get("realized_pnl")) for row in rows) / len(rows), 6),
+        "avg_usdc": _round(sum(_safe_float(row.get("total_usdc")) for row in rows) / len(rows), 6),
+        "avg_final_net_usdc": _round(sum(_safe_float(row.get("final_net_usdc")) for row in rows) / len(rows), 6),
+        "avg_max_abs_net_usdc": _round(sum(_safe_float(row.get("max_abs_net_usdc")) for row in rows) / len(rows), 6),
+        "avg_late_usdc": _round(sum(_safe_float(row.get("late_usdc")) for row in rows) / len(rows), 6),
+        "final_bias_accuracy": _round(correct / len(accuracy_rows), 6) if accuracy_rows else None,
+    }
+
+
+def _path_analysis(activity_rows: list[dict[str, Any]], pnl_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    trade_rows = [row for row in activity_rows if str(row.get("activity_type") or "").upper() == "TRADE"]
+    by_market: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in trade_rows:
+        slug = str(row.get("market_slug") or "")
+        if slug:
+            by_market[slug].append(row)
+    pnl_lookup = _pnl_by_slug(pnl_rows)
+    windows: list[dict[str, Any]] = []
+    checkpoint_accuracy = {str(checkpoint): {"seen": 0, "correct": 0, "accuracy": None} for checkpoint in PATH_CHECKPOINTS}
+
+    for slug, rows in sorted(by_market.items()):
+        start_ts = _window_start_from_slug(slug)
+        bucket_flow = {
+            name: {"trades": 0, "usdc": 0.0, "up_usdc": 0.0, "down_usdc": 0.0, "net_up_down_usdc": 0.0}
+            for name, _low, _high in PATH_BUCKETS
+        }
+        total_usdc = 0.0
+        ordered: list[tuple[float, dict[str, Any]]] = []
+        for row in rows:
+            ts = _safe_float(row.get("exchange_ts"))
+            elapsed = max(0.0, ts - start_ts) if start_ts is not None and ts > 0 else 0.0
+            ordered.append((elapsed, row))
+            bucket_name = _bucket(min(elapsed, 299.999), PATH_BUCKETS)
+            if bucket_name not in bucket_flow:
+                continue
+            outcome, directional_usdc = _flow_fields(row)
+            signed = _signed_flow(row)
+            usdc = _safe_float(row.get("usdc"))
+            item = bucket_flow[bucket_name]
+            item["trades"] += 1
+            item["usdc"] += usdc
+            if outcome == "up":
+                item["up_usdc"] += directional_usdc
+            elif outcome == "down":
+                item["down_usdc"] += directional_usdc
+            item["net_up_down_usdc"] += signed
+            total_usdc += usdc
+
+        ordered.sort(key=lambda item: item[0])
+        cumulative = 0.0
+        first_bias_bucket: str | None = None
+        first_bias_side: str | None = None
+        max_abs_net = 0.0
+        checkpoint_sides: dict[str, str] = {}
+        row_idx = 0
+        for checkpoint in PATH_CHECKPOINTS:
+            while row_idx < len(ordered) and ordered[row_idx][0] <= checkpoint:
+                cumulative += _signed_flow(ordered[row_idx][1])
+                row_idx += 1
+            side = _side_from_net(cumulative)
+            checkpoint_sides[str(checkpoint)] = side
+            max_abs_net = max(max_abs_net, abs(cumulative))
+            if first_bias_bucket is None and abs(cumulative) >= FIRST_BIAS_MIN_USDC:
+                first_bias_bucket = _bucket(max(0.0, checkpoint - 0.001), PATH_BUCKETS)
+                first_bias_side = side
+
+        final_net = sum(item["net_up_down_usdc"] for item in bucket_flow.values())
+        final_side = _side_from_net(final_net)
+        for item in bucket_flow.values():
+            for key in ("usdc", "up_usdc", "down_usdc", "net_up_down_usdc"):
+                item[key] = round(item[key], 6)
+        pnl_row = pnl_lookup.get(slug, {})
+        winning_side = str(pnl_row.get("winning_side") or pnl_row.get("winner") or pnl_row.get("resolved_outcome") or "")
+        winning_side = winning_side.capitalize() if winning_side.lower() in {"up", "down"} else ""
+        final_bias_correct = final_side == winning_side if final_side != "Flat" and winning_side else None
+        first_bias_correct = first_bias_side == winning_side if first_bias_side and winning_side else None
+        checkpoint_correct: dict[str, bool | None] = {}
+        for checkpoint, side in checkpoint_sides.items():
+            correct = side == winning_side if side != "Flat" and winning_side else None
+            checkpoint_correct[checkpoint] = correct
+            if correct is not None:
+                checkpoint_accuracy[checkpoint]["seen"] += 1
+                checkpoint_accuracy[checkpoint]["correct"] += 1 if correct else 0
+        late = bucket_flow["240-300s"]
+        window = {
+            "market_slug": slug,
+            "symbol": _symbol_from_slug(slug),
+            "winning_side": winning_side or None,
+            "realized_pnl": _round(_safe_float(pnl_row.get("realized_pnl")), 6) if pnl_row else None,
+            "trades": len(rows),
+            "total_usdc": round(total_usdc, 6),
+            "bucket_flow": bucket_flow,
+            "final_net_usdc": _round(final_net, 6),
+            "final_net_side": final_side,
+            "max_abs_net_usdc": _round(max_abs_net, 6),
+            "first_bias_bucket": first_bias_bucket,
+            "first_bias_side": first_bias_side,
+            "first_bias_min_usdc": FIRST_BIAS_MIN_USDC,
+            "first_bias_correct": first_bias_correct,
+            "final_bias_correct": final_bias_correct,
+            "checkpoint_sides": checkpoint_sides,
+            "checkpoint_correct": checkpoint_correct,
+            "late_usdc": late["usdc"],
+            "late_net_usdc": late["net_up_down_usdc"],
+            "group": _window_group(_safe_float(pnl_row.get("realized_pnl"))) if pnl_row else "middle",
+        }
+        windows.append(window)
+
+    for checkpoint, values in checkpoint_accuracy.items():
+        seen = int(values["seen"])
+        values["accuracy"] = _round(values["correct"] / seen, 6) if seen else None
+    final_seen = [row for row in windows if row.get("final_bias_correct") is not None]
+    first_seen = [row for row in windows if row.get("first_bias_correct") is not None]
+    grouped = {
+        name: _summarize_group([row for row in windows if row.get("group") == name])
+        for name in ("large_win", "large_loss", "middle")
+    }
+    return {
+        "summary": {
+            "windows": len(windows),
+            "first_bias_min_usdc": FIRST_BIAS_MIN_USDC,
+            "large_win_threshold": LARGE_WIN_PNL,
+            "large_loss_threshold": LARGE_LOSS_PNL,
+            "winner_known": len([row for row in windows if row.get("winning_side")]),
+            "final_bias_seen": len(final_seen),
+            "final_bias_correct": sum(1 for row in final_seen if row.get("final_bias_correct")),
+            "final_bias_accuracy": _round(sum(1 for row in final_seen if row.get("final_bias_correct")) / len(final_seen), 6) if final_seen else None,
+            "first_bias_seen": len(first_seen),
+            "first_bias_correct": sum(1 for row in first_seen if row.get("first_bias_correct")),
+            "first_bias_accuracy": _round(sum(1 for row in first_seen if row.get("first_bias_correct")) / len(first_seen), 6) if first_seen else None,
+            "large_win_count": grouped["large_win"]["windows"],
+            "large_loss_count": grouped["large_loss"]["windows"],
+            "checkpoint_accuracy": checkpoint_accuracy,
+        },
+        "group_comparison": grouped,
+        "windows": sorted(windows, key=lambda row: abs(_safe_float(row.get("realized_pnl"))), reverse=True),
+    }
+
+
 def _hypotheses(activity: dict[str, Any], market: dict[str, Any], timing: dict[str, Any], copyability: dict[str, Any]) -> list[str]:
     out: list[str] = []
     if market.get("dual_side_rate", 0) >= 0.5 and activity.get("median_trade_usdc", 0) and activity["median_trade_usdc"] <= 25:
@@ -378,6 +601,7 @@ def analyze_deep_wallet_export(zip_path: Path) -> dict[str, Any]:
     market = _market_behavior(wallet_activity, wallet_pnl)
     timing = _timing(wallet_activity, matched)
     copyability = _copyability(wallet_activity, matched)
+    path_analysis = _path_analysis(wallet_activity, wallet_pnl)
     return {
         "wallet": str(manifest.get("wallet") or ""),
         "source_zip": str(zip_path),
@@ -387,6 +611,7 @@ def analyze_deep_wallet_export(zip_path: Path) -> dict[str, Any]:
         "market_behavior": market,
         "timing": timing,
         "copyability": copyability,
+        "path_analysis": path_analysis,
         "possible_strategy_hypotheses": _hypotheses(activity, market, timing, copyability),
     }
 
@@ -398,6 +623,9 @@ def render_markdown_report(report: dict[str, Any]) -> str:
     market = report["market_behavior"]
     timing = report["timing"]
     copyability = report["copyability"]
+    path = report.get("path_analysis", {})
+    path_summary = path.get("summary", {})
+    groups = path.get("group_comparison", {})
     target25 = copyability["targets"].get("25", {})
     lines = [
         f"# Wallet Deep Analysis: {report['wallet']}",
@@ -410,11 +638,23 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- Markets: {market['markets']} / dual-side rate: {market['dual_side_rate']}",
         f"- Dominant timing bucket: {timing['dominant_bucket']}",
         f"- 25 USDC copyability: ok_rate={target25.get('ok_rate')} avg_slip_cents={target25.get('avg_slippage_cents')}",
+        f"- Final path bias accuracy: {path_summary.get('final_bias_accuracy')} ({path_summary.get('final_bias_correct')}/{path_summary.get('final_bias_seen')})",
         "",
         "## Possible Strategy Hypotheses",
         "",
     ]
     lines.extend(f"- {item}" for item in report.get("possible_strategy_hypotheses", []))
+    lines.extend(["", "## Window Path Analysis", ""])
+    lines.append(f"- First bias threshold: {path_summary.get('first_bias_min_usdc')} USDC net Up-Down")
+    lines.append(f"- First bias accuracy: {path_summary.get('first_bias_accuracy')} ({path_summary.get('first_bias_correct')}/{path_summary.get('first_bias_seen')})")
+    lines.append(f"- Final bias accuracy: {path_summary.get('final_bias_accuracy')} ({path_summary.get('final_bias_correct')}/{path_summary.get('final_bias_seen')})")
+    for name in ("large_win", "large_loss", "middle"):
+        group = groups.get(name, {})
+        lines.append(
+            f"- {name}: windows={group.get('windows')} avg_pnl={group.get('avg_pnl')} "
+            f"avg_usdc={group.get('avg_usdc')} avg_final_net={group.get('avg_final_net_usdc')} "
+            f"avg_late_usdc={group.get('avg_late_usdc')}"
+        )
     lines.extend(["", "## Top PnL Markets", ""])
     for row in pnl.get("top_markets", [])[:10]:
         lines.append(f"- `{row['market_slug']}` {row['symbol']} pnl={row['realized_pnl']}")
