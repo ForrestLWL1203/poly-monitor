@@ -110,8 +110,8 @@ class PathPaperRunner:
 
     def _intent_key(self, intent: Any) -> tuple[str, int, str]:
         if hasattr(intent, "market_slug"):
-            return (str(intent.market_slug), int(intent.checkpoint_sec), str(intent.outcome))
-        return (str(intent.get("market_slug") or ""), int(intent.get("checkpoint_sec") or 0), str(intent.get("outcome") or ""))
+            return (str(intent.market_slug), 0, "")
+        return (str(intent.get("market_slug") or ""), 0, "")
 
     def _intent_from_dict(self, payload: dict[str, Any]) -> TradeIntent:
         return TradeIntent(

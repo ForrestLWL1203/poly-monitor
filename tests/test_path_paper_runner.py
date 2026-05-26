@@ -197,6 +197,48 @@ class PathPaperRunnerTests(unittest.TestCase):
 
             self.assertEqual(adapter.calls, 1)
 
+    def test_same_market_does_not_resubmit_at_later_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wallet = "0xabc"
+            data_source = MemoryDataSource(
+                [
+                    {
+                        "wallet": wallet,
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "activity_type": "TRADE",
+                        "side": "BUY",
+                        "outcome": "Up",
+                        "exchange_ts": 1770000040,
+                        "usdc": 42.0,
+                    }
+                ],
+                [
+                    {
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "sampled_ts": 1770000120,
+                        "book_stale": 0,
+                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                    },
+                    {
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "sampled_ts": 1770000180,
+                        "book_stale": 0,
+                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.55}}},
+                    },
+                ],
+            )
+            adapter = CountingAdapter()
+            runner = PathPaperRunner(
+                PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120, 180)),
+                data_source=data_source,
+                execution_adapter=adapter,
+            )
+
+            result = runner.tick()
+
+            self.assertEqual(result["intents"], 1)
+            self.assertEqual(adapter.calls, 1)
+
     def test_runner_accepts_any_strategy_with_evaluate_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             wallet = "0xabc"

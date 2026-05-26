@@ -194,6 +194,24 @@ class PathStrategyTests(unittest.TestCase):
         self.assertEqual(intent.reason, "d950_path_v0_reference_momentum")
         self.assertEqual(intent.features["reference_delta"], 1.2)
 
+    def test_d950_market_strategy_rejects_zero_reference_price(self):
+        strategy = D950MarketPathStrategy(PathStrategyConfig(wallet="strategy", checkpoints=(120,), notional_usdc=25, max_price=0.7))
+        sample = {
+            "market_slug": "btc-updown-5m-1770000000",
+            "sampled_ts": 1770000120,
+            "book_stale": 0,
+            "reference_price": 0,
+            "_market_state_history": [
+                {"market_slug": "btc-updown-5m-1770000000", "sampled_ts": 1770000001, "reference_price": 100.0},
+                {"market_slug": "btc-updown-5m-1770000000", "sampled_ts": 1770000120, "reference_price": 0},
+            ],
+            "down_json": {"ask_targets": {"25": {"ok": True, "avg": 0.05}}},
+        }
+
+        intent = strategy.evaluate_snapshot(sample, [])
+
+        self.assertIsNone(intent)
+
 
 if __name__ == "__main__":
     unittest.main()

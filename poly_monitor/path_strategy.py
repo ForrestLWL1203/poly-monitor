@@ -285,6 +285,8 @@ class D950MarketPathStrategy:
         if not isinstance(history, list):
             history = []
         current_ref = _safe_float(sample.get("reference_price"))
+        if current_ref <= 0:
+            return None
         refs = [
             row
             for row in history
@@ -293,6 +295,8 @@ class D950MarketPathStrategy:
             and _safe_float(row.get("reference_price")) > 0
         ]
         first_ref = _safe_float(refs[0].get("reference_price")) if refs else current_ref
+        if first_ref <= 0:
+            return None
         reference_delta = round(current_ref - first_ref, 6)
         if abs(reference_delta) <= self.min_reference_delta:
             return None
