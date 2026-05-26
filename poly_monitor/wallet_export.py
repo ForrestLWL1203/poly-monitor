@@ -121,6 +121,7 @@ def _coverage_summary(
     settlement = metadata.get("settlement") if isinstance(metadata.get("settlement"), dict) else None
     settlement_complete = bool(settlement and settlement.get("completed") and settlement.get("winning_side"))
     has_redeem = any(str(row.get("activity_type") or "").upper() == "REDEEM" for row in wallet_activity)
+    deep_samples = [row for row in samples if str(row.get("sample_reason") or "") == "deep_collector"]
     insufficient = (
         not watched
         or first_seen_delay is None
@@ -145,11 +146,39 @@ def _coverage_summary(
         "wallet_activity_rows": len(wallet_activity),
         "wallet_trade_context_rows": len(contexts),
         "market_state_sample_rows": len(samples),
+        "deep_market_state_sample_rows": len(deep_samples),
+        "deep_first_sampled_ts": min((int(row.get("sampled_ts") or 0) for row in deep_samples), default=None),
+        "deep_last_sampled_ts": max((int(row.get("sampled_ts") or 0) for row in deep_samples), default=None),
         "max_market_state_sample_gap_sec": _sample_gap_seconds(samples),
         "wallet_pnl_rows": len(wallet_pnl),
         "settlement_complete": settlement_complete,
         "has_redeem": has_redeem,
         "insufficient_market_capture": insufficient,
+    }
+
+
+def _deep_collection_summary(
+    *,
+    deep_samples: list[dict[str, Any]],
+    contexts: list[dict[str, Any]],
+    activity: list[dict[str, Any]],
+    wallet_trades: list[dict[str, Any]],
+) -> dict[str, Any]:
+    slugs = {str(row.get("market_slug") or "") for row in deep_samples if row.get("market_slug")}
+    sampled_ts = sorted(int(row.get("sampled_ts") or 0) for row in deep_samples if int(row.get("sampled_ts") or 0) > 0)
+    observed = sorted(str(row.get("observed_at") or "") for row in deep_samples if row.get("observed_at"))
+    return {
+        "required": True,
+        "sample_reason": "deep_collector",
+        "market_count": len(slugs),
+        "market_state_sample_rows": len(deep_samples),
+        "wallet_trade_context_rows": len(contexts),
+        "wallet_activity_rows": len(activity),
+        "wallet_trade_rows": len(wallet_trades),
+        "first_sampled_ts": sampled_ts[0] if sampled_ts else None,
+        "last_sampled_ts": sampled_ts[-1] if sampled_ts else None,
+        "first_observed_at": observed[0] if observed else None,
+        "last_observed_at": observed[-1] if observed else None,
     }
 
 
@@ -229,11 +258,46 @@ def export_watchlist_wallet(
         else:
             watched_rows = {}
         slugs.update(watched_rows)
+        if not slugs:
+            raise ValueError("no_deep_collection_data")
+
+        placeholders = ",".join("?" for _ in slugs)
+        slug_params = tuple(sorted(slugs))
+        deep_samples = _rows(
+            conn,
+            f"""
+            SELECT * FROM market_state_samples
+            WHERE sample_reason='deep_collector' AND market_slug IN ({placeholders})
+            ORDER BY sampled_ts ASC, market_slug ASC
+            """,
+            slug_params,
+        )
+        if not deep_samples:
+            raise ValueError("no_deep_collection_data")
+        deep_slugs = {str(row.get("market_slug") or "") for row in deep_samples if row.get("market_slug")}
+        deep_activity = [row for row in activity if row.get("market_slug") in deep_slugs]
+        deep_wallet_trades = [row for row in wallet_trades if row.get("market_slug") in deep_slugs]
+        deep_contexts = _rows(
+            conn,
+            f"""
+            SELECT * FROM wallet_trade_contexts
+            WHERE wallet=? AND market_slug IN ({placeholders})
+            ORDER BY exchange_ts ASC, tx_hash ASC
+            """,
+            (wallet, *slug_params),
+        )
 
         root_counts = {
             "wallet_activity_rows": _write_jsonl(target / "wallet_activity.jsonl", activity),
             "wallet_trades_rows": _write_jsonl(target / "wallet_trades.jsonl", wallet_trades),
             "wallet_market_pnl_rows": _write_jsonl(target / "wallet_market_pnl.jsonl", wallet_pnl),
+        }
+        deep_dir = target / "deep_collection"
+        deep_counts = {
+            "wallet_activity_rows": _write_jsonl(deep_dir / "wallet_activity.jsonl", deep_activity),
+            "wallet_trades_rows": _write_jsonl(deep_dir / "wallet_trades.jsonl", deep_wallet_trades),
+            "wallet_trade_context_rows": _write_jsonl(deep_dir / "wallet_trade_contexts.jsonl", deep_contexts),
+            "market_state_sample_rows": _write_jsonl(deep_dir / "market_state_samples.jsonl", deep_samples),
         }
         windows: list[dict[str, Any]] = []
         for slug in sorted(slugs):
@@ -288,8 +352,23 @@ def export_watchlist_wallet(
             "data_dir": str(data_dir),
             "export_dir": str(target),
             "policy": "local_capture_only_no_historical_market_backfill",
+            "deep_collection": {
+                **_deep_collection_summary(
+                    deep_samples=deep_samples,
+                    contexts=deep_contexts,
+                    activity=deep_activity,
+                    wallet_trades=deep_wallet_trades,
+                ),
+                "files": {
+                    "wallet_activity": "deep_collection/wallet_activity.jsonl",
+                    "wallet_trades": "deep_collection/wallet_trades.jsonl",
+                    "wallet_trade_contexts": "deep_collection/wallet_trade_contexts.jsonl",
+                    "market_state_samples": "deep_collection/market_state_samples.jsonl",
+                },
+            },
             "window_count": len(windows),
             "root_counts": root_counts,
+            "deep_counts": deep_counts,
             "windows": windows,
             "insufficient_market_capture": any(row["insufficient_market_capture"] for row in windows),
         }

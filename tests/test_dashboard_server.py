@@ -439,9 +439,49 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            slug = "btc-updown-5m-1770000000"
             store = ObserverStore(data_dir / "state" / "observer.sqlite")
             try:
                 store.add_watchlist_wallet(wallet)
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xtrade",
+                            "wallet": wallet,
+                            "market_slug": slug,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 1770000121,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.6,
+                            "size": 10,
+                            "usdc": 6,
+                            "asset": "up",
+                            "observed_at": "2026-05-26T02:22:00+00:00",
+                        }
+                    ]
+                )
+                store.insert_market_state_samples(
+                    [
+                        {
+                            "market_slug": slug,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "sampled_ts": 1770000123,
+                            "observed_at": "2026-05-26T02:22:03+00:00",
+                            "window_remaining_sec": 177,
+                            "reference_price": 100001,
+                            "reference_price_age_sec": 0.4,
+                            "up_json": {"bids": [[0.59, 10]], "asks": [[0.61, 4]]},
+                            "down_json": {"bids": [[0.39, 4]], "asks": [[0.41, 8]]},
+                            "book_stale": False,
+                            "sample_reason": "deep_collector",
+                        }
+                    ]
+                )
             finally:
                 store.close()
             server = create_server(
@@ -495,6 +535,213 @@ class DashboardServerTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=3)
+
+    def test_wallet_export_api_rejects_watchlist_wallet_without_deep_samples(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+        from poly_monitor.storage import ObserverStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.add_watchlist_wallet(wallet)
+            finally:
+                store.close()
+            server = create_server(
+                DashboardConfig(
+                    data_dir=data_dir,
+                    host="127.0.0.1",
+                    port=0,
+                    username="admin",
+                    password="secret",
+                    cookie_secret="test-secret",
+                )
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                req = urllib.request.Request(
+                    f"{base}/api/wallet-export",
+                    data=json.dumps({"wallet": wallet}).encode(),
+                    headers={"Cookie": cookie, "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(req, timeout=3)
+                self.assertEqual(rejected.exception.code, 409)
+                self.assertEqual(json.loads(rejected.exception.read().decode())["error"], "no_deep_collection_data")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_deep_collection_api_requires_watchlist_and_starts_or_stops_wallet(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+        from poly_monitor.storage import ObserverStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.add_watchlist_wallet(wallet)
+            finally:
+                store.close()
+            with mock.patch("poly_monitor.dashboard.server.start_collector", return_value={"ok": True, "state": "running", "pid": 123}) as start, mock.patch(
+                "poly_monitor.dashboard.server.stop_collector", return_value={"ok": True, "state": "stopped", "pid": 123}
+            ) as stop:
+                server = create_server(
+                    DashboardConfig(
+                        data_dir=data_dir,
+                        host="127.0.0.1",
+                        port=0,
+                        username="admin",
+                        password="secret",
+                        cookie_secret="test-secret",
+                    )
+                )
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base = f"http://127.0.0.1:{server.server_address[1]}"
+                    body = json.dumps({"wallet": wallet, "action": "start"}).encode()
+                    unauth_req = urllib.request.Request(
+                        f"{base}/api/deep-collection",
+                        data=body,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as unauth:
+                        urllib.request.urlopen(unauth_req, timeout=3)
+                    self.assertEqual(unauth.exception.code, 401)
+
+                    cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                    req = urllib.request.Request(
+                        f"{base}/api/deep-collection",
+                        data=body,
+                        headers={"Cookie": cookie, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    payload = json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+                    self.assertEqual(payload["state"], "running")
+                    self.assertEqual(start.call_count, 1)
+
+                    stop_req = urllib.request.Request(
+                        f"{base}/api/deep-collection",
+                        data=json.dumps({"wallet": wallet, "action": "stop"}).encode(),
+                        headers={"Cookie": cookie, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    stopped = json.loads(urllib.request.urlopen(stop_req, timeout=3).read().decode())
+                    self.assertEqual(stopped["state"], "stopped")
+                    self.assertEqual(stop.call_count, 1)
+
+                    missing_req = urllib.request.Request(
+                        f"{base}/api/deep-collection",
+                        data=json.dumps({"wallet": "0x1111111111111111111111111111111111111111", "action": "start"}).encode(),
+                        headers={"Cookie": cookie, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as missing:
+                        urllib.request.urlopen(missing_req, timeout=3)
+                    self.assertEqual(missing.exception.code, 404)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
+
+    def test_deep_collection_api_returns_429_when_collector_limit_reached(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+        from poly_monitor.storage import ObserverStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.add_watchlist_wallet(wallet)
+            finally:
+                store.close()
+            with mock.patch(
+                "poly_monitor.dashboard.server.start_collector",
+                return_value={"ok": False, "error": "too_many_collectors", "running": 1, "max_active_collectors": 1},
+            ):
+                server = create_server(
+                    DashboardConfig(
+                        data_dir=data_dir,
+                        host="127.0.0.1",
+                        port=0,
+                        username="admin",
+                        password="secret",
+                        cookie_secret="test-secret",
+                    )
+                )
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base = f"http://127.0.0.1:{server.server_address[1]}"
+                    cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                    req = urllib.request.Request(
+                        f"{base}/api/deep-collection",
+                        data=json.dumps({"wallet": wallet, "action": "start"}).encode(),
+                        headers={"Cookie": cookie, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as rejected:
+                        urllib.request.urlopen(req, timeout=3)
+                    self.assertEqual(rejected.exception.code, 429)
+                    self.assertEqual(json.loads(rejected.exception.read().decode())["error"], "too_many_collectors")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
+
+    def test_watchlist_remove_stops_deep_collector_before_purge(self):
+        from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
+        from poly_monitor.storage import ObserverStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.add_watchlist_wallet(wallet)
+            finally:
+                store.close()
+            with mock.patch("poly_monitor.dashboard.server.stop_collector", return_value={"ok": True, "stopped": True}) as stop:
+                server = create_server(
+                    DashboardConfig(
+                        data_dir=data_dir,
+                        host="127.0.0.1",
+                        port=0,
+                        username="admin",
+                        password="secret",
+                        cookie_secret="test-secret",
+                    )
+                )
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base = f"http://127.0.0.1:{server.server_address[1]}"
+                    cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                    req = urllib.request.Request(
+                        f"{base}/api/watchlist",
+                        data=json.dumps({"wallet": wallet, "action": "remove"}).encode(),
+                        headers={"Cookie": cookie, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    payload = json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
+
+        stop.assert_called_once_with(data_dir, wallet)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["collector"]["stopped"], True)
 
 
 if __name__ == "__main__":

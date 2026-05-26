@@ -201,6 +201,24 @@ class ObserverContextTests(unittest.TestCase):
         self.assertNotIn("context_snapshot", {row.get("event") for row in raw_events})
         self.assertIn("watchlist_activity_observed", {row.get("event") for row in raw_events})
 
+    def test_watchlist_activity_skips_wallet_with_active_deep_collector(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                data_dir = Path(tmp)
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=data_dir, watchlist_activity_poll_sec=0))
+                observer.store.add_watchlist_wallet("0xabcdef1234567890abcdef1234567890abcdef12")
+                observer.data_api.fetch_user_activity = AsyncMock(return_value=[])
+                try:
+                    with patch("poly_monitor.observer.collector_status", return_value={"running": True, "pid": 123}):
+                        await observer._poll_watchlist_activity_once()
+                    calls = observer.data_api.fetch_user_activity.await_count
+                finally:
+                    observer.store.close()
+                    observer.writer.close()
+                return calls
+
+        self.assertEqual(asyncio.run(run_case()), 0)
+
     def test_watchlist_context_write_cap_limits_sqlite_without_raw_duplicate(self):
         async def run_case():
             now = dt.datetime.now(dt.timezone.utc)

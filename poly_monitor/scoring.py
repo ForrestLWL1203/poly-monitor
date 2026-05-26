@@ -23,9 +23,10 @@ class CandidateThresholds:
     archive_age_hours: float = 14 * 24.0
     dormant_min_historical_trades: int = 500
     dormant_min_historical_markets: int = 5
-    max_copyable_trades_per_market_24h: int = 200
     terminal_thin_edge_min_trades_30d: int = 20
-    terminal_thin_edge_max_share_30d: float = 0.80
+    terminal_thin_edge_max_share_30d: float = 0.60
+    terminal_thin_edge_hard_max_trades_30d: int = 100
+    terminal_thin_edge_hard_min_share_30d: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,15 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
     local_quality_passes = _local_quality_passes(metrics, thresholds)
     profile_trend_passes = _reliable_profile_pnl_passes(metrics)
     local_quality_can_relax_activity = local_quality_passes and profile_trend_passes
+    terminal_thin_edge_trades = _num(metrics, "terminal_near_certain_trades_30d")
+    terminal_thin_edge_share = _num(metrics, "terminal_near_certain_trade_share_30d")
+    terminal_thin_edge_failed = terminal_thin_edge_trades >= thresholds.terminal_thin_edge_min_trades_30d and (
+        terminal_thin_edge_share >= thresholds.terminal_thin_edge_max_share_30d
+        or (
+            terminal_thin_edge_trades >= thresholds.terminal_thin_edge_hard_max_trades_30d
+            and terminal_thin_edge_share >= thresholds.terminal_thin_edge_hard_min_share_30d
+        )
+    )
     if local_quality_can_relax_activity:
         market_activity_failed = markets_24h < thresholds.min_quality_markets_24h
     else:
@@ -128,14 +138,8 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
     use_historical_quality_gates = not local_quality_passes or _has_reliable_profile_pnl(metrics)
     checks = [
         (
-            "uncopyable_single_window_frequency",
-            _num(metrics, "local_observed_max_trades_per_market_24h") >= thresholds.max_copyable_trades_per_market_24h
-            or _num(metrics, "max_trades_per_market_24h") >= thresholds.max_copyable_trades_per_market_24h,
-        ),
-        (
             "uncopyable_terminal_thin_edge",
-            _num(metrics, "terminal_near_certain_trades_30d") >= thresholds.terminal_thin_edge_min_trades_30d
-            and _num(metrics, "terminal_near_certain_trade_share_30d") >= thresholds.terminal_thin_edge_max_share_30d,
+            terminal_thin_edge_failed,
         ),
         ("trades_7d_below_threshold", _num(metrics, "trades_7d") < thresholds.min_trades_7d),
         ("markets_24h_below_threshold", market_activity_failed),
@@ -143,7 +147,7 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
         (
             "settled_markets_7d_below_threshold",
             metrics.get("pnl_source") == "local_observed_ledger"
-            and _num(metrics, "settled_markets_7d") < thresholds.min_settled_markets_for_local_active,
+            and _local_settled_7d(metrics) < thresholds.min_settled_markets_for_local_active,
         ),
         ("pnl_7d_not_positive", use_historical_quality_gates and check_pnl_7d and _num(metrics, "pnl_7d") <= 0),
         ("local_observed_pnl_7d_not_positive", has_local_quality_sample and _local_pnl_7d(metrics) <= 0),
@@ -162,9 +166,14 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
 
 
 def _dormant_ok(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
-    if (
-        _num(metrics, "terminal_near_certain_trades_30d") >= thresholds.terminal_thin_edge_min_trades_30d
-        and _num(metrics, "terminal_near_certain_trade_share_30d") >= thresholds.terminal_thin_edge_max_share_30d
+    terminal_thin_edge_trades = _num(metrics, "terminal_near_certain_trades_30d")
+    terminal_thin_edge_share = _num(metrics, "terminal_near_certain_trade_share_30d")
+    if terminal_thin_edge_trades >= thresholds.terminal_thin_edge_min_trades_30d and (
+        terminal_thin_edge_share >= thresholds.terminal_thin_edge_max_share_30d
+        or (
+            terminal_thin_edge_trades >= thresholds.terminal_thin_edge_hard_max_trades_30d
+            and terminal_thin_edge_share >= thresholds.terminal_thin_edge_hard_min_share_30d
+        )
     ):
         return False
     if (
@@ -236,14 +245,9 @@ def _active_rank_score(metrics: dict[str, Any]) -> float:
         _num(metrics, "top1_concentration") * 130.0
         + _num(metrics, "top3_concentration") * 90.0
     )
-    high_frequency_penalty = (
-        _capped(markets_24h - 120.0, 180.0) * 0.75
-        + _capped(_num(metrics, "trades_24h") - 600.0, 2500.0) * 0.025
-        + _capped(_num(metrics, "local_observed_max_trades_per_market_24h") - 100.0, 1000.0) * 0.20
-    )
     recency_penalty = _capped(last_active_age, 1.0) * 35.0
 
-    return quality + sample_confidence + activity + pnl_bonus - stability_penalty - high_frequency_penalty - recency_penalty
+    return quality + sample_confidence + activity + pnl_bonus - stability_penalty - recency_penalty
 
 
 def _dormant_rank_score(metrics: dict[str, Any]) -> float:

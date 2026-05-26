@@ -170,6 +170,21 @@
       color: #ffe4a3;
       background: #2e2819;
     }
+    .deep-button.active {
+      border-color: var(--good);
+      color: #d9ffe7;
+      background: #1d3327;
+    }
+    .deep-pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 3px 8px;
+      color: var(--muted);
+      background: var(--chip);
+      font-size: 11px;
+    }
+    .deep-pill.running { color: var(--good); border-color: #315d42; }
+    .deep-pill.stale { color: var(--warn); border-color: #665733; }
     .watch-cell {
       width: 42px;
       min-width: 42px;
@@ -197,7 +212,8 @@
       white-space: nowrap;
     }
     th:nth-child(2), td:nth-child(2),
-    th:nth-child(3), td:nth-child(3) {
+    th:nth-child(3), td:nth-child(3),
+    th:nth-child(4), td:nth-child(4) {
       text-align: left;
     }
     tbody tr {
@@ -414,6 +430,7 @@
                   <th class="watch-cell" title="加入或移出重点关注">★</th>
                   <th>用户</th>
                   <th title="ready 表示已完成复核；pending 表示还在观察或关键字段未齐">评分状态</th>
+                  <th title="重点关注钱包的单独深度采集进程状态">深采</th>
                   <th title="综合排序分，用来在候选池内排序，不等同于收益">综合分</th>
                   <th title="近 7 天 BTC/ETH 5m 成交笔数">7天交易</th>
                   <th title="近 30 天 BTC/ETH 5m 成交笔数">30天交易</th>
@@ -647,7 +664,7 @@
         throw new Error("unauthorized");
       }
       const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || "request_failed");
+      if (!resp.ok) throw new Error(data.message || data.error || "request_failed");
       return data;
     }
 
@@ -710,6 +727,18 @@
       await load();
     }
 
+    async function setDeepCollection(wallet, action) {
+      await api("/api/deep-collection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wallet, action })
+      });
+      await load();
+      if (!$("detailOverlay").classList.contains("hidden")) {
+        await loadWallet(wallet);
+      }
+    }
+
     async function exportWallet(wallet) {
       const button = $("exportWalletBtn");
       if (button) button.disabled = true;
@@ -720,12 +749,28 @@
           body: JSON.stringify({ wallet })
         });
         const warning = payload.insufficient_market_capture ? " · 数据覆盖不足" : "";
-        $("exportStatus").innerHTML = `导出完成${warning}<br><code>${escapeHtml(payload.zip_path || "")}</code>`;
+        $("exportStatus").innerHTML = `深采包已导出${warning}<br><code>${escapeHtml(payload.zip_path || "")}</code>`;
       } catch (err) {
-        $("exportStatus").textContent = "导出失败";
+        $("exportStatus").textContent = err.message === "wallet has no deep collection samples yet"
+          ? "暂无深采数据，不能导出"
+          : "导出失败";
       } finally {
         if (button) button.disabled = false;
       }
+    }
+
+    function deepState(row) {
+      return row.deep_collection || { state: "none", running: false };
+    }
+
+    function deepLabel(state) {
+      if (state.running) return `深采中 ${state.pid ? `pid=${state.pid}` : ""}`.trim();
+      if (state.state === "stale") return "失联";
+      return "未深采";
+    }
+
+    function deepActionLabel(state) {
+      return state.running ? "停" : "深";
     }
 
     async function load() {
@@ -786,7 +831,7 @@
 
     function renderWallets(rows) {
       if (!rows.length) {
-        $("walletRows").innerHTML = `<tr><td colspan="17" class="empty">暂无 ${labels[currentGroup]} 地址</td></tr>`;
+        $("walletRows").innerHTML = `<tr><td colspan="18" class="empty">暂无 ${labels[currentGroup]} 地址</td></tr>`;
         return;
       }
       $("walletRows").innerHTML = rows.map((row) => {
@@ -795,6 +840,10 @@
         const visibleName = shortName(displayName);
         const subLine = row.name ? row.wallet_short : "";
         const watchlisted = Boolean(row.watchlisted);
+        const deep = deepState(row);
+        const deepButton = watchlisted
+          ? `<button class="icon-button deep-button ${deep.running ? "active" : ""}" data-deep-wallet="${row.wallet}" data-deep-action="${deep.running ? "stop" : "start"}" title="${deepLabel(deep)}">${deepActionLabel(deep)}</button>`
+          : `<span class="deep-pill">-</span>`;
         return `<tr data-wallet="${row.wallet}">
           <td class="watch-cell">
             <button class="icon-button watch-button ${watchlisted ? "active" : ""}" data-watch-wallet="${row.wallet}" data-watchlisted="${watchlisted ? "1" : "0"}" title="${watchlisted ? "移出重点关注" : "加入重点关注"}">${watchlisted ? "★" : "☆"}</button>
@@ -804,6 +853,7 @@
             <div class="subtle addr">${subLine}</div>
           </td>
           <td><span class="pill ${state}" title="${zhScoreState(state)}">${zhScoreState(state)}</span></td>
+          <td title="${deepLabel(deep)}">${deepButton}</td>
           <td>${fmtInt(row.rank_score)}</td>
           <td>${lowerBoundMetric(row, "trades_7d")}</td>
           <td>${lowerBoundMetric(row, "trades_30d")}</td>
@@ -831,6 +881,14 @@
           if (wallet) setWatchlist(wallet, !watchlisted).catch(() => alert("重点关注更新失败"));
         });
       });
+      document.querySelectorAll("#walletRows button[data-deep-wallet]").forEach((button) => {
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const wallet = button.dataset.deepWallet;
+          const action = button.dataset.deepAction;
+          if (wallet && action) setDeepCollection(wallet, action).catch(() => alert("深采更新失败"));
+        });
+      });
     }
 
     async function loadWallet(wallet) {
@@ -842,6 +900,7 @@
         : escapeHtml(detailName);
       $("detailTitle").textContent = detail.wallet || "";
       const m = detail.metrics || {};
+      const deep = deepState(detail);
       const kv = [
         ["分类", zhStatus(detail.status)],
         ["评分状态", zhScoreState(detail.score_state)],
@@ -868,10 +927,12 @@
       ];
       $("walletDetail").innerHTML = `
         <div class="kv">${kv.map(([k, v]) => `<div><div class="subtle">${k}</div><strong>${v}</strong></div>`).join("")}</div>
-        ${detail.watchlisted ? `<div class="actions"><button id="exportWalletBtn" class="button" type="button">导出</button><span id="exportStatus" class="subtle"></span></div>` : ""}
+        ${detail.watchlisted ? `<div class="actions"><button id="exportWalletBtn" class="button" type="button">导出深采包</button><button id="deepWalletBtn" class="button deep-button ${deep.running ? "active" : ""}" type="button" title="${deepLabel(deep)}">${deep.running ? "停止深采" : "开始深采"}</button><span class="deep-pill ${deep.state || "none"}">${deepLabel(deep)}</span><span id="exportStatus" class="subtle"></span></div>` : ""}
         <div class="subtle">${reasonText(detail)}</div>`;
       const exportButton = $("exportWalletBtn");
       if (exportButton) exportButton.addEventListener("click", () => exportWallet(detail.wallet));
+      const deepButton = $("deepWalletBtn");
+      if (deepButton) deepButton.addEventListener("click", () => setDeepCollection(detail.wallet, deep.running ? "stop" : "start").catch(() => alert("深采更新失败")));
       openWalletModal();
     }
 

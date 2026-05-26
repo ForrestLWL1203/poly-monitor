@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..storage import ObserverStore, WatchlistStore
+from ..deep_collection import DEFAULT_MAX_ACTIVE_COLLECTORS, collector_status, start_collector, stop_collector
 from ..wallet_export import export_watchlist_wallet
 from .status import build_dashboard_status, recent_trades, wallet_detail
 
@@ -41,6 +42,7 @@ class DashboardConfig:
     cookie_secret: str = ""
     session_ttl_seconds: int = 12 * 3600
     status_cache_ttl_seconds: float = 2.0
+    max_active_deep_collectors: int = DEFAULT_MAX_ACTIVE_COLLECTORS
     static_dir: Path | None = None
 
 
@@ -199,6 +201,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._wallet_export()
             return
+        if parsed.path == "/api/deep-collection":
+            if not self._authenticated():
+                self._json({"error": "unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            self._deep_collection_mutation()
+            return
         self._json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
     def _handle_api_get(self, parsed: urllib.parse.ParseResult) -> None:
@@ -222,6 +230,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             store = WatchlistStore(self.dashboard_config.data_dir / "state" / "observer.sqlite")
             try:
                 self._json({"watchlist": store.rows()})
+            finally:
+                store.close()
+            return
+        if parsed.path == "/api/deep-collection":
+            store = WatchlistStore(self.dashboard_config.data_dir / "state" / "observer.sqlite")
+            try:
+                statuses = [collector_status(self.dashboard_config.data_dir, wallet) for wallet in store.wallets()]
+                self._json({"collectors": statuses})
             finally:
                 store.close()
             return
@@ -290,8 +306,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         store = store_cls(self.dashboard_config.data_dir / "state" / "observer.sqlite")
         try:
             if action == "remove":
+                collector_payload = stop_collector(self.dashboard_config.data_dir, wallet)
                 purge = store.remove_watchlist_wallet_and_purge(wallet)
-                payload = {"ok": True, "wallet": wallet, "watchlisted": False, "removed": purge["removed_watchlist_rows"], "purge": purge}
+                payload = {
+                    "ok": True,
+                    "wallet": wallet,
+                    "watchlisted": False,
+                    "removed": purge["removed_watchlist_rows"],
+                    "purge": purge,
+                    "collector": collector_payload,
+                }
             elif action == "add":
                 store.add_wallet(wallet, note=note)
                 payload = {"ok": True, "wallet": wallet, "watchlisted": True}
@@ -330,12 +354,60 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if str(exc) == "wallet_not_watchlisted":
                 self._json({"error": "wallet_not_watchlisted"}, status=HTTPStatus.NOT_FOUND)
                 return
+            if str(exc) == "no_deep_collection_data":
+                self._json(
+                    {
+                        "error": "no_deep_collection_data",
+                        "message": "wallet has no deep collection samples yet",
+                    },
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
             self._json({"error": "export_failed", "message": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
         except Exception as exc:
             self._json({"error": "export_failed", "message": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         self._json({"ok": True, **result})
+
+    def _deep_collection_mutation(self) -> None:
+        body = self.rfile.read(_int_param(self.headers.get("Content-Length"), default=0, minimum=0, maximum=16384))
+        content_type = self.headers.get("Content-Type", "")
+        if "application/json" in content_type:
+            try:
+                form = json.loads(body.decode() or "{}")
+            except json.JSONDecodeError:
+                form = {}
+        else:
+            form = {key: values[0] for key, values in urllib.parse.parse_qs(body.decode()).items()}
+        wallet = str(form.get("wallet") or form.get("address") or "").lower().strip()
+        action = str(form.get("action") or "start").lower()
+        if not ADDRESS_RE.match(wallet):
+            self._json({"error": "invalid_wallet", "hint": "expected 0x + 40 hex chars"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        store = WatchlistStore(self.dashboard_config.data_dir / "state" / "observer.sqlite")
+        try:
+            if wallet not in set(store.wallets()):
+                self._json({"error": "wallet_not_watchlisted"}, status=HTTPStatus.NOT_FOUND)
+                return
+        finally:
+            store.close()
+        if action == "start":
+            payload = start_collector(
+                self.dashboard_config.data_dir,
+                wallet,
+                max_active_collectors=self.dashboard_config.max_active_deep_collectors,
+            )
+        elif action == "stop":
+            payload = stop_collector(self.dashboard_config.data_dir, wallet)
+        else:
+            self._json({"error": "invalid_action"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        _clear_status_cache()
+        if not payload.get("ok") and payload.get("error") == "too_many_collectors":
+            self._json(payload, status=HTTPStatus.TOO_MANY_REQUESTS)
+            return
+        self._json(payload)
 
     def _authenticated(self) -> bool:
         token = _cookie_value(self.headers.get("Cookie", ""), COOKIE_NAME)

@@ -88,6 +88,64 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(score.status, "archive_candidate")
         self.assertIn("uncopyable_terminal_thin_edge", score.reasons)
 
+    def test_score_wallet_archives_large_absolute_terminal_thin_edge_flow(self):
+        metrics = {
+            "wallet": "0x562a11bcd7354ea82a09ed803cb1739d60862ad4",
+            "trades_24h": 1215,
+            "markets_24h": 288,
+            "trades_7d": 1215,
+            "trades_30d": 1215,
+            "pnl_7d": 208.1725,
+            "pnl_30d": 391.404,
+            "pnl_source": "profile_portfolio_pnl",
+            "wins_7d": 196,
+            "losses_7d": 8,
+            "top1_concentration": 0.081952,
+            "top3_concentration": 0.198134,
+            "longshot_profit_share": 0.0,
+            "longshot_profit_markets": 0,
+            "last_active_age_hours": 0.071,
+            "historical_trades": 1215,
+            "historical_markets": 215,
+            "historical_pnl": 391.404,
+            "terminal_near_certain_trades_30d": 825,
+            "terminal_near_certain_trade_share_30d": 0.679012,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "archive_candidate")
+        self.assertIn("uncopyable_terminal_thin_edge", score.reasons)
+
+    def test_terminal_thin_edge_hard_cap_requires_meaningful_share(self):
+        metrics = {
+            "wallet": "0xactive",
+            "trades_24h": 2000,
+            "markets_24h": 500,
+            "trades_7d": 5000,
+            "trades_30d": 12000,
+            "pnl_7d": 2000.0,
+            "pnl_30d": 8000.0,
+            "pnl_source": "profile_portfolio_pnl",
+            "wins_7d": 400,
+            "losses_7d": 100,
+            "top1_concentration": 0.03,
+            "top3_concentration": 0.08,
+            "longshot_profit_share": 0.0,
+            "longshot_profit_markets": 0,
+            "last_active_age_hours": 0.1,
+            "historical_trades": 12000,
+            "historical_markets": 3000,
+            "historical_pnl": 8000.0,
+            "terminal_near_certain_trades_30d": 120,
+            "terminal_near_certain_trade_share_30d": 0.01,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertNotIn("uncopyable_terminal_thin_edge", score.reasons)
+        self.assertEqual(score.status, "active_candidate")
+
     def test_active_rank_uses_local_observed_quality_not_cancelled_api_wins(self):
         metrics = {
             "wallet": "0x25f4707c93e4bfdf26cd6c5cc46c5464691cf88e",
@@ -565,7 +623,7 @@ class ScoringTests(unittest.TestCase):
         self.assertNotIn("pnl_30d_not_positive", score.reasons)
         self.assertNotIn("top1_concentration_high", score.reasons)
 
-    def test_rank_penalizes_extreme_frequency_when_quality_is_similar(self):
+    def test_rank_does_not_penalize_extreme_frequency_when_quality_is_similar(self):
         moderate_frequency = {
             "wallet": "0xmoderate",
             "trades_24h": 220,
@@ -605,9 +663,9 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual(moderate.status, "active_candidate")
         self.assertEqual(extreme.status, "active_candidate")
-        self.assertGreater(moderate.rank_score, extreme.rank_score)
+        self.assertGreater(extreme.rank_score, moderate.rank_score)
 
-    def test_score_wallet_downgrades_uncopyable_single_window_frequency(self):
+    def test_score_wallet_does_not_downgrade_single_window_frequency(self):
         metrics = {
             "wallet": "0xrobot",
             "trades_24h": 900,
@@ -632,8 +690,43 @@ class ScoringTests(unittest.TestCase):
 
         score = score_wallet(metrics, CandidateThresholds())
 
-        self.assertNotEqual(score.status, "active_candidate")
-        self.assertIn("uncopyable_single_window_frequency", score.reasons)
+        self.assertEqual(score.status, "active_candidate")
+        self.assertNotIn("uncopyable_single_window_frequency", score.reasons)
+
+    def test_local_observed_ledger_active_gate_uses_local_settled_markets(self):
+        metrics = {
+            "wallet": "0xd950a1a89f3e61a7a9efc85a46e440ce58c15e86",
+            "trades_24h": 1419,
+            "markets_24h": 288,
+            "markets_24h_lower_bound": True,
+            "trades_7d": 1419,
+            "trades_30d": 1419,
+            "pnl_7d": 645.515563,
+            "pnl_30d": 645.515563,
+            "pnl_source": "local_observed_ledger",
+            "wins_7d": 0,
+            "losses_7d": 0,
+            "local_observed_pnl_7d": 645.515563,
+            "local_observed_pnl_30d": 645.515563,
+            "local_observed_settled_markets_7d": 115,
+            "local_observed_wins_7d": 64,
+            "local_observed_losses_7d": 51,
+            "local_observed_span_hours": 10.122,
+            "local_observed_max_trades_per_market_24h": 920,
+            "top1_concentration": 0.012218,
+            "top3_concentration": 0.031858,
+            "longshot_profit_share": 0.003876,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.001,
+            "historical_trades": 1419,
+            "historical_markets": 6,
+            "historical_pnl": 645.515563,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "active_candidate")
+        self.assertNotIn("settled_markets_7d_below_threshold", score.reasons)
 
     def test_score_wallet_rejects_negative_7d_pnl_on_api_metrics(self):
         metrics = {

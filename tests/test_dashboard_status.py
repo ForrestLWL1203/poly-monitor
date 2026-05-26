@@ -134,6 +134,7 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(status["candidates"]["watchlist"][0]["wallet"], watched)
         self.assertTrue(status["candidates"]["watchlist"][0]["watchlisted"])
         self.assertEqual(status["candidates"]["watchlist"][0]["status"], "watchlist")
+        self.assertIn("deep_collection", status["candidates"]["watchlist"][0])
         self.assertEqual([row["wallet"] for row in status["candidates"]["active_candidate"]], [active])
 
     def test_candidate_names_fall_back_to_latest_trade_name(self):
@@ -387,7 +388,7 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertAlmostEqual(detail["ledger_summary"]["realized_pnl"], 0.0)
         self.assertTrue(detail["settled_markets"][0]["incomplete"])
 
-    def test_watchlist_dashboard_uses_local_window_pnl_for_activity_ledger_wallet(self):
+    def test_watchlist_dashboard_keeps_profile_pnl_and_exposes_local_window_pnl(self):
         from poly_monitor.dashboard.status import build_dashboard_status, wallet_detail
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -416,9 +417,8 @@ class DashboardStatusTests(unittest.TestCase):
                         "local_observed_pnl_30d": 4,
                         "local_observed_historical_pnl": 4,
                         "local_observed_pnl_source": "local_observed_ledger",
-                        "activity_ledger_markets_total": 1,
-                        "merge_or_split_markets_total": 1,
-                        "pnl_display_source": "local_window_ledger",
+                        "local_observed_activity_ledger_markets_total": 1,
+                        "local_observed_merge_or_split_markets_total": 1,
                         "wins_7d": 1,
                         "losses_7d": 0,
                     },
@@ -489,15 +489,15 @@ class DashboardStatusTests(unittest.TestCase):
             detail = wallet_detail(data_dir, wallet)
 
         row = status["candidates"]["watchlist"][0]
-        self.assertEqual(row["metrics"]["pnl_7d"], 4)
-        self.assertEqual(row["metrics"]["pnl_30d"], 4)
-        self.assertEqual(row["metrics"]["historical_pnl"], 4)
-        self.assertEqual(row["metrics"]["pnl_source"], "local_observed_ledger")
-        self.assertEqual(row["metrics"]["pnl_display_source"], "local_window_ledger")
+        self.assertEqual(row["metrics"]["pnl_7d"], 30)
+        self.assertEqual(row["metrics"]["pnl_30d"], 30)
+        self.assertEqual(row["metrics"]["historical_pnl"], 30)
+        self.assertEqual(row["metrics"]["pnl_source"], "profile_portfolio_pnl")
+        self.assertNotIn("pnl_display_source", row["metrics"])
         self.assertEqual(row["metrics"]["profile_reference_pnl_7d"], 30)
         self.assertEqual(row["metrics"]["local_observed_pnl_total"], 4)
-        self.assertEqual(row["metrics"]["activity_ledger_markets_total"], 1)
-        self.assertEqual(row["metrics"]["merge_or_split_markets_total"], 1)
+        self.assertEqual(row["metrics"]["local_observed_activity_ledger_markets_total"], 1)
+        self.assertEqual(row["metrics"]["local_observed_merge_or_split_markets_total"], 1)
         self.assertEqual([event["activity_type"] for event in detail["activity_events"]], ["MERGE", "TRADE", "TRADE"])
         self.assertEqual(detail["activity_events"][0]["tx_hash"], "0xmerge")
 

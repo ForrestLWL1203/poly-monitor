@@ -10,7 +10,7 @@ from poly_monitor.scoring import CandidateScore
 
 
 class ObserverScoringQueueTests(unittest.TestCase):
-    def test_merge_activity_ledger_overrides_profile_pnl_for_primary_scoring_metrics(self):
+    def test_merge_activity_ledger_keeps_profile_pnl_as_primary_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
             observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp)))
             try:
@@ -47,15 +47,18 @@ class ObserverScoringQueueTests(unittest.TestCase):
                 observer.writer.close()
                 observer.store.close()
 
-        self.assertEqual(metrics["pnl_source"], "local_observed_ledger")
-        self.assertEqual(metrics["pnl_display_source"], "local_window_ledger")
-        self.assertAlmostEqual(metrics["pnl_7d"], -684.776326)
-        self.assertAlmostEqual(metrics["pnl_30d"], -684.776326)
-        self.assertAlmostEqual(metrics["historical_pnl"], -684.776326)
+        self.assertEqual(metrics["pnl_source"], "profile_portfolio_pnl")
+        self.assertNotIn("pnl_display_source", metrics)
+        self.assertAlmostEqual(metrics["pnl_7d"], 9339.61)
+        self.assertAlmostEqual(metrics["pnl_30d"], 66175.756)
+        self.assertAlmostEqual(metrics["historical_pnl"], 66175.756)
+        self.assertAlmostEqual(metrics["local_observed_pnl_7d"], -684.776326)
+        self.assertAlmostEqual(metrics["local_observed_pnl_30d"], -684.776326)
+        self.assertAlmostEqual(metrics["local_observed_historical_pnl"], -684.776326)
         self.assertAlmostEqual(metrics["profile_reference_pnl_7d"], 9339.61)
         self.assertAlmostEqual(metrics["profile_reference_pnl_30d"], 66175.756)
-        self.assertEqual(metrics["activity_ledger_markets_total"], 148)
-        self.assertEqual(metrics["merge_or_split_markets_total"], 138)
+        self.assertEqual(metrics["local_observed_activity_ledger_markets_total"], 148)
+        self.assertEqual(metrics["local_observed_merge_or_split_markets_total"], 138)
 
     def test_score_batch_reserves_a_slot_for_discovery_wallets(self):
         with tempfile.TemporaryDirectory() as tmp:

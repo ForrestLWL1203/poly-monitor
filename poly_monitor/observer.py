@@ -18,6 +18,12 @@ from .storage import JsonlEventWriter, ObserverStore, cleanup_raw_retention, wri
 from .wallet_metrics import build_metrics_from_api
 
 
+def collector_status(data_dir: Path, wallet: str) -> dict[str, Any]:
+    from .deep_collection import collector_status as _collector_status
+
+    return _collector_status(data_dir, wallet)
+
+
 @dataclass(frozen=True)
 class ObserverConfig:
     symbols: tuple[str, ...] = ("BTC", "ETH")
@@ -586,6 +592,11 @@ class CryptoWalletObserver:
         page_count = max(1, int(self.config.watchlist_activity_pages))
         touched_activity_markets: set[str] = set()
         for wallet in wallets:
+            try:
+                if collector_status(self.config.data_dir, wallet).get("running"):
+                    continue
+            except Exception:
+                pass
             lookback_start = now_ts - max(60, int(self.config.watchlist_activity_lookback_sec))
             last_seen = self.store.last_wallet_activity_ts(wallet)
             start_ts = max(lookback_start, last_seen - max(0, int(self.config.watchlist_activity_safety_window_sec))) if last_seen else lookback_start
@@ -1126,22 +1137,6 @@ class CryptoWalletObserver:
             metrics.setdefault("profile_reference_pnl_7d", api_metrics.get("pnl_7d"))
             metrics.setdefault("profile_reference_pnl_30d", api_metrics.get("pnl_30d"))
             metrics.setdefault("profile_reference_historical_pnl", api_metrics.get("historical_pnl"))
-            for key in (
-                "pnl_7d",
-                "pnl_30d",
-                "pnl_total",
-                "historical_pnl",
-                "pnl_source",
-                "activity_ledger_markets_7d",
-                "activity_ledger_markets_30d",
-                "activity_ledger_markets_total",
-                "merge_or_split_markets_7d",
-                "merge_or_split_markets_30d",
-                "merge_or_split_markets_total",
-            ):
-                if key in local_metrics:
-                    metrics[key] = local_metrics[key]
-            metrics["pnl_display_source"] = "local_window_ledger"
         return metrics
 
     def _apply_local_observed_24h_override(self, metrics: dict[str, Any]) -> None:
