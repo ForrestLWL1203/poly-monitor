@@ -267,6 +267,68 @@ class WalletPathStrategy:
         )
 
 
+class D950MarketPathStrategy:
+    def __init__(self, config: PathStrategyConfig, *, min_reference_delta: float = 0.0) -> None:
+        self.config = config
+        self.min_reference_delta = float(min_reference_delta)
+
+    def evaluate_snapshot(self, sample: dict[str, Any], activity_rows: list[dict[str, Any]]) -> TradeIntent | None:
+        slug = str(sample.get("market_slug") or "")
+        sampled_ts = _safe_int(sample.get("sampled_ts"))
+        elapsed = _elapsed_sec(slug, sampled_ts)
+        if elapsed is None or sample.get("book_stale"):
+            return None
+        checkpoint = _checkpoint_for_elapsed(elapsed, self.config.checkpoints)
+        if checkpoint is None:
+            return None
+        history = sample.get("_market_state_history")
+        if not isinstance(history, list):
+            history = []
+        current_ref = _safe_float(sample.get("reference_price"))
+        refs = [
+            row
+            for row in history
+            if str(row.get("market_slug") or "") == slug
+            and _safe_int(row.get("sampled_ts")) <= sampled_ts
+            and _safe_float(row.get("reference_price")) > 0
+        ]
+        first_ref = _safe_float(refs[0].get("reference_price")) if refs else current_ref
+        reference_delta = round(current_ref - first_ref, 6)
+        if abs(reference_delta) <= self.min_reference_delta:
+            return None
+        outcome = "Up" if reference_delta > 0 else "Down"
+        book = _book_for_outcome(sample, outcome)
+        ask_targets = book.get("ask_targets") if isinstance(book, dict) else None
+        if not isinstance(ask_targets, dict):
+            return None
+        target_key = f"{self.config.notional_usdc:g}"
+        fill = ask_targets.get(target_key)
+        if not isinstance(fill, dict) or not fill.get("ok"):
+            return None
+        expected_price = _safe_float(fill.get("avg"))
+        if expected_price <= 0 or expected_price > self.config.max_price:
+            return None
+        return TradeIntent(
+            wallet=self.config.wallet.lower(),
+            market_slug=slug,
+            sampled_ts=sampled_ts,
+            checkpoint_sec=checkpoint,
+            intent="BUY",
+            outcome=outcome,
+            notional_usdc=float(self.config.notional_usdc),
+            max_price=float(self.config.max_price),
+            expected_price=round(expected_price, 6),
+            reason="d950_path_v0_reference_momentum",
+            features={
+                "elapsed_sec": elapsed,
+                "reference_delta": reference_delta,
+                "reference_price": current_ref,
+                "reference_start_price": first_ref,
+                "book_fill": fill,
+            },
+        )
+
+
 def replay_path_strategy(
     activity_rows: list[dict[str, Any]],
     market_state_samples: list[dict[str, Any]],

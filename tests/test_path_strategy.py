@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 from poly_monitor.path_strategy import (
+    D950MarketPathStrategy,
     PathStrategyConfig,
     RecordingExecutionAdapter,
     SettlementPaperExecutionAdapter,
@@ -169,6 +170,29 @@ class PathStrategyTests(unittest.TestCase):
 
         self.assertEqual(loaded.activity_rows, [{"wallet": "0xabc"}])
         self.assertEqual(loaded.market_state_samples, [{"market_slug": "btc-updown-5m-1"}])
+
+    def test_d950_market_strategy_uses_market_history_not_wallet_activity(self):
+        strategy = D950MarketPathStrategy(PathStrategyConfig(wallet="strategy", checkpoints=(120,), notional_usdc=25, max_price=0.7))
+        sample = {
+            "market_slug": "btc-updown-5m-1770000000",
+            "sampled_ts": 1770000120,
+            "book_stale": 0,
+            "reference_price": 101.2,
+            "_market_state_history": [
+                {"market_slug": "btc-updown-5m-1770000000", "sampled_ts": 1770000001, "reference_price": 100.0},
+                {"market_slug": "btc-updown-5m-1770000000", "sampled_ts": 1770000120, "reference_price": 101.2},
+            ],
+            "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.55}}},
+            "down_json": {"ask_targets": {"25": {"ok": True, "avg": 0.45}}},
+        }
+
+        intent = strategy.evaluate_snapshot(sample, [])
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.outcome, "Up")
+        self.assertEqual(intent.reason, "d950_path_v0_reference_momentum")
+        self.assertEqual(intent.features["reference_delta"], 1.2)
 
 
 if __name__ == "__main__":

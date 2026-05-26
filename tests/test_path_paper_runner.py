@@ -12,14 +12,16 @@ from poly_monitor.storage import ObserverStore
 
 
 class MemoryDataSource:
-    def __init__(self, activity_rows, market_state_samples):
+    def __init__(self, activity_rows, market_state_samples, settlements=None):
         self.activity_rows = activity_rows
         self.market_state_samples = market_state_samples
+        self.settlements = settlements or {}
 
     def load_strategy_rows(self, wallet: str):
         return {
             "activity_rows": self.activity_rows,
             "market_state_samples": self.market_state_samples,
+            "settlements": self.settlements,
         }
 
     def close(self):
@@ -213,6 +215,110 @@ class PathPaperRunnerTests(unittest.TestCase):
 
             self.assertEqual(result["intents"], 1)
             self.assertIn("strategy_b", result["output_path"])
+
+    def test_open_paper_execution_is_settled_when_data_source_later_has_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wallet = "0xabc"
+            data_source = MemoryDataSource(
+                [
+                    {
+                        "wallet": wallet,
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "activity_type": "TRADE",
+                        "side": "BUY",
+                        "outcome": "Up",
+                        "exchange_ts": 1770000040,
+                        "usdc": 42.0,
+                    }
+                ],
+                [
+                    {
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "sampled_ts": 1770000120,
+                        "book_stale": 0,
+                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                    }
+                ],
+            )
+            runner = PathPaperRunner(PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120,)), data_source=data_source)
+
+            first = runner.tick()
+            data_source.settlements = {"btc-updown-5m-1770000000": "Up"}
+            second = runner.tick()
+
+            self.assertEqual(first["intents"], 1)
+            self.assertEqual(second["settlements"], 1)
+            rows = [json.loads(line) for line in Path(second["output_path"]).read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["record_type"] for row in rows], ["execution", "settlement"])
+            self.assertEqual(rows[1]["execution"]["status"], "paper_settled")
+            self.assertEqual(rows[1]["execution"]["detail"]["realized_pnl"], 25.0)
+
+    def test_start_sampled_ts_skips_existing_historical_samples(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wallet = "0xabc"
+            data_source = MemoryDataSource(
+                [
+                    {
+                        "wallet": wallet,
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "activity_type": "TRADE",
+                        "side": "BUY",
+                        "outcome": "Up",
+                        "exchange_ts": 1770000040,
+                        "usdc": 42.0,
+                    }
+                ],
+                [
+                    {
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "sampled_ts": 1770000120,
+                        "book_stale": 0,
+                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                    }
+                ],
+            )
+            runner = PathPaperRunner(
+                PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120,), start_sampled_ts=1770000121),
+                data_source=data_source,
+            )
+
+            result = runner.tick()
+
+            self.assertEqual(result["intents"], 0)
+
+    def test_execution_record_includes_target_wallet_comparison_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wallet = "0xabc"
+            data_source = MemoryDataSource(
+                [
+                    {
+                        "wallet": wallet,
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "activity_type": "TRADE",
+                        "side": "BUY",
+                        "outcome": "Up",
+                        "exchange_ts": 1770000100,
+                        "usdc": 42.0,
+                    }
+                ],
+                [
+                    {
+                        "market_slug": "btc-updown-5m-1770000000",
+                        "sampled_ts": 1770000120,
+                        "book_stale": 0,
+                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                    }
+                ],
+            )
+            runner = PathPaperRunner(PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120,)), data_source=data_source)
+
+            result = runner.tick()
+
+            row = json.loads(Path(result["output_path"]).read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(row["target_wallet_context"]["wallet"], wallet)
+            self.assertEqual(row["target_wallet_context"]["trade_rows_seen"], 1)
+            self.assertEqual(row["target_wallet_context"]["net_side_seen"], "Up")
+            self.assertEqual(row["target_wallet_context"]["net_up_down_usdc_seen"], 42.0)
 
 
 if __name__ == "__main__":
