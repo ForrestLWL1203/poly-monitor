@@ -58,7 +58,7 @@ class ScoringTests(unittest.TestCase):
         score = score_wallet(metrics, CandidateThresholds())
 
         self.assertEqual(score.status, "dormant_candidate")
-        self.assertGreater(score.rank_score, 0)
+        self.assertGreater(score.rank_score, 450)
         self.assertIn("inactive_for_active", score.reasons)
 
     def test_score_wallet_archives_active_wallet_below_550_rank_score(self):
@@ -544,7 +544,7 @@ class ScoringTests(unittest.TestCase):
         score = score_wallet(metrics, CandidateThresholds())
 
         self.assertEqual(score.status, "dormant_candidate")
-        self.assertGreater(score.rank_score, 0)
+        self.assertGreater(score.rank_score, 550)
         self.assertIn("local_observed_pnl_7d_not_positive", score.reasons)
 
     def test_local_observed_quality_can_promote_moderate_frequency_wallet(self):
