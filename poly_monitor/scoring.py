@@ -270,6 +270,23 @@ def _dormant_rank_score(metrics: dict[str, Any]) -> float:
     return activity + pnl_bonus - stability_penalty - recency_penalty
 
 
+def _dormant_eligible_failures(failures: list[str]) -> bool:
+    reasons = set(failures)
+    if not reasons:
+        return False
+    if "inactive_for_active" in reasons:
+        return reasons.issubset(
+            {
+                "inactive_for_active",
+                "trades_7d_below_threshold",
+                "markets_24h_below_threshold",
+                "trades_30d_below_threshold",
+                "pnl_7d_not_positive",
+            }
+        )
+    return reasons == {"local_observed_pnl_7d_not_positive"}
+
+
 def score_wallet(metrics: dict[str, Any], thresholds: CandidateThresholds | None = None) -> CandidateScore:
     thresholds = thresholds or CandidateThresholds()
     wallet = str(metrics.get("wallet") or "").lower()
@@ -289,5 +306,8 @@ def score_wallet(metrics: dict[str, Any], thresholds: CandidateThresholds | None
                 dict(metrics),
             )
         return CandidateScore(wallet, "active_candidate", round(rank_score, 6), [], dict(metrics))
+
+    if _dormant_eligible_failures(failures) and _dormant_ok(metrics, thresholds):
+        return CandidateScore(wallet, "dormant_candidate", round(_dormant_rank_score(metrics), 6), failures, dict(metrics))
 
     return CandidateScore(wallet, "archive_candidate", 0.0, failures, dict(metrics))
