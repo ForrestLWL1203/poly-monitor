@@ -242,6 +242,17 @@ Runtime layout for this project:
 - Data: `/opt/poly-monitor/data`
 - Logs: `/opt/poly-monitor/logs`
 
+VPS code-change rule:
+
+- Never edit project code directly on the VPS. All code changes must be made
+  locally in `/Users/forrestliao/workspace/poly-monitor`, committed, pushed to
+  GitHub, then pulled on the VPS.
+- VPS operations are limited to read-only inspection, `git fetch`/`git pull`,
+  dependency/runtime checks, and precise process restarts unless the user
+  explicitly authorizes a one-off emergency edit.
+- If the VPS worktree has local modifications, stash or otherwise preserve them
+  before pulling. Do not resolve deploy conflicts by editing files on the VPS.
+
 Legacy `new-poly` layout still present on the same VPS:
 
 - Repo: `/opt/new-poly/repo`

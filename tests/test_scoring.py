@@ -15,8 +15,8 @@ class ScoringTests(unittest.TestCase):
             "markets_30d": 100,
             "pnl_7d": 10.0,
             "pnl_30d": 100.0,
-            "wins_7d": 51,
-            "losses_7d": 49,
+            "wins_7d": 100,
+            "losses_7d": 0,
             "top1_concentration": 0.25,
             "top3_concentration": 0.5,
             "longshot_profit_share": 0.8,
@@ -111,7 +111,7 @@ class ScoringTests(unittest.TestCase):
             "terminal_near_certain_trade_share_30d": 0.9,
         }
 
-        score = score_wallet(metrics, CandidateThresholds())
+        score = score_wallet(metrics, CandidateThresholds(min_active_rank_score=0))
 
         self.assertEqual(score.status, "archive_candidate")
         self.assertIn("uncopyable_terminal_thin_edge", score.reasons)
@@ -327,7 +327,7 @@ class ScoringTests(unittest.TestCase):
         }
 
         quality = score_wallet(quality_small_bankroll, CandidateThresholds())
-        bigger = score_wallet(bigger_pnl_weaker_sample, CandidateThresholds())
+        bigger = score_wallet(bigger_pnl_weaker_sample, CandidateThresholds(min_active_rank_score=0))
 
         self.assertEqual(quality.status, "active_candidate")
         self.assertEqual(bigger.status, "active_candidate")
@@ -395,7 +395,7 @@ class ScoringTests(unittest.TestCase):
             "historical_pnl": 100.0,
         }
 
-        self.assertEqual(score_wallet(metrics, CandidateThresholds()).status, "active_candidate")
+        self.assertEqual(score_wallet(metrics, CandidateThresholds(min_active_rank_score=0)).status, "active_candidate")
 
     def test_score_wallet_treats_saturated_24h_activity_as_enough_activity(self):
         metrics = {
@@ -419,7 +419,7 @@ class ScoringTests(unittest.TestCase):
             "historical_pnl": 100.0,
         }
 
-        self.assertEqual(score_wallet(metrics, CandidateThresholds()).status, "active_candidate")
+        self.assertEqual(score_wallet(metrics, CandidateThresholds(min_active_rank_score=0)).status, "active_candidate")
 
     def test_score_wallet_does_not_promote_small_24h_lower_bound_to_active(self):
         metrics = {
@@ -445,7 +445,7 @@ class ScoringTests(unittest.TestCase):
             "historical_pnl": 500.0,
         }
 
-        score = score_wallet(metrics, CandidateThresholds())
+        score = score_wallet(metrics, CandidateThresholds(min_active_rank_score=0))
 
         self.assertEqual(score.status, "archive_candidate")
         self.assertIn("markets_24h_below_threshold", score.reasons)
@@ -541,7 +541,7 @@ class ScoringTests(unittest.TestCase):
             "historical_pnl": 23841.49,
         }
 
-        score = score_wallet(metrics, CandidateThresholds())
+        score = score_wallet(metrics, CandidateThresholds(min_active_rank_score=0))
 
         self.assertEqual(score.status, "active_candidate")
         self.assertNotIn("markets_24h_below_threshold", score.reasons)
@@ -610,7 +610,7 @@ class ScoringTests(unittest.TestCase):
         }
 
         immature = score_wallet(metrics, CandidateThresholds())
-        mature = score_wallet({**metrics, "local_observed_span_hours": 30}, CandidateThresholds())
+        mature = score_wallet({**metrics, "local_observed_span_hours": 30}, CandidateThresholds(min_active_rank_score=0))
 
         self.assertEqual(immature.status, "archive_candidate")
         self.assertIn("markets_24h_below_threshold", immature.reasons)
@@ -644,7 +644,7 @@ class ScoringTests(unittest.TestCase):
             "historical_pnl": -3000,
         }
 
-        score = score_wallet(metrics, CandidateThresholds())
+        score = score_wallet(metrics, CandidateThresholds(min_active_rank_score=0))
 
         self.assertEqual(score.status, "active_candidate")
         self.assertNotIn("pnl_7d_not_positive", score.reasons)
@@ -686,8 +686,8 @@ class ScoringTests(unittest.TestCase):
             "historical_trades": 8000,
         }
 
-        moderate = score_wallet(moderate_frequency, CandidateThresholds())
-        extreme = score_wallet(extreme_frequency, CandidateThresholds())
+        moderate = score_wallet(moderate_frequency, CandidateThresholds(min_active_rank_score=0))
+        extreme = score_wallet(extreme_frequency, CandidateThresholds(min_active_rank_score=0))
 
         self.assertEqual(moderate.status, "active_candidate")
         self.assertEqual(extreme.status, "active_candidate")

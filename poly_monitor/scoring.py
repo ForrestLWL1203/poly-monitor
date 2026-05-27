@@ -235,7 +235,7 @@ def _active_rank_score(metrics: dict[str, Any]) -> float:
         markets_24h = max(markets_24h, min(120.0, _num(metrics, "trades_24h") / 10.0))
     last_active_age = _num(metrics, "last_active_age_hours", 999999)
 
-    quality = win_rate * 850.0
+    quality = win_rate * 420.0
     sample_confidence = _capped(resolved_markets, 80.0) * 2.0
     activity = (
         _capped(markets_24h, 80.0) * 0.8
