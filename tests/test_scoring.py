@@ -32,7 +32,7 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(score.status, "active_candidate")
         self.assertEqual(score.reasons, [])
 
-    def test_score_wallet_downgrades_wallet_inactive_for_more_than_one_hour(self):
+    def test_score_wallet_archives_wallet_inactive_for_more_than_one_hour(self):
         metrics = {
             "wallet": "0x1adbccaf449aa1f84b48e1f1ec689bdacefc1495",
             "trades_24h": 259,
@@ -57,8 +57,36 @@ class ScoringTests(unittest.TestCase):
 
         score = score_wallet(metrics, CandidateThresholds())
 
-        self.assertEqual(score.status, "dormant_candidate")
+        self.assertEqual(score.status, "archive_candidate")
         self.assertIn("inactive_for_active", score.reasons)
+
+    def test_score_wallet_archives_active_wallet_below_550_rank_score(self):
+        metrics = {
+            "wallet": "0xabc",
+            "trades_7d": 500,
+            "markets_24h": 100,
+            "markets_7d": 100,
+            "trades_30d": 800,
+            "markets_30d": 100,
+            "pnl_7d": 10.0,
+            "pnl_30d": 100.0,
+            "wins_7d": 1,
+            "losses_7d": 1,
+            "top1_concentration": 0.25,
+            "top3_concentration": 0.5,
+            "longshot_profit_share": 0.8,
+            "longshot_profit_markets": 6,
+            "last_active_age_hours": 1,
+            "historical_trades": 800,
+            "historical_markets": 100,
+            "historical_pnl": 100.0,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "archive_candidate")
+        self.assertIn("rank_score_below_active_threshold", score.reasons)
+        self.assertLess(score.rank_score, 550)
 
     def test_score_wallet_archives_terminal_thin_edge_wallets(self):
         metrics = {
@@ -236,7 +264,7 @@ class ScoringTests(unittest.TestCase):
 
         score = score_wallet(metrics, CandidateThresholds())
 
-        self.assertEqual(score.status, "dormant_candidate")
+        self.assertEqual(score.status, "archive_candidate")
         self.assertIn("wins_7d_below_losses", score.reasons)
 
     def test_score_wallet_does_not_reject_repeatable_longshot_edge(self):
@@ -329,7 +357,7 @@ class ScoringTests(unittest.TestCase):
 
         score = score_wallet(metrics, CandidateThresholds())
 
-        self.assertEqual(score.status, "dormant_candidate")
+        self.assertEqual(score.status, "archive_candidate")
         self.assertIn("inactive_for_active", score.reasons)
 
     def test_score_wallet_archives_long_inactive_wallets(self):
@@ -419,7 +447,7 @@ class ScoringTests(unittest.TestCase):
 
         score = score_wallet(metrics, CandidateThresholds())
 
-        self.assertEqual(score.status, "dormant_candidate")
+        self.assertEqual(score.status, "archive_candidate")
         self.assertIn("markets_24h_below_threshold", score.reasons)
 
     def test_score_wallet_requires_high_24h_market_activity_for_active(self):
@@ -446,7 +474,7 @@ class ScoringTests(unittest.TestCase):
 
         score = score_wallet(metrics, CandidateThresholds())
 
-        self.assertEqual(score.status, "dormant_candidate")
+        self.assertEqual(score.status, "archive_candidate")
         self.assertIn("markets_24h_below_threshold", score.reasons)
 
     def test_local_observed_losses_downgrade_high_frequency_wallet(self):
@@ -480,7 +508,7 @@ class ScoringTests(unittest.TestCase):
 
         score = score_wallet(metrics, CandidateThresholds())
 
-        self.assertEqual(score.status, "dormant_candidate")
+        self.assertEqual(score.status, "archive_candidate")
         self.assertIn("local_observed_pnl_7d_not_positive", score.reasons)
         self.assertIn("local_observed_wins_7d_not_above_losses", score.reasons)
 
@@ -549,7 +577,7 @@ class ScoringTests(unittest.TestCase):
 
         score = score_wallet(metrics, CandidateThresholds())
 
-        self.assertEqual(score.status, "dormant_candidate")
+        self.assertEqual(score.status, "archive_candidate")
         self.assertIn("pnl_30d_not_positive", score.reasons)
 
     def test_immature_local_sample_does_not_relax_activity_gate(self):
@@ -584,7 +612,7 @@ class ScoringTests(unittest.TestCase):
         immature = score_wallet(metrics, CandidateThresholds())
         mature = score_wallet({**metrics, "local_observed_span_hours": 30}, CandidateThresholds())
 
-        self.assertEqual(immature.status, "dormant_candidate")
+        self.assertEqual(immature.status, "archive_candidate")
         self.assertIn("markets_24h_below_threshold", immature.reasons)
         self.assertEqual(mature.status, "active_candidate")
 
@@ -779,7 +807,7 @@ class ScoringTests(unittest.TestCase):
 
         score = score_wallet(metrics, CandidateThresholds())
 
-        self.assertEqual(score.status, "dormant_candidate")
+        self.assertEqual(score.status, "archive_candidate")
         self.assertIn("settled_markets_7d_below_threshold", score.reasons)
         self.assertNotIn("pnl_7d_not_positive", score.reasons)
 

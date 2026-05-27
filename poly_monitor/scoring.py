@@ -20,6 +20,7 @@ class CandidateThresholds:
     min_local_quality_observed_hours: float = 24.0
     min_quality_markets_24h: int = 30
     active_max_age_hours: float = 1.0
+    min_active_rank_score: float = 550.0
     archive_age_hours: float = 14 * 24.0
     dormant_min_historical_trades: int = 500
     dormant_min_historical_markets: int = 5
@@ -63,11 +64,15 @@ def _local_losses_7d(metrics: dict[str, Any]) -> float:
 
 
 def _quality_win_loss_counts(metrics: dict[str, Any]) -> tuple[float, float]:
-    if _num(metrics, "local_observed_settled_markets_7d") > 0:
+    if _num(metrics, "local_observed_settled_markets_7d") >= 10:
         return _local_wins_7d(metrics), _local_losses_7d(metrics)
     if metrics.get("pnl_source") == "local_observed_ledger":
         return _num(metrics, "wins_7d"), _num(metrics, "losses_7d")
-    return _num(metrics, "crypto_closed_position_wins_7d"), _num(metrics, "crypto_closed_position_losses_7d")
+    crypto_wins = _num(metrics, "crypto_closed_position_wins_7d", _num(metrics, "closed_position_wins_7d"))
+    crypto_losses = _num(metrics, "crypto_closed_position_losses_7d", _num(metrics, "closed_position_losses_7d"))
+    if crypto_wins > 0 or crypto_losses > 0:
+        return crypto_wins, crypto_losses
+    return _num(metrics, "wins_7d"), _num(metrics, "losses_7d")
 
 
 def _local_observed_span_hours(metrics: dict[str, Any]) -> float:
@@ -230,7 +235,7 @@ def _active_rank_score(metrics: dict[str, Any]) -> float:
         markets_24h = max(markets_24h, min(120.0, _num(metrics, "trades_24h") / 10.0))
     last_active_age = _num(metrics, "last_active_age_hours", 999999)
 
-    quality = win_rate * 420.0
+    quality = win_rate * 850.0
     sample_confidence = _capped(resolved_markets, 80.0) * 2.0
     activity = (
         _capped(markets_24h, 80.0) * 0.8
@@ -275,10 +280,14 @@ def score_wallet(metrics: dict[str, Any], thresholds: CandidateThresholds | None
     failures = _active_failures(metrics, thresholds)
     if not failures:
         rank_score = _active_rank_score(metrics)
+        if rank_score < thresholds.min_active_rank_score:
+            return CandidateScore(
+                wallet,
+                "archive_candidate",
+                round(rank_score, 6),
+                ["rank_score_below_active_threshold"],
+                dict(metrics),
+            )
         return CandidateScore(wallet, "active_candidate", round(rank_score, 6), [], dict(metrics))
-
-    if _dormant_ok(metrics, thresholds):
-        rank_score = _dormant_rank_score(metrics)
-        return CandidateScore(wallet, "dormant_candidate", round(rank_score, 6), failures, dict(metrics))
 
     return CandidateScore(wallet, "archive_candidate", 0.0, failures, dict(metrics))

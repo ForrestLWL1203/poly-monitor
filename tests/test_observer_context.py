@@ -999,7 +999,7 @@ class ObserverContextTests(unittest.TestCase):
                 observer.writer.close()
                 return status
 
-        self.assertEqual(asyncio.run(run_case()), "archive_candidate")
+        self.assertIsNone(asyncio.run(run_case()))
 
     def test_archive_to_archive_refresh_uses_persistent_cooldown(self):
         async def run_case():
@@ -1043,9 +1043,9 @@ class ObserverContextTests(unittest.TestCase):
                 rows = observer.store.candidate_rows()["archive_candidate"]
                 observer.store.close()
                 observer.writer.close()
-                return rows[0]["updated_at"] > old_updated_at
+                return rows
 
-        self.assertEqual(asyncio.run(run_case()), True)
+        self.assertEqual(asyncio.run(run_case()), [])
 
     def test_score_metrics_are_cached_within_ttl(self):
         async def run_case():
@@ -1092,6 +1092,7 @@ class ObserverContextTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), score_refresh_sec=0, score_wallets_per_cycle=1))
                 wallet = "0xactive"
+                observer.store.add_watchlist_wallet(wallet)
                 observer.store.insert_trade(
                     {
                         "tx_hash": "0xtx",

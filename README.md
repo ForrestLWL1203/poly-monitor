@@ -131,14 +131,15 @@ observation window:
   one-off longshot concentration is still downgraded.
 - last activity within 48 hours.
 
-Historically strong but inactive wallets become `dormant_candidate`; long
-inactive wallets are not retained by default. The dashboard focuses on a small
-elite pool: 15 active candidates and 10 dormant candidates by default. Non-core
-wallet trade rows are cleaned periodically and capped to the most recent 100
-wallets.
+Historically strong but currently inactive wallets are no longer retained as
+`dormant_candidate`. Wallets that do not qualify as active candidates, including
+wallets below the 550 rank-score floor, are purged from local research tables
+unless they are manually watchlisted. The dashboard focuses on a small elite
+pool: 15 active candidates by default. Non-core wallet trade rows are cleaned
+periodically and capped to the most recent 100 wallets.
 
 The candidate score table is also capped to 100 wallets total by default.
-Active and dormant candidates keep their configured top slots first; archive
+Active candidates keep their configured top slots first; archive
 only receives the remaining capacity. New archive rows are persisted only when
 they have a minimum activity sample or positive reliable profile/leaderboard PnL,
 so route-through wallets do not crowd out stronger candidates.

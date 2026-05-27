@@ -34,7 +34,7 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertTrue(status["health"]["ok"])
         self.assertEqual(status["sqlite"]["trade_count"], 0)
         self.assertEqual(status["events"]["counts"], {})
-        self.assertEqual(set(status["candidates"]), {"watchlist", "active_candidate", "dormant_candidate", "archive_candidate"})
+        self.assertEqual(set(status["candidates"]), {"watchlist", "active_candidate", "archive_candidate"})
         self.assertEqual(status["candidates"]["active_candidate"], [])
         self.assertEqual(status["recent_trades"], [])
 
@@ -72,7 +72,7 @@ class DashboardStatusTests(unittest.TestCase):
             store.upsert_score(
                 CandidateScore(
                     wallet=wallet,
-                    status="dormant_candidate",
+                    status="active_candidate",
                     rank_score=0.0,
                     reasons=["markets_30d_below_threshold"],
                     metrics={
@@ -93,10 +93,10 @@ class DashboardStatusTests(unittest.TestCase):
 
             status = build_dashboard_status(data_dir, now=dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc))
 
-        self.assertEqual(status["candidate_counts"]["dormant_candidate"], 1)
-        dormant = status["candidates"]["dormant_candidate"][0]
-        self.assertEqual(dormant["name"], "scored-wallet")
-        self.assertEqual(dormant["metrics"]["trades_30d"], 1777)
+        self.assertEqual(status["candidate_counts"]["active_candidate"], 1)
+        active = status["candidates"]["active_candidate"][0]
+        self.assertEqual(active["name"], "scored-wallet")
+        self.assertEqual(active["metrics"]["trades_30d"], 1777)
 
     def test_watchlist_is_first_tab_and_excluded_from_candidate_tabs(self):
         from poly_monitor.dashboard.status import build_dashboard_status

@@ -50,7 +50,7 @@ class ObserverConfig:
     settlement_delay_sec: float = 150.0
     settlement_retry_sec: float = 30.0
     max_active_candidates: int = 15
-    max_dormant_candidates: int = 10
+    max_dormant_candidates: int = 0
     max_archive_candidates: int = 100
     active_metrics_ttl_sec: float = 60.0
     dormant_metrics_ttl_sec: float = 600.0
@@ -64,7 +64,7 @@ class ObserverConfig:
     watchlist_activity_retention_days: int = 2
     non_watchlist_activity_retention_days: int = 2
     context_retention_days: int = 2
-    research_cleanup_dormant_wallets: int = 10
+    research_cleanup_dormant_wallets: int = 0
     market_state_retention_days: int = 2
     strategy_archive_interval_hours: float = 1.0
     market_state_sample_sec: float = 5.0
@@ -88,19 +88,11 @@ class _MetricsCacheEntry:
 
 
 def should_persist_score(score, *, previous_status: str | None = None) -> bool:
+    if score.status != "active_candidate":
+        return False
     if previous_status is not None:
         return True
-    if score.status != "archive_candidate":
-        return True
-    metrics = score.metrics
-    if str(metrics.get("pnl_source") or "") in {"profile_portfolio_pnl", "leaderboard_profit", "profile_profit"}:
-        return float(metrics.get("pnl_7d") or 0.0) > 0 or float(metrics.get("pnl_30d") or 0.0) > 0
-    markets_24h = float(metrics.get("markets_24h") or metrics.get("markets_7d") or 0.0)
-    return (
-        float(metrics.get("trades_7d") or 0.0) >= 100.0
-        or markets_24h >= 3.0
-        or float(metrics.get("historical_trades") or 0.0) >= 300.0
-    )
+    return True
 
 
 def compact_score_event(score) -> dict[str, Any]:
@@ -1031,10 +1023,14 @@ class CryptoWalletObserver:
                     continue
                 self._apply_local_observed_24h_override(metrics)
                 score = score_wallet(metrics, CandidateThresholds())
+            watchlist_set = set(self.store.watchlist_wallets())
+            if score.status != "active_candidate" and score.wallet not in watchlist_set:
+                self._purge_rejected_wallet(score.wallet, score)
+                continue
             if should_persist_score(
                 score,
                 previous_status=previous_status,
-            ):
+            ) or score.wallet in watchlist_set:
                 self.store.upsert_score(score)
                 if self._score_event_changed(score):
                     self.writer.write(compact_score_event(score))
@@ -1047,18 +1043,29 @@ class CryptoWalletObserver:
                 self.writer.write({"event": "archive_pruned", "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "removed": removed})
         self._refresh_candidate_caches()
 
+    def _purge_rejected_wallet(self, wallet: str, score) -> None:
+        result = self.store.purge_wallet_data(wallet, preserve_watchlist=True)
+        self._metrics_cache.pop(wallet.lower(), None)
+        self._last_score_event_state.pop(wallet.lower(), None)
+        if any(value for value in result.values()):
+            self.writer.write(
+                {
+                    "event": "rejected_wallet_purged",
+                    "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "wallet": wallet.lower(),
+                    "status": score.status,
+                    "rank_score": score.rank_score,
+                    "reasons": score.reasons[:5],
+                    **result,
+                }
+            )
+
     def _prune_candidate_tables(self) -> int:
         removed = 0
         removed += self.store.prune_low_sample_archives(min_age_seconds=self.config.archive_revival_cooldown_sec)
         removed += self.store.prune_candidate_scores("active_candidate", max_rows=self.config.max_active_candidates)
-        removed += self.store.prune_candidate_scores("dormant_candidate", max_rows=self.config.max_dormant_candidates)
-        archive_budget = max(
-            0,
-            min(
-                self.config.max_archive_candidates,
-                100 - self.config.max_active_candidates - self.config.max_dormant_candidates,
-            ),
-        )
+        removed += self.store.prune_candidate_scores("dormant_candidate", max_rows=0)
+        archive_budget = 0
         removed += self.store.prune_archive_scores(
             max_archive=archive_budget,
         )
@@ -1155,7 +1162,7 @@ class CryptoWalletObserver:
     def _metrics_cache_ttl(self, previous_status: str | None, wallet: str | None = None) -> float:
         if wallet and wallet.lower() in self._watchlist_wallets:
             return self.config.active_metrics_ttl_sec
-        if previous_status in {"dormant_candidate", "archive_candidate"}:
+        if previous_status == "archive_candidate":
             return self.config.dormant_metrics_ttl_sec
         return self.config.active_metrics_ttl_sec
 
@@ -1209,13 +1216,7 @@ class CryptoWalletObserver:
             self._active_score_cursor = (start + take) % len(active_wallets)
 
         if discovery_budget > 0 and len(batch) < budget:
-            due_dormant = set(
-                self.store.candidate_wallets_due(
-                    "dormant_candidate",
-                    limit=self.config.max_dormant_candidates,
-                    min_age_seconds=self.config.dormant_metrics_ttl_sec,
-                )
-            )
+            due_dormant: set[str] = set()
             reactivatable_archives = set(
                 self.store.reactivatable_archive_wallets(
                     limit=self.config.score_wallet_pool_limit,
@@ -1227,8 +1228,7 @@ class CryptoWalletObserver:
             )
             discovery_wallets = list(
                 dict.fromkeys(
-                    list(due_dormant)
-                    + self.store.high_activity_wallets_24h(
+                    self.store.high_activity_wallets_24h(
                         now_ts=int(now.timestamp()),
                         limit=self.config.score_wallet_pool_limit,
                     )
@@ -1258,6 +1258,11 @@ class CryptoWalletObserver:
             take = min(budget, len(active_wallets))
             batch.extend(active_wallets[(start + idx) % len(active_wallets)] for idx in range(take))
             self._active_score_cursor = (start + take) % len(active_wallets)
+        if not batch and watchlist_wallets:
+            start = self._watchlist_score_cursor % len(watchlist_wallets)
+            take = min(budget, len(watchlist_wallets))
+            batch.extend(watchlist_wallets[(start + idx) % len(watchlist_wallets)] for idx in range(take))
+            self._watchlist_score_cursor = (start + take) % len(watchlist_wallets)
         statuses = self.store.candidate_statuses(batch)
         return [(wallet, statuses.get(wallet)) for wallet in batch]
 

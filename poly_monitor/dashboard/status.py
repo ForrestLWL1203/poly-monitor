@@ -11,8 +11,8 @@ from typing import Any
 from ..deep_collection import collector_status
 
 
-CANDIDATE_GROUPS = ("watchlist", "active_candidate", "dormant_candidate", "archive_candidate")
-SCORED_GROUPS = ("active_candidate", "dormant_candidate", "archive_candidate")
+CANDIDATE_GROUPS = ("watchlist", "active_candidate", "archive_candidate")
+SCORED_GROUPS = ("active_candidate", "archive_candidate")
 MAX_ARCHIVE_DISPLAY = 0
 MAX_ACTIVE_DISPLAY = 15
 MAX_DORMANT_DISPLAY = 10

@@ -99,7 +99,7 @@ class ObserverScoringQueueTests(unittest.TestCase):
                 observer.writer.close()
                 observer.store.close()
 
-        self.assertEqual(first, [("0xactive0", "active_candidate"), ("0xdormant", "dormant_candidate")])
+        self.assertEqual(first, [("0xactive0", "active_candidate"), ("0xrecent", None)])
         self.assertEqual(second, [("0xactive1", "active_candidate"), ("0xrecent", None)])
 
     def test_score_batch_prioritizes_watchlist_wallets(self):
@@ -210,7 +210,7 @@ class ObserverScoringQueueTests(unittest.TestCase):
         flattened = [wallet for batch in batches for wallet, _status in batch]
         self.assertIn("0xwatch", flattened)
         self.assertIn("0xactive", flattened)
-        self.assertIn("0xdormant", flattened)
+        self.assertNotIn("0xdormant", flattened)
 
     def test_budget_one_watchlist_rotation_skips_empty_active_bucket(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -236,7 +236,7 @@ class ObserverScoringQueueTests(unittest.TestCase):
         self.assertTrue(all(batch for batch in batches))
         flattened = [wallet for batch in batches for wallet, _status in batch]
         self.assertIn("0xwatch", flattened)
-        self.assertIn("0xdormant", flattened)
+        self.assertNotIn("0xdormant", flattened)
 
     def test_score_batch_keeps_discovery_slot_when_active_pool_is_full(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -279,7 +279,6 @@ class ObserverScoringQueueTests(unittest.TestCase):
         self.assertEqual(batch, [
             ("0xactive0", "active_candidate"),
             ("0xactive1", "active_candidate"),
-            ("0xdormant", "dormant_candidate"),
             ("0xrecent", None),
         ])
 
@@ -512,7 +511,7 @@ class ObserverScoringQueueTests(unittest.TestCase):
                 observer.writer.close()
                 observer.store.close()
 
-        self.assertEqual(first, [("0xdormant", "dormant_candidate")])
+        self.assertEqual(first, [("0xactive", "active_candidate")])
         self.assertEqual(second, [("0xactive", "active_candidate")])
 
     def test_score_batch_uses_one_time_source_for_archive_revival(self):

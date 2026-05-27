@@ -593,6 +593,19 @@ class ObserverStore:
 
     def remove_watchlist_wallet_and_purge(self, wallet: str, *, vacuum_pages: int = 1000) -> dict[str, int]:
         normalized = wallet.lower()
+        removed = WatchlistStore.remove_wallet(self, normalized)
+        result = self.purge_wallet_data(normalized, preserve_watchlist=True, vacuum_pages=vacuum_pages)
+        result["removed_watchlist_rows"] = removed
+        return result
+
+    def purge_wallet_data(
+        self,
+        wallet: str,
+        *,
+        preserve_watchlist: bool = True,
+        vacuum_pages: int = 1000,
+    ) -> dict[str, int]:
+        normalized = wallet.lower()
         removed_market_slugs = [
             str(row["market_slug"])
             for row in self.conn.execute(
@@ -600,7 +613,11 @@ class ObserverStore:
                 (normalized,),
             ).fetchall()
         ]
-        removed = WatchlistStore.remove_wallet(self, normalized)
+        watchlist_removed = 0
+        if not preserve_watchlist:
+            watchlist_removed = WatchlistStore.remove_wallet(self, normalized)
+        scores = self.conn.execute("DELETE FROM candidate_scores WHERE wallet=?", (normalized,))
+        trades = self.conn.execute("DELETE FROM trades WHERE wallet=?", (normalized,))
         activity = self.conn.execute("DELETE FROM wallet_activity_events WHERE wallet=?", (normalized,))
         contexts = self.conn.execute("DELETE FROM wallet_trade_contexts WHERE wallet=?", (normalized,))
         pnl = self.conn.execute("DELETE FROM wallet_market_pnl WHERE wallet=?", (normalized,))
@@ -622,7 +639,11 @@ class ObserverStore:
                 """
             )
             samples_removed = int(samples.rowcount or 0)
-        removed_any = any(int(cursor.rowcount or 0) for cursor in (activity, contexts, pnl, profiles, watched)) or samples_removed
+        removed_any = (
+            watchlist_removed
+            or samples_removed
+            or any(int(cursor.rowcount or 0) for cursor in (scores, trades, activity, contexts, pnl, profiles, watched))
+        )
         vacuumed = 0
         if removed_any:
             vacuumed = self._incremental_vacuum_pages(vacuum_pages)
@@ -630,7 +651,9 @@ class ObserverStore:
         if removed_any:
             self._checkpoint_wal()
         return {
-            "removed_watchlist_rows": removed,
+            "removed_watchlist_rows": watchlist_removed,
+            "removed_score_rows": int(scores.rowcount or 0),
+            "removed_trades": int(trades.rowcount or 0),
             "removed_activity_events": int(activity.rowcount or 0),
             "removed_trade_contexts": int(contexts.rowcount or 0),
             "removed_wallet_market_pnl": int(pnl.rowcount or 0),
@@ -656,24 +679,13 @@ class ObserverStore:
             SELECT wallet FROM candidate_scores WHERE status='active_candidate';
             """
         )
-        if dormant_limit > 0:
-            self.conn.execute(
-                """
-                INSERT OR IGNORE INTO research_keep(wallet)
-                SELECT wallet
-                FROM candidate_scores
-                WHERE status='dormant_candidate'
-                ORDER BY rank_score DESC, updated_at DESC, wallet ASC
-                LIMIT ?
-                """,
-                (int(dormant_limit),),
-            )
         keep_wallets = int(self.conn.execute("SELECT COUNT(*) FROM research_keep").fetchone()[0] or 0)
         if keep_wallets <= 0:
             return {
                 "research_cleanup_keep_wallets": 0,
                 "removed_non_focus_activity_events": 0,
                 "removed_non_focus_trade_contexts": 0,
+                "removed_non_focus_wallet_market_pnl": 0,
                 "removed_non_focus_wallet_profiles": 0,
                 "removed_non_focus_watched_market_windows": 0,
                 "removed_orphan_market_state_samples": 0,
@@ -696,6 +708,9 @@ class ObserverStore:
         contexts = self.conn.execute(
             "DELETE FROM wallet_trade_contexts WHERE wallet NOT IN (SELECT wallet FROM research_keep)"
         )
+        pnl = self.conn.execute(
+            "DELETE FROM wallet_market_pnl WHERE wallet NOT IN (SELECT wallet FROM research_keep)"
+        )
         profiles = self.conn.execute(
             "DELETE FROM wallet_profiles WHERE wallet NOT IN (SELECT wallet FROM research_keep)"
         )
@@ -713,7 +728,7 @@ class ObserverStore:
               AND market_slug NOT IN (SELECT market_slug FROM watched_market_windows)
             """
         )
-        removed_any = any(int(cursor.rowcount or 0) for cursor in (activity, contexts, profiles, watched, samples))
+        removed_any = any(int(cursor.rowcount or 0) for cursor in (activity, contexts, pnl, profiles, watched, samples))
         vacuumed = self._incremental_vacuum_pages(vacuum_pages) if removed_any else 0
         if removed_any:
             self.conn.commit()
@@ -722,6 +737,7 @@ class ObserverStore:
             "research_cleanup_keep_wallets": keep_wallets,
             "removed_non_focus_activity_events": int(activity.rowcount or 0),
             "removed_non_focus_trade_contexts": int(contexts.rowcount or 0),
+            "removed_non_focus_wallet_market_pnl": int(pnl.rowcount or 0),
             "removed_non_focus_wallet_profiles": int(profiles.rowcount or 0),
             "removed_non_focus_watched_market_windows": int(watched.rowcount or 0),
             "removed_orphan_market_state_samples": int(samples.rowcount or 0),
@@ -2070,7 +2086,7 @@ class ObserverStore:
         self.conn.executescript(
             """
             INSERT OR IGNORE INTO cleanup_keep(wallet)
-            SELECT wallet FROM candidate_scores WHERE status IN ('active_candidate','dormant_candidate');
+            SELECT wallet FROM candidate_scores WHERE status='active_candidate';
             INSERT OR IGNORE INTO cleanup_keep(wallet)
             SELECT wallet FROM watchlist_wallets;
             """
@@ -2125,7 +2141,7 @@ class ObserverStore:
                 """
                 SELECT COUNT(*) AS n
                 FROM candidate_scores
-                WHERE status NOT IN ('active_candidate','dormant_candidate')
+                WHERE status!='active_candidate'
                   AND wallet NOT IN (SELECT wallet FROM cleanup_keep)
                 """
             ).fetchone()["n"]
@@ -2137,7 +2153,7 @@ class ObserverStore:
             self.conn.execute(
                 """
                 DELETE FROM candidate_scores
-                WHERE status NOT IN ('active_candidate','dormant_candidate')
+                WHERE status!='active_candidate'
                   AND wallet NOT IN (SELECT wallet FROM cleanup_keep)
                 """
             )

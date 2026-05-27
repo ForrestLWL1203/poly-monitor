@@ -475,16 +475,14 @@
   </section>
 
   <script>
-    const groups = ["watchlist", "active_candidate", "dormant_candidate"];
+    const groups = ["watchlist", "active_candidate"];
     const labels = {
       watchlist: "重点关注",
-      active_candidate: "活跃候选",
-      dormant_candidate: "休眠候选"
+      active_candidate: "活跃候选"
     };
     const labelHints = {
       watchlist: "人工选定的钱包，不受休眠和归档清理限制",
-      active_candidate: "近期高频且评分达标，值得重点持续采样",
-      dormant_candidate: "历史活跃期表现较好，但最近活跃度不足"
+      active_candidate: "近期高频且评分达标，值得重点持续采样"
     };
     let statusData = null;
     let currentGroup = "watchlist";
