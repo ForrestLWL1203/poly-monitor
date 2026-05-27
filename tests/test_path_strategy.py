@@ -8,6 +8,7 @@ from pathlib import Path
 
 from poly_monitor.path_strategy import (
     D950MarketPathStrategy,
+    ParityTerminalBiasStrategy,
     PathStrategyConfig,
     RecordingExecutionAdapter,
     SettlementPaperExecutionAdapter,
@@ -15,6 +16,7 @@ from poly_monitor.path_strategy import (
     load_deep_export_for_path_strategy,
     replay_path_strategy,
 )
+from poly_monitor.strategy_backtest import BacktestResult
 from poly_monitor.strategy_runtime import StrategyHistory, StrategySnapshot, TradeIntent
 
 
@@ -414,6 +416,254 @@ class PathStrategyTests(unittest.TestCase):
         intent = strategy.evaluate_snapshot(sample, [])
 
         self.assertIsNone(intent)
+
+    def test_parity_terminal_bias_builds_pair_inventory_before_terminal_phase(self):
+        strategy = ParityTerminalBiasStrategy(
+            PathStrategyConfig(
+                wallet="strategy",
+                checkpoints=(1,),
+                notional_usdc=10,
+                target_pair_notional_usdc=60,
+                max_pair_cost=1.01,
+                max_price=0.7,
+                min_order_usdc=1,
+            )
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "eth-updown-5m-1770000000",
+                "symbol": "ETH",
+                "sampled_ts": 1770000060,
+                "book_stale": 0,
+                "reference_price": 100.0,
+                "up_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5}}},
+                "down_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5}}},
+            }
+        )
+
+        intent = strategy.evaluate(snapshot, StrategyHistory(snapshots_by_market={snapshot.market_slug: [snapshot]}))
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.outcome, "Up")
+        self.assertEqual(intent.reason, "parity_terminal_bias_pair_inventory")
+        self.assertEqual(intent.features["phase"], "pair_inventory")
+        self.assertEqual(intent.features["symbol"], "ETH")
+
+    def test_parity_terminal_bias_adds_terminal_overlay_for_strong_reference_and_book_signal(self):
+        strategy = ParityTerminalBiasStrategy(
+            PathStrategyConfig(
+                wallet="strategy",
+                checkpoints=(1,),
+                notional_usdc=10,
+                target_pair_notional_usdc=20,
+                max_pair_cost=1.01,
+                max_price=0.95,
+                min_order_usdc=1,
+            )
+        )
+        first = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "eth-updown-5m-1770000000",
+                "symbol": "ETH",
+                "sampled_ts": 1770000210,
+                "book_stale": 0,
+                "reference_price": 100.0,
+                "up_json": {"bid": 0.51, "ask": 0.52, "ask_depth_usdc": 100},
+                "down_json": {"bid": 0.47, "ask": 0.48, "ask_depth_usdc": 100},
+            }
+        )
+        terminal = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "eth-updown-5m-1770000000",
+                "symbol": "ETH",
+                "sampled_ts": 1770000250,
+                "book_stale": 0,
+                "reference_price": 101.0,
+                "up_json": {"bid": 0.62, "ask": 0.64, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.64}}},
+                "down_json": {"bid": 0.35, "ask": 0.37, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.37}}},
+            }
+        )
+        history = StrategyHistory(
+            snapshots_by_market={terminal.market_slug: [first, terminal]},
+            emitted_intents=[
+                TradeIntent(
+                    market_slug=terminal.market_slug,
+                    sampled_ts=1770000120,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=10,
+                    max_price=0.95,
+                    expected_price=0.5,
+                    reason="seed",
+                ),
+                TradeIntent(
+                    market_slug=terminal.market_slug,
+                    sampled_ts=1770000121,
+                    intent="BUY",
+                    outcome="Down",
+                    notional_usdc=10,
+                    max_price=0.95,
+                    expected_price=0.5,
+                    reason="seed",
+                ),
+            ],
+        )
+
+        intent = strategy.evaluate(terminal, history)
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.outcome, "Up")
+        self.assertEqual(intent.reason, "parity_terminal_bias_overlay")
+        self.assertEqual(intent.features["phase"], "terminal_bias")
+        self.assertGreaterEqual(intent.features["bias_score"], 3)
+
+    def test_parity_terminal_bias_skips_weak_terminal_signal_after_pair_target_is_met(self):
+        strategy = ParityTerminalBiasStrategy(
+            PathStrategyConfig(
+                wallet="strategy",
+                checkpoints=(1,),
+                notional_usdc=10,
+                target_pair_notional_usdc=20,
+                max_pair_cost=1.01,
+                max_price=0.95,
+                min_order_usdc=1,
+            )
+        )
+        first = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "eth-updown-5m-1770000000",
+                "symbol": "ETH",
+                "sampled_ts": 1770000210,
+                "book_stale": 0,
+                "reference_price": 100.0,
+                "up_json": {"bid": 0.5, "ask": 0.51, "ask_depth_usdc": 100},
+                "down_json": {"bid": 0.48, "ask": 0.49, "ask_depth_usdc": 100},
+            }
+        )
+        terminal = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "eth-updown-5m-1770000000",
+                "symbol": "ETH",
+                "sampled_ts": 1770000250,
+                "book_stale": 0,
+                "reference_price": 100.004,
+                "up_json": {"bid": 0.51, "ask": 0.52, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.52}}},
+                "down_json": {"bid": 0.47, "ask": 0.48, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.48}}},
+            }
+        )
+        history = StrategyHistory(
+            snapshots_by_market={terminal.market_slug: [first, terminal]},
+            emitted_intents=[
+                TradeIntent(
+                    market_slug=terminal.market_slug,
+                    sampled_ts=1770000120,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=10,
+                    max_price=0.95,
+                    expected_price=0.5,
+                    reason="seed",
+                ),
+                TradeIntent(
+                    market_slug=terminal.market_slug,
+                    sampled_ts=1770000121,
+                    intent="BUY",
+                    outcome="Down",
+                    notional_usdc=10,
+                    max_price=0.95,
+                    expected_price=0.5,
+                    reason="seed",
+                ),
+            ],
+        )
+
+        intent = strategy.evaluate(terminal, history)
+
+        self.assertIsNone(intent)
+
+    def test_parity_terminal_bias_can_trigger_from_terminal_book_favorite_without_reference_price(self):
+        strategy = ParityTerminalBiasStrategy(
+            PathStrategyConfig(
+                wallet="strategy",
+                checkpoints=(1,),
+                notional_usdc=10,
+                target_pair_notional_usdc=20,
+                max_pair_cost=1.01,
+                max_price=0.95,
+                min_order_usdc=1,
+            )
+        )
+        terminal = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "eth-updown-5m-1770000000",
+                "symbol": "ETH",
+                "sampled_ts": 1770000270,
+                "book_stale": 0,
+                "up_json": {"bid": 0.91, "ask": 0.93, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.93}}},
+                "down_json": {"bid": 0.06, "ask": 0.08, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.08}}},
+            }
+        )
+        history = StrategyHistory(
+            snapshots_by_market={terminal.market_slug: [terminal]},
+            emitted_intents=[
+                TradeIntent(
+                    market_slug=terminal.market_slug,
+                    sampled_ts=1770000120,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=10,
+                    max_price=0.95,
+                    expected_price=0.5,
+                    reason="seed",
+                ),
+                TradeIntent(
+                    market_slug=terminal.market_slug,
+                    sampled_ts=1770000121,
+                    intent="BUY",
+                    outcome="Down",
+                    notional_usdc=10,
+                    max_price=0.95,
+                    expected_price=0.5,
+                    reason="seed",
+                ),
+            ],
+        )
+
+        intent = strategy.evaluate(terminal, history)
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.outcome, "Up")
+        self.assertEqual(intent.features["phase"], "terminal_bias")
+        self.assertEqual(intent.features["book_favorite_side"], "Up")
+
+    def test_backtest_result_groups_paper_pnl_by_symbol(self):
+        result = BacktestResult(
+            summary={"paper_total_pnl": 10.0},
+            trades=[
+                {
+                    "intent": {"symbol": "ETH"},
+                    "execution": {"status": "paper_settled", "detail": {"realized_pnl": 7.0}},
+                },
+                {
+                    "intent": {"symbol": "BTC"},
+                    "execution": {"status": "paper_settled", "detail": {"realized_pnl": -2.0}},
+                },
+                {
+                    "intent": {"symbol": "ETH"},
+                    "execution": {"status": "paper_settled", "detail": {"realized_pnl": 5.0}},
+                },
+            ],
+        )
+
+        payload = result.to_dict()
+
+        self.assertEqual(payload["summary_by_symbol"]["ETH"]["paper_total_pnl"], 12.0)
+        self.assertEqual(payload["summary_by_symbol"]["ETH"]["paper_win_rate"], 1.0)
+        self.assertEqual(payload["summary_by_symbol"]["BTC"]["paper_total_pnl"], -2.0)
+        self.assertEqual(payload["summary_by_symbol"]["all_symbols"]["paper_settled"], 3)
 
 
 if __name__ == "__main__":

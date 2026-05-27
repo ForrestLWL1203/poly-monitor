@@ -24,7 +24,7 @@ def _parse_checkpoints(value: str) -> tuple[int, ...]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Replay a strategy plugin against a deep wallet export zip.")
     parser.add_argument("--zip", required=True, type=Path)
-    parser.add_argument("--strategy", choices=("d950_path_v0", "wallet_path_v0", "wallet_path"), default="d950_path_v0")
+    parser.add_argument("--strategy", choices=("d950_path_v0", "wallet_path_v0", "wallet_path", "parity_terminal_bias_v0"), default="d950_path_v0")
     parser.add_argument("--wallet", default="strategy")
     parser.add_argument("--mode", choices=("paper", "live"), default="paper")
     parser.add_argument("--out", type=Path)
@@ -48,6 +48,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--maker-excess-ttl-multiplier", type=float, default=0.5)
     parser.add_argument("--rebalance-start-sec", type=int, default=240)
     parser.add_argument("--maker-rebalance-ticks", type=int, default=1)
+    parser.add_argument("--terminal-bias-start-sec", type=int, default=180)
+    parser.add_argument("--terminal-strong-start-sec", type=int, default=240)
+    parser.add_argument("--terminal-max-price", type=float, default=0.95)
+    parser.add_argument("--bias-score-threshold", type=int, default=3)
+    parser.add_argument("--min-reference-move-bps", type=float, default=1.0)
+    parser.add_argument("--min-recent-move-bps", type=float, default=0.5)
+    parser.add_argument("--terminal-favorite-bid", type=float, default=0.85)
+    parser.add_argument("--terminal-favorite-mid", type=float, default=0.80)
     return parser
 
 
@@ -71,6 +79,14 @@ def main() -> int:
         maker_rebalance_ticks=args.maker_rebalance_ticks,
         min_order_usdc=args.min_order_usdc,
         execution_style=args.execution_style,
+        terminal_bias_start_sec=args.terminal_bias_start_sec,
+        terminal_strong_start_sec=args.terminal_strong_start_sec,
+        terminal_max_price=args.terminal_max_price,
+        bias_score_threshold=args.bias_score_threshold,
+        min_reference_move_bps=args.min_reference_move_bps,
+        min_recent_move_bps=args.min_recent_move_bps,
+        terminal_favorite_bid=args.terminal_favorite_bid,
+        terminal_favorite_mid=args.terminal_favorite_mid,
     )
     adapter = RejectingLiveExecutionAdapter() if args.mode == "live" else PaperExecutionAdapter(env.winning_sides)
     if args.mode == "paper" and args.execution_style == "maker":
@@ -113,6 +129,14 @@ def main() -> int:
             "maker_excess_ttl_multiplier": args.maker_excess_ttl_multiplier,
             "rebalance_start_sec": args.rebalance_start_sec,
             "maker_rebalance_ticks": args.maker_rebalance_ticks,
+            "terminal_bias_start_sec": args.terminal_bias_start_sec,
+            "terminal_strong_start_sec": args.terminal_strong_start_sec,
+            "terminal_max_price": args.terminal_max_price,
+            "bias_score_threshold": args.bias_score_threshold,
+            "min_reference_move_bps": args.min_reference_move_bps,
+            "min_recent_move_bps": args.min_recent_move_bps,
+            "terminal_favorite_bid": args.terminal_favorite_bid,
+            "terminal_favorite_mid": args.terminal_favorite_mid,
             "source_zip": str(args.zip),
         },
     }

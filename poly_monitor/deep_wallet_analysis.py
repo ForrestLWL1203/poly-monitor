@@ -93,6 +93,19 @@ def _load_json(bundle: zipfile.ZipFile, name: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _load_context_rows(bundle: zipfile.ZipFile) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for name in ("wallet_trade_contexts.jsonl", "deep_collection/wallet_trade_contexts.jsonl"):
+        for row in _load_jsonl(bundle, name):
+            key = _context_key(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows
+
+
 def _decode_context(row: dict[str, Any]) -> dict[str, Any]:
     context = row.get("context_json")
     if isinstance(context, dict):
@@ -340,12 +353,20 @@ def _timing(activity_rows: list[dict[str, Any]], matched: dict[int, dict[str, An
     for idx, row in enumerate(activity_rows):
         if str(row.get("activity_type") or "").upper() != "TRADE":
             continue
-        ctx = matched.get(idx)
-        remaining = ctx.get("window_remaining_sec") if ctx else None
-        if remaining is None:
+        start_ts = _window_start_from_slug(str(row.get("market_slug") or ""))
+        exchange_ts = _safe_float(row.get("exchange_ts"))
+        elapsed: float | None = None
+        if start_ts is not None and exchange_ts > 0:
+            elapsed = max(0.0, exchange_ts - float(start_ts))
+        else:
+            ctx = matched.get(idx)
+            remaining = ctx.get("window_remaining_sec") if ctx else None
+            if remaining is not None:
+                elapsed = max(0.0, 300.0 - _safe_float(remaining))
+        if elapsed is None:
             unknown += 1
             continue
-        name = _bucket(max(0.0, _safe_float(remaining)), TIME_BUCKETS)
+        name = _bucket(min(elapsed, 299.999), TIME_BUCKETS)
         buckets[name]["trades"] += 1
         buckets[name]["usdc"] = round(buckets[name]["usdc"] + _safe_float(row.get("usdc")), 6)
     dominant = max(buckets.items(), key=lambda item: item[1]["trades"])[0] if any(v["trades"] for v in buckets.values()) else None
@@ -590,7 +611,7 @@ def analyze_deep_wallet_export(zip_path: Path) -> dict[str, Any]:
         complete_rows = _load_jsonl(bundle, "coverage_windows_complete.jsonl")
         excluded_rows = _load_jsonl(bundle, "coverage_windows_excluded.jsonl")
         wallet_activity = _load_jsonl(bundle, "wallet_activity.jsonl")
-        wallet_context_rows = _load_jsonl(bundle, "wallet_trade_contexts.jsonl")
+        wallet_context_rows = _load_context_rows(bundle)
         wallet_pnl = _load_jsonl(bundle, "wallet_market_pnl.jsonl")
         deep_samples = _load_jsonl(bundle, "deep_collection/market_state_samples.jsonl")
     contexts = [_decode_context(row) for row in wallet_context_rows]

@@ -25,7 +25,44 @@ class BacktestResult:
     trades: list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
-        return {"summary": self.summary, "trades": self.trades}
+        return {"summary": self.summary, "summary_by_symbol": _summary_by_symbol(self.trades), "trades": self.trades}
+
+
+def _empty_symbol_summary() -> dict[str, Any]:
+    return {
+        "intents": 0,
+        "paper_settled": 0,
+        "paper_total_pnl": 0.0,
+        "paper_wins": 0,
+        "paper_losses": 0,
+        "paper_win_rate": None,
+    }
+
+
+def _summary_by_symbol(trades: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {"all_symbols": _empty_symbol_summary()}
+    for row in trades:
+        intent = row.get("intent") if isinstance(row, dict) else None
+        execution = row.get("execution") if isinstance(row, dict) else None
+        if not isinstance(intent, dict) or not isinstance(execution, dict):
+            continue
+        symbol = str(intent.get("symbol") or "UNKNOWN").upper()
+        for key in ("all_symbols", symbol):
+            grouped.setdefault(key, _empty_symbol_summary())
+            grouped[key]["intents"] += 1
+        if execution.get("status") != "paper_settled":
+            continue
+        pnl = float((execution.get("detail") or {}).get("realized_pnl") or 0.0)
+        for key in ("all_symbols", symbol):
+            item = grouped[key]
+            item["paper_settled"] += 1
+            item["paper_total_pnl"] = round(float(item["paper_total_pnl"]) + pnl, 6)
+            item["paper_wins"] += 1 if pnl > 0 else 0
+            item["paper_losses"] += 1 if pnl < 0 else 0
+    for item in grouped.values():
+        denom = int(item["paper_wins"]) + int(item["paper_losses"])
+        item["paper_win_rate"] = round(int(item["paper_wins"]) / denom, 6) if denom else None
+    return grouped
 
 
 class DeepExportBacktestEnvironment:

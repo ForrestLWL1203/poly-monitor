@@ -34,6 +34,14 @@ async def async_main() -> int:
         max_inventory_imbalance_ratio=args.max_inventory_imbalance_ratio,
         min_order_usdc=args.min_order_usdc,
         execution_style=args.execution_style,
+        terminal_bias_start_sec=args.terminal_bias_start_sec,
+        terminal_strong_start_sec=args.terminal_strong_start_sec,
+        terminal_max_price=args.terminal_max_price,
+        bias_score_threshold=args.bias_score_threshold,
+        min_reference_move_bps=args.min_reference_move_bps,
+        min_recent_move_bps=args.min_recent_move_bps,
+        terminal_favorite_bid=args.terminal_favorite_bid,
+        terminal_favorite_mid=args.terminal_favorite_mid,
     )
     adapter = RejectingLiveExecutionAdapter() if args.mode == "live" else PaperExecutionAdapter()
     runner = StrategyRunner(

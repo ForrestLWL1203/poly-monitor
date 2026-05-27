@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -285,6 +286,24 @@ class WalletDeepCollector:
         self._last_heartbeat = 0.0
         self._running = True
 
+    def _record_error(self, stage: str, exc: BaseException) -> None:
+        now = utc_now().isoformat()
+        existing = read_status(self.config.data_dir, self.wallet) or {}
+        payload = {
+            **existing,
+            "wallet": self.wallet,
+            "pid": os.getpid(),
+            "status": "running",
+            "last_error": {
+                "stage": stage,
+                "type": exc.__class__.__name__,
+                "message": str(exc),
+                "observed_at": now,
+            },
+            "last_error_traceback": "".join(traceback.format_exception_only(type(exc), exc)).strip(),
+        }
+        write_status(self.config.data_dir, self.wallet, payload)
+
     async def run(self, *, seconds: float | None = None) -> int:
         start = time.monotonic()
         self._write_heartbeat()
@@ -294,9 +313,12 @@ class WalletDeepCollector:
             while self._running:
                 if seconds is not None and time.monotonic() - start >= seconds:
                     break
-                await self._refresh_windows()
-                await self._poll_activity_if_due()
-                self._sample_if_due()
+                try:
+                    await self._refresh_windows()
+                    await self._poll_activity_if_due()
+                    self._sample_if_due()
+                except Exception as exc:
+                    self._record_error("run_loop", exc)
                 self._heartbeat_if_due()
                 await asyncio.sleep(0.1)
         finally:
@@ -310,10 +332,15 @@ class WalletDeepCollector:
         if not force and now - self._last_window_refresh < 15.0:
             return
         self._last_window_refresh = now
-        windows: dict[str, MarketWindow] = {}
+        windows: dict[str, MarketWindow] = dict(self.windows)
         for symbol in self.config.symbols:
-            window = await asyncio.to_thread(find_current_or_next_window, MarketSeries.from_symbol(symbol))
+            try:
+                window = await asyncio.to_thread(find_current_or_next_window, MarketSeries.from_symbol(symbol))
+            except Exception as exc:
+                self._record_error(f"refresh_windows:{symbol}", exc)
+                continue
             if window is not None:
+                windows = {slug: item for slug, item in windows.items() if item.symbol != symbol}
                 windows[window.slug] = window
                 self.store.upsert_market_window(
                     symbol=window.symbol,
@@ -340,26 +367,30 @@ class WalletDeepCollector:
         observed_at = utc_now().isoformat()
         normalized: list[dict[str, Any]] = []
         page_size = 500
-        for page in range(max(1, self.config.activity_pages)):
-            rows = await self.data_api.fetch_user_activity(
-                self.wallet,
-                limit=page_size,
-                offset=page * page_size,
-                start=start_ts,
-                end=now_ts + 30,
-            )
-            if not rows:
-                break
-            for raw in rows:
-                activity_type = str(raw.get("type") or "").upper()
-                if activity_type not in {"TRADE", "MERGE", "REDEEM", "SPLIT"}:
-                    continue
-                event = normalize_activity_event(raw, wallet=self.wallet, observed_at=observed_at)
-                if event["symbol"] not in self.config.symbols or "-updown-5m-" not in event["market_slug"]:
-                    continue
-                normalized.append(event)
-            if len(rows) < page_size:
-                break
+        try:
+            for page in range(max(1, self.config.activity_pages)):
+                rows = await self.data_api.fetch_user_activity(
+                    self.wallet,
+                    limit=page_size,
+                    offset=page * page_size,
+                    start=start_ts,
+                    end=now_ts + 30,
+                )
+                if not rows:
+                    break
+                for raw in rows:
+                    activity_type = str(raw.get("type") or "").upper()
+                    if activity_type not in {"TRADE", "MERGE", "REDEEM", "SPLIT"}:
+                        continue
+                    event = normalize_activity_event(raw, wallet=self.wallet, observed_at=observed_at)
+                    if event["symbol"] not in self.config.symbols or "-updown-5m-" not in event["market_slug"]:
+                        continue
+                    normalized.append(event)
+                if len(rows) < page_size:
+                    break
+        except Exception as exc:
+            self._record_error("poll_activity", exc)
+            return
         inserted = self.store.insert_wallet_activity_events(normalized, recompute=False)
         if inserted:
             self.store.insert_trades([self._trade_from_activity(event) for event in inserted if event.get("activity_type") == "TRADE"])

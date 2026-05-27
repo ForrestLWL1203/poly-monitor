@@ -1,10 +1,11 @@
+import asyncio
 import datetime as dt
 import json
 import signal
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from poly_monitor.deep_collection import (
     WalletDeepCollector,
@@ -37,6 +38,14 @@ class FakeStream:
         if token_id == "up":
             return [(0.51, 10), (0.5, 20), (0.49, 30), (0.48, 40)], [(0.52, 11), (0.53, 21), (0.54, 31), (0.55, 41)], 20
         return [(0.47, 12), (0.46, 22), (0.45, 32), (0.44, 42)], [(0.48, 13), (0.49, 23), (0.5, 33), (0.51, 43)], 30
+
+
+class FakeAsyncClient:
+    async def fetch_user_activity(self, *args, **kwargs):
+        raise TimeoutError("activity timeout")
+
+    async def close(self):
+        pass
 
 
 class DeepCollectionTests(unittest.TestCase):
@@ -198,6 +207,62 @@ class DeepCollectionTests(unittest.TestCase):
         self.assertEqual(row["reference_price_age_sec"], 0.25)
         self.assertEqual(len(row["up_json"]["bids"]), 3)
         self.assertEqual(len(row["down_json"]["asks"]), 3)
+
+    def test_refresh_windows_keeps_existing_windows_when_one_symbol_times_out(self):
+        old_window = MarketWindow(
+            symbol="BTC",
+            slug="btc-updown-5m-1770000000",
+            condition_id="0xold",
+            question="",
+            up_token="up",
+            down_token="down",
+            start_time=dt.datetime.fromtimestamp(1770000000, tz=dt.timezone.utc),
+            end_time=dt.datetime.fromtimestamp(1770000300, tz=dt.timezone.utc),
+        )
+        new_window = MarketWindow(
+            symbol="ETH",
+            slug="eth-updown-5m-1770000000",
+            condition_id="0xnew",
+            question="",
+            up_token="eth_up",
+            down_token="eth_down",
+            start_time=dt.datetime.fromtimestamp(1770000000, tz=dt.timezone.utc),
+            end_time=dt.datetime.fromtimestamp(1770000300, tz=dt.timezone.utc),
+        )
+
+        def fake_find(series):
+            if series.symbol == "BTC":
+                raise TimeoutError("gamma timeout")
+            return new_window
+
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = WalletDeepCollector(WalletDeepCollectorConfig(wallet="0xabc", data_dir=Path(tmp)))
+            collector.windows = {old_window.slug: old_window}
+            collector.stream = MagicMock()
+            collector.stream.switch_tokens = AsyncMock()
+            try:
+                with patch("poly_monitor.deep_collection.find_current_or_next_window", side_effect=fake_find):
+                    asyncio.run(collector._refresh_windows(force=True))
+            finally:
+                collector.store.close()
+
+        self.assertIn(old_window.slug, collector.windows)
+        self.assertIn(new_window.slug, collector.windows)
+        self.assertEqual(collector.stream.switch_tokens.call_count, 1)
+
+    def test_activity_poll_timeout_is_recorded_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = WalletDeepCollector(WalletDeepCollectorConfig(wallet="0xabc", data_dir=Path(tmp), activity_poll_sec=0.0))
+            collector.data_api = FakeAsyncClient()
+            try:
+                asyncio.run(collector._poll_activity_if_due())
+                status = json.loads((Path(tmp) / "state" / "deep_collectors" / "0xabc.json").read_text())
+            finally:
+                collector.store.close()
+
+        self.assertEqual(status["status"], "running")
+        self.assertEqual(status["last_error"]["stage"], "poll_activity")
+        self.assertIn("activity timeout", status["last_error"]["message"])
 
 
 if __name__ == "__main__":

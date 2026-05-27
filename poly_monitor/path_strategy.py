@@ -42,6 +42,14 @@ class PathStrategyConfig:
     min_order_usdc: float = 1.0
     execution_style: str = "maker"
     one_trade_per_market: bool = True
+    terminal_bias_start_sec: int = 180
+    terminal_strong_start_sec: int = 240
+    terminal_max_price: float = 0.95
+    bias_score_threshold: int = 3
+    min_reference_move_bps: float = 1.0
+    min_recent_move_bps: float = 0.5
+    terminal_favorite_bid: float = 0.85
+    terminal_favorite_mid: float = 0.80
 
 
 SettlementPaperExecutionAdapter = PaperExecutionAdapter
@@ -191,6 +199,22 @@ def _fill_for_order(book: Any, order_notional: float) -> tuple[dict[str, Any] | 
     if ask > 0 and depth + 1e-9 >= order_notional:
         return {"ok": True, "avg": ask, "filled_usdc": round(order_notional, 6), "source": "best_ask_depth_estimate"}, ask
     return None, 0.0
+
+
+def _reference_move_bps(start_price: float, end_price: float) -> float:
+    if start_price <= 0 or end_price <= 0:
+        return 0.0
+    return round(((end_price - start_price) / start_price) * 10000.0, 6)
+
+
+def _last_reference_before(snapshots: list[StrategySnapshot], sampled_ts: int, lookback_sec: int) -> StrategySnapshot | None:
+    cutoff = int(sampled_ts) - int(lookback_sec)
+    candidates = [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.sampled_ts <= cutoff and _safe_float(snapshot.reference_price) > 0
+    ]
+    return candidates[-1] if candidates else None
 
 
 def _maker_quote_at_price(order_notional: float, quote_price: float, *, source: str) -> tuple[dict[str, Any] | None, float]:
@@ -365,6 +389,140 @@ class WalletPathStrategy:
     def evaluate_snapshot(self, sample: dict[str, Any], activity_rows: list[dict[str, Any]]) -> TradeIntent | None:
         snapshot = StrategySnapshot.from_market_state_sample(sample)
         return self.evaluate(snapshot, StrategyHistory(activity_rows=activity_rows, snapshots_by_market={snapshot.market_slug: [snapshot]}))
+
+
+class ParityTerminalBiasStrategy(WalletPathStrategy):
+    strategy_name = "parity_terminal_bias_v0"
+    one_trade_per_market = False
+
+    def evaluate(self, snapshot: StrategySnapshot, history: StrategyHistory) -> TradeIntent | None:
+        if snapshot.book_stale:
+            return None
+        checkpoint = _checkpoint_for_elapsed(snapshot.elapsed_sec, self.config.checkpoints)
+        if checkpoint is None:
+            return None
+        if snapshot.elapsed_sec >= int(self.config.terminal_bias_start_sec):
+            terminal = self._terminal_bias_intent(snapshot, history, checkpoint)
+            if terminal is not None:
+                return terminal
+        pair = super().evaluate(snapshot, history)
+        if pair is None:
+            return None
+        return TradeIntent(
+            strategy_name=self.strategy_name,
+            wallet=pair.wallet,
+            market_slug=pair.market_slug,
+            sampled_ts=pair.sampled_ts,
+            checkpoint_sec=pair.checkpoint_sec,
+            intent=pair.intent,
+            outcome=pair.outcome,
+            notional_usdc=pair.notional_usdc,
+            max_price=pair.max_price,
+            expected_price=pair.expected_price,
+            symbol=pair.symbol,
+            reason="parity_terminal_bias_pair_inventory",
+            features={**pair.features, "phase": "pair_inventory", "symbol": snapshot.symbol},
+        )
+
+    def _terminal_bias_intent(
+        self,
+        snapshot: StrategySnapshot,
+        history: StrategyHistory,
+        checkpoint: int,
+    ) -> TradeIntent | None:
+        snapshots = [
+            item
+            for item in history.snapshots_for_market(snapshot.market_slug)
+            if item.sampled_ts <= snapshot.sampled_ts and _safe_float(item.reference_price) > 0
+        ]
+        current_ref = _safe_float(snapshot.reference_price)
+        first_ref = _safe_float(snapshots[0].reference_price) if snapshots else 0.0
+        window_move_bps = _reference_move_bps(first_ref, current_ref)
+        recent_ref = _last_reference_before(snapshots, snapshot.sampled_ts, 30) if snapshots else None
+        recent_move_bps = _reference_move_bps(_safe_float(recent_ref.reference_price), current_ref) if recent_ref and current_ref > 0 else 0.0
+        up_score = 0
+        down_score = 0
+        reference_threshold = float(self.config.min_reference_move_bps)
+        recent_threshold = float(self.config.min_recent_move_bps)
+        epsilon = 1e-9
+        if window_move_bps > reference_threshold + epsilon:
+            up_score += 1
+        elif window_move_bps < -reference_threshold - epsilon:
+            down_score += 1
+        if recent_move_bps > recent_threshold + epsilon:
+            up_score += 1
+        elif recent_move_bps < -recent_threshold - epsilon:
+            down_score += 1
+        reference_signal_seen = up_score > 0 or down_score > 0
+        up_mid = (_safe_float(snapshot.up.bid) + _safe_float(snapshot.up.ask)) / 2.0
+        down_mid = (_safe_float(snapshot.down.bid) + _safe_float(snapshot.down.ask)) / 2.0
+        up_bid = _safe_float(snapshot.up.bid)
+        down_bid = _safe_float(snapshot.down.bid)
+        book_favorite_side = ""
+        if up_mid > 0 and down_mid > 0:
+            if up_mid > down_mid:
+                up_score += 1
+                book_favorite_side = "Up"
+            elif down_mid > up_mid:
+                down_score += 1
+                book_favorite_side = "Down"
+        if up_bid >= float(self.config.terminal_favorite_bid) or up_mid >= float(self.config.terminal_favorite_mid):
+            up_score += 2
+            book_favorite_side = "Up"
+        if down_bid >= float(self.config.terminal_favorite_bid) or down_mid >= float(self.config.terminal_favorite_mid):
+            down_score += 2
+            book_favorite_side = "Down"
+        if not reference_signal_seen and max(up_score, down_score) < int(self.config.bias_score_threshold):
+            return None
+        if snapshot.elapsed_sec >= int(self.config.terminal_strong_start_sec):
+            if up_score > down_score:
+                up_score += 1
+            elif down_score > up_score:
+                down_score += 1
+        outcome = "Up" if up_score > down_score else "Down" if down_score > up_score else ""
+        bias_score = max(up_score, down_score)
+        if not outcome or bias_score < int(self.config.bias_score_threshold):
+            return None
+        book = snapshot.book_for_outcome(outcome)
+        fill, expected_price = _fill_for_order(book, round(float(self.config.notional_usdc), 6))
+        if fill is None or expected_price <= 0 or expected_price > float(self.config.terminal_max_price):
+            return None
+        return TradeIntent(
+            strategy_name=self.strategy_name,
+            wallet=self.config.wallet.lower(),
+            market_slug=snapshot.market_slug,
+            sampled_ts=snapshot.sampled_ts,
+            checkpoint_sec=checkpoint,
+            intent="BUY",
+            outcome=outcome,
+            notional_usdc=round(float(self.config.notional_usdc), 6),
+            max_price=float(self.config.terminal_max_price),
+            expected_price=round(expected_price, 6),
+            symbol=snapshot.symbol,
+            reason="parity_terminal_bias_overlay",
+            features={
+                "phase": "terminal_bias",
+                "symbol": snapshot.symbol,
+                "elapsed_sec": snapshot.elapsed_sec,
+                "bias_score": bias_score,
+                "up_score": up_score,
+                "down_score": down_score,
+                "window_reference_move_bps": round(window_move_bps, 6),
+                "recent_reference_move_bps": round(recent_move_bps, 6),
+                "up_mid": round(up_mid, 6),
+                "down_mid": round(down_mid, 6),
+                "up_bid": round(up_bid, 6),
+                "down_bid": round(down_bid, 6),
+                "book_favorite_side": book_favorite_side or None,
+                "reference_signal_seen": reference_signal_seen,
+                "terminal_bias_start_sec": int(self.config.terminal_bias_start_sec),
+                "terminal_strong_start_sec": int(self.config.terminal_strong_start_sec),
+                "bias_score_threshold": int(self.config.bias_score_threshold),
+                "terminal_favorite_bid": float(self.config.terminal_favorite_bid),
+                "terminal_favorite_mid": float(self.config.terminal_favorite_mid),
+                "book_fill": fill,
+            },
+        )
 
 
 class D950MarketPathStrategy:

@@ -78,7 +78,7 @@ class DeepWalletAnalysisTests(unittest.TestCase):
                 )
                 _write_jsonl(
                     bundle,
-                    "wallet_trade_contexts.jsonl",
+                    "deep_collection/wallet_trade_contexts.jsonl",
                     [
                         {
                             "wallet": wallet,
@@ -145,6 +145,7 @@ class DeepWalletAnalysisTests(unittest.TestCase):
         self.assertEqual(report["market_behavior"]["dual_side_markets"], 1)
         self.assertEqual(report["timing"]["buckets"]["240s+"]["trades"], 1)
         self.assertEqual(report["timing"]["buckets"]["0-30s"]["trades"], 1)
+        self.assertEqual(report["copyability"]["matched_contexts"], 2)
         self.assertEqual(report["copyability"]["targets"]["25"]["ok_rate"], 50.0)
         self.assertEqual(report["path_analysis"]["summary"]["windows"], 2)
         self.assertEqual(report["path_analysis"]["summary"]["final_bias_correct"], 1)

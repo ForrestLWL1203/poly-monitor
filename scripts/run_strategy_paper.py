@@ -31,7 +31,7 @@ def _parse_symbols(value: str) -> tuple[str, ...]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run an independent live paper strategy plugin.")
-    parser.add_argument("--strategy", choices=("d950_path_v0", "wallet_path_v0", "wallet_path"), default="d950_path_v0")
+    parser.add_argument("--strategy", choices=("d950_path_v0", "wallet_path_v0", "wallet_path", "parity_terminal_bias_v0"), default="d950_path_v0")
     parser.add_argument("--wallet", default="strategy")
     parser.add_argument("--symbols", type=_parse_symbols, default=("BTC",))
     parser.add_argument("--mode", choices=("paper", "live"), default="paper")
@@ -50,6 +50,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-inventory-imbalance-ratio", type=float, default=0.05)
     parser.add_argument("--min-order-usdc", type=float, default=1.0)
     parser.add_argument("--execution-style", choices=("maker", "taker"), default="maker")
+    parser.add_argument("--terminal-bias-start-sec", type=int, default=180)
+    parser.add_argument("--terminal-strong-start-sec", type=int, default=240)
+    parser.add_argument("--terminal-max-price", type=float, default=0.95)
+    parser.add_argument("--bias-score-threshold", type=int, default=3)
+    parser.add_argument("--min-reference-move-bps", type=float, default=1.0)
+    parser.add_argument("--min-recent-move-bps", type=float, default=0.5)
+    parser.add_argument("--terminal-favorite-bid", type=float, default=0.85)
+    parser.add_argument("--terminal-favorite-mid", type=float, default=0.80)
     return parser
 
 
@@ -70,6 +78,14 @@ async def async_main() -> int:
         max_inventory_imbalance_ratio=args.max_inventory_imbalance_ratio,
         min_order_usdc=args.min_order_usdc,
         execution_style=args.execution_style,
+        terminal_bias_start_sec=args.terminal_bias_start_sec,
+        terminal_strong_start_sec=args.terminal_strong_start_sec,
+        terminal_max_price=args.terminal_max_price,
+        bias_score_threshold=args.bias_score_threshold,
+        min_reference_move_bps=args.min_reference_move_bps,
+        min_recent_move_bps=args.min_recent_move_bps,
+        terminal_favorite_bid=args.terminal_favorite_bid,
+        terminal_favorite_mid=args.terminal_favorite_mid,
     )
     adapter = RejectingLiveExecutionAdapter() if args.mode == "live" else PaperExecutionAdapter()
     runner = StrategyRunner(
