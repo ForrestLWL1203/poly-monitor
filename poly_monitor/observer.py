@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import inspect
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -212,22 +213,25 @@ class CryptoWalletObserver:
         started = time.monotonic()
         try:
             await self.price_hub.start()
-            await self._refresh_windows(initial=True)
+            try:
+                await self._refresh_windows(initial=True)
+            except Exception as exc:
+                self._record_observer_error("initial_refresh_windows", exc)
             self._last_window_refresh = time.monotonic()
             await self.stream.connect(self._all_tokens())
             while True:
                 self._begin_cycle()
-                await self._refresh_windows_if_due()
-                await self._refresh_window_open_prices_if_due()
-                await self._write_pending_settlements_if_due()
-                await self._poll_trades_if_due()
-                await self._poll_watchlist_activity_if_due()
-                self._sample_market_state_each_cycle()
-                await self._refresh_scores_if_due()
-                self._write_report_if_due()
-                self._cleanup_stale_data_if_due()
-                self._cleanup_raw_retention_if_due()
-                self._archive_strategy_data_if_due()
+                await self._run_cycle_stage("refresh_windows", self._refresh_windows_if_due)
+                await self._run_cycle_stage("refresh_window_open_prices", self._refresh_window_open_prices_if_due)
+                await self._run_cycle_stage("write_pending_settlements", self._write_pending_settlements_if_due)
+                await self._run_cycle_stage("poll_trades", self._poll_trades_if_due)
+                await self._run_cycle_stage("poll_watchlist_activity", self._poll_watchlist_activity_if_due)
+                await self._run_cycle_stage("sample_market_state", self._sample_market_state_each_cycle)
+                await self._run_cycle_stage("refresh_scores", self._refresh_scores_if_due)
+                await self._run_cycle_stage("write_report", self._write_report_if_due)
+                await self._run_cycle_stage("cleanup_stale_data", self._cleanup_stale_data_if_due)
+                await self._run_cycle_stage("cleanup_raw_retention", self._cleanup_raw_retention_if_due)
+                await self._run_cycle_stage("archive_strategy_data", self._archive_strategy_data_if_due)
                 if self.config.seconds is not None and time.monotonic() - started >= self.config.seconds:
                     break
                 await asyncio.sleep(self._next_sleep_delay(started))
@@ -240,6 +244,23 @@ class CryptoWalletObserver:
             await self.stream.close()
             await self.price_hub.stop()
 
+    async def _run_cycle_stage(self, stage: str, func) -> None:
+        try:
+            result = func()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            self._record_observer_error(stage, exc)
+
+    def _record_observer_error(self, stage: str, exc: BaseException) -> None:
+        self.writer.write({
+            "event": "observer_error",
+            "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "stage": stage,
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        })
+
     async def _refresh_windows_if_due(self) -> None:
         if time.monotonic() - self._last_window_refresh < self.config.window_refresh_sec:
             return
@@ -247,12 +268,7 @@ class CryptoWalletObserver:
         try:
             await self._refresh_windows()
         except Exception as exc:
-            self.writer.write({
-                "event": "observer_error",
-                "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "stage": "refresh_windows",
-                "error": str(exc),
-            })
+            self._record_observer_error("refresh_windows", exc)
 
     async def _refresh_window_open_prices_if_due(self) -> None:
         if not self._has_missing_open_prices():

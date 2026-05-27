@@ -1634,6 +1634,27 @@ class ObserverContextTests(unittest.TestCase):
         self.assertIn("observer_error", events)
         self.assertIn("gamma timeout", events)
 
+    def test_cycle_stage_error_is_logged_without_raising(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp)))
+                try:
+                    await observer._run_cycle_stage(
+                        "cleanup_stale_data",
+                        lambda: (_ for _ in ()).throw(RuntimeError("database is locked")),
+                    )
+                finally:
+                    observer.store.close()
+                    observer.writer.close()
+                events_path = Path(tmp) / "raw" / dt.datetime.now(dt.timezone.utc).date().isoformat() / "events.jsonl"
+                return events_path.read_text(encoding="utf-8")
+
+        events = asyncio.run(run_case())
+
+        self.assertIn("observer_error", events)
+        self.assertIn("cleanup_stale_data", events)
+        self.assertIn("database is locked", events)
+
     def test_cleanup_stale_data_prunes_old_context_snapshot_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
             observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), cleanup_interval_hours=0.001))
