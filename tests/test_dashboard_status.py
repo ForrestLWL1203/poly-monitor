@@ -601,7 +601,7 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(status["candidate_counts"]["archive_candidate"], 0)
         self.assertEqual(len(status["candidates"]["archive_candidate"]), 0)
 
-    def test_dashboard_caps_and_sorts_active_and_dormant_candidates(self):
+    def test_dashboard_caps_and_sorts_active_candidates_and_ignores_dormant(self):
         from poly_monitor.dashboard.status import build_dashboard_status
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -624,9 +624,8 @@ class DashboardStatusTests(unittest.TestCase):
             status = build_dashboard_status(data_dir, now=dt.datetime(2026, 5, 24, 12, tzinfo=dt.timezone.utc))
 
         self.assertEqual(status["candidate_counts"]["active_candidate"], 15)
-        self.assertEqual(status["candidate_counts"]["dormant_candidate"], 10)
+        self.assertNotIn("dormant_candidate", status["candidate_counts"])
         self.assertEqual(status["candidates"]["active_candidate"][0]["rank_score"], 34.0)
-        self.assertEqual(status["candidates"]["dormant_candidate"][0]["rank_score"], 34.0)
 
     def test_candidate_score_raw_event_is_compact(self):
         from poly_monitor.observer import compact_score_event

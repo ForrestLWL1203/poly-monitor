@@ -221,8 +221,8 @@ def _sqlite_candidates(data_dir: Path) -> dict[str, list[dict[str, Any]]]:
                 item["deep_collection"] = collector_status(data_dir, wallet)
                 candidates["watchlist"].append(item)
                 scored_watchlist.add(wallet)
-            else:
-                candidates.setdefault(str(row["status"]), []).append(item)
+            elif str(row["status"]) in SCORED_GROUPS:
+                candidates[str(row["status"])].append(item)
         for wallet, watch in watchlist.items():
             if wallet in scored_watchlist:
                 continue
@@ -247,7 +247,6 @@ def _sqlite_candidates(data_dir: Path) -> dict[str, list[dict[str, Any]]]:
                 )
             )
         candidates["active_candidate"] = candidates.get("active_candidate", [])[:MAX_ACTIVE_DISPLAY]
-        candidates["dormant_candidate"] = candidates.get("dormant_candidate", [])[:MAX_DORMANT_DISPLAY]
         candidates["archive_candidate"] = candidates.get("archive_candidate", [])[:MAX_ARCHIVE_DISPLAY]
         return candidates
     except sqlite3.Error:
