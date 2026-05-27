@@ -612,6 +612,42 @@ class ScoringTests(unittest.TestCase):
         self.assertGreater(score.rank_score, 550)
         self.assertIn("local_observed_pnl_7d_not_positive", score.reasons)
 
+    def test_positive_profile_wallet_with_local_win_loss_drag_downgrades_to_dormant(self):
+        metrics = {
+            "wallet": "0x32",
+            "trades_24h": 1464,
+            "trades_7d": 1464,
+            "trades_30d": 1464,
+            "markets_24h": 288,
+            "markets_7d": 36,
+            "pnl_7d": 6429.596,
+            "pnl_30d": 21001.439,
+            "pnl_source": "profile_portfolio_pnl",
+            "wins_7d": 0,
+            "losses_7d": 0,
+            "local_observed_pnl_7d": -261.97687,
+            "local_observed_settled_markets_7d": 267,
+            "local_observed_wins_7d": 133,
+            "local_observed_losses_7d": 134,
+            "local_observed_span_hours": 42.826,
+            "top1_concentration": 0.018656,
+            "top3_concentration": 0.044703,
+            "longshot_profit_share": 0.0,
+            "longshot_profit_markets": 0,
+            "last_active_age_hours": 0.01,
+            "historical_trades": 1464,
+            "historical_markets": 36,
+            "historical_pnl": 21001.439,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "dormant_candidate")
+        self.assertGreater(score.rank_score, 550)
+        self.assertIn("local_observed_pnl_7d_not_positive", score.reasons)
+        self.assertIn("local_observed_wins_7d_not_above_losses", score.reasons)
+        self.assertIn("wins_7d_below_losses", score.reasons)
+
     def test_local_observed_quality_can_promote_moderate_frequency_wallet(self):
         metrics = {
             "wallet": "0xcbcf",
