@@ -590,8 +590,8 @@ class DashboardServerTests(unittest.TestCase):
                 store.add_watchlist_wallet(wallet)
             finally:
                 store.close()
-            with mock.patch("poly_monitor.dashboard.server.start_collector", return_value={"ok": True, "state": "running", "pid": 123}) as start, mock.patch(
-                "poly_monitor.dashboard.server.stop_collector", return_value={"ok": True, "state": "stopped", "pid": 123}
+            with mock.patch("poly_monitor.dashboard.server.add_multi_collector_wallet", return_value={"ok": True, "state": "running", "pid": 123}) as start, mock.patch(
+                "poly_monitor.dashboard.server.remove_multi_collector_wallet", return_value={"ok": True, "state": "stopped", "pid": 123}
             ) as stop:
                 server = create_server(
                     DashboardConfig(
@@ -653,7 +653,7 @@ class DashboardServerTests(unittest.TestCase):
                     server.server_close()
                     thread.join(timeout=3)
 
-    def test_deep_collection_api_returns_429_when_collector_limit_reached(self):
+    def test_deep_collection_api_rejects_invalid_action(self):
         from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
         from poly_monitor.storage import ObserverStore
 
@@ -665,39 +665,35 @@ class DashboardServerTests(unittest.TestCase):
                 store.add_watchlist_wallet(wallet)
             finally:
                 store.close()
-            with mock.patch(
-                "poly_monitor.dashboard.server.start_collector",
-                return_value={"ok": False, "error": "too_many_collectors", "running": 1, "max_active_collectors": 1},
-            ):
-                server = create_server(
-                    DashboardConfig(
-                        data_dir=data_dir,
-                        host="127.0.0.1",
-                        port=0,
-                        username="admin",
-                        password="secret",
-                        cookie_secret="test-secret",
-                    )
+            server = create_server(
+                DashboardConfig(
+                    data_dir=data_dir,
+                    host="127.0.0.1",
+                    port=0,
+                    username="admin",
+                    password="secret",
+                    cookie_secret="test-secret",
                 )
-                thread = threading.Thread(target=server.serve_forever, daemon=True)
-                thread.start()
-                try:
-                    base = f"http://127.0.0.1:{server.server_address[1]}"
-                    cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
-                    req = urllib.request.Request(
-                        f"{base}/api/deep-collection",
-                        data=json.dumps({"wallet": wallet, "action": "start"}).encode(),
-                        headers={"Cookie": cookie, "Content-Type": "application/json"},
-                        method="POST",
-                    )
-                    with self.assertRaises(urllib.error.HTTPError) as rejected:
-                        urllib.request.urlopen(req, timeout=3)
-                    self.assertEqual(rejected.exception.code, 429)
-                    self.assertEqual(json.loads(rejected.exception.read().decode())["error"], "too_many_collectors")
-                finally:
-                    server.shutdown()
-                    server.server_close()
-                    thread.join(timeout=3)
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                cookie = f"poly_monitor_session={make_session_token('admin', 'test-secret')}"
+                req = urllib.request.Request(
+                    f"{base}/api/deep-collection",
+                    data=json.dumps({"wallet": wallet, "action": "bogus"}).encode(),
+                    headers={"Cookie": cookie, "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(req, timeout=3)
+                self.assertEqual(rejected.exception.code, 400)
+                self.assertEqual(json.loads(rejected.exception.read().decode())["error"], "invalid_action")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
 
     def test_watchlist_remove_stops_deep_collector_before_purge(self):
         from poly_monitor.dashboard.server import DashboardConfig, create_server, make_session_token
@@ -711,7 +707,7 @@ class DashboardServerTests(unittest.TestCase):
                 store.add_watchlist_wallet(wallet)
             finally:
                 store.close()
-            with mock.patch("poly_monitor.dashboard.server.stop_collector", return_value={"ok": True, "stopped": True}) as stop:
+            with mock.patch("poly_monitor.dashboard.server.remove_multi_collector_wallet", return_value={"ok": True, "stopped": True}) as stop:
                 server = create_server(
                     DashboardConfig(
                         data_dir=data_dir,

@@ -284,53 +284,9 @@ class RejectingLiveExecutionAdapter:
 
 
 def strategy_from_name(name: str, **kwargs: Any) -> StrategyPlugin:
-    from .path_strategy import D950MarketPathStrategy, ParityTerminalBiasStrategy, PathStrategyConfig, WalletPathStrategy
+    from .strategies.registry import strategy_from_name as registry_strategy_from_name
 
-    normalized = str(name)
-    checkpoints = kwargs.get("checkpoints")
-    if checkpoints is None:
-        checkpoints = (1,) if normalized in {"wallet_path", "wallet_path_v0"} else (120, 180, 240)
-    config = PathStrategyConfig(
-        wallet=str(_coalesce(kwargs.get("wallet"), normalized)),
-        checkpoints=tuple(checkpoints),
-        notional_usdc=float(_coalesce(kwargs.get("notional_usdc"), 25.0)),
-        first_bias_min_usdc=float(_coalesce(kwargs.get("first_bias_min_usdc"), _coalesce(kwargs.get("bias_threshold"), 25.0))),
-        max_price=float(_coalesce(kwargs.get("max_price"), 0.95)),
-        target_pair_notional_usdc=float(_coalesce(kwargs.get("target_pair_notional_usdc"), 25.0)),
-        target_pair_shares_per_side=(
-            float(kwargs["target_pair_shares_per_side"])
-            if kwargs.get("target_pair_shares_per_side") is not None
-            else None
-        ),
-        max_pair_cost=float(_coalesce(kwargs.get("max_pair_cost"), 0.99)),
-        max_unpaired_price=float(_coalesce(kwargs.get("max_unpaired_price"), 0.6)),
-        max_inventory_imbalance_ratio=float(_coalesce(kwargs.get("max_inventory_imbalance_ratio"), 0.05)),
-        early_inventory_imbalance_ratio=float(_coalesce(kwargs.get("early_inventory_imbalance_ratio"), 0.30)),
-        mid_inventory_imbalance_ratio=float(_coalesce(kwargs.get("mid_inventory_imbalance_ratio"), 0.15)),
-        late_inventory_imbalance_ratio=float(_coalesce(kwargs.get("late_inventory_imbalance_ratio"), 0.08)),
-        final_inventory_imbalance_ratio=float(_coalesce(kwargs.get("final_inventory_imbalance_ratio"), 0.03)),
-        rebalance_start_sec=int(_coalesce(kwargs.get("rebalance_start_sec"), 240)),
-        maker_rebalance_ticks=int(_coalesce(kwargs.get("maker_rebalance_ticks"), 1)),
-        tick_size=float(_coalesce(kwargs.get("tick_size"), 0.01)),
-        min_order_usdc=float(_coalesce(kwargs.get("min_order_usdc"), 1.0)),
-        execution_style=str(_coalesce(kwargs.get("execution_style"), "maker")),
-        one_trade_per_market=bool(_coalesce(kwargs.get("one_trade_per_market"), normalized == "d950_path_v0")),
-        terminal_bias_start_sec=int(_coalesce(kwargs.get("terminal_bias_start_sec"), 180)),
-        terminal_strong_start_sec=int(_coalesce(kwargs.get("terminal_strong_start_sec"), 240)),
-        terminal_max_price=float(_coalesce(kwargs.get("terminal_max_price"), 0.95)),
-        bias_score_threshold=int(_coalesce(kwargs.get("bias_score_threshold"), 3)),
-        min_reference_move_bps=float(_coalesce(kwargs.get("min_reference_move_bps"), 1.0)),
-        min_recent_move_bps=float(_coalesce(kwargs.get("min_recent_move_bps"), 0.5)),
-        terminal_favorite_bid=float(_coalesce(kwargs.get("terminal_favorite_bid"), 0.85)),
-        terminal_favorite_mid=float(_coalesce(kwargs.get("terminal_favorite_mid"), 0.80)),
-    )
-    if normalized == "d950_path_v0":
-        return D950MarketPathStrategy(config, min_reference_delta=float(_coalesce(kwargs.get("min_reference_delta"), 0.0)))
-    if normalized in {"wallet_path", "wallet_path_v0"}:
-        return WalletPathStrategy(config)
-    if normalized == "parity_terminal_bias_v0":
-        return ParityTerminalBiasStrategy(config)
-    raise ValueError(f"unknown strategy: {name}")
+    return registry_strategy_from_name(name, **kwargs)
 
 
 def utc_iso(value: dt.datetime | None = None) -> str:

@@ -19,7 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from ..storage import ObserverStore, WatchlistStore
-from ..deep_collection import DEFAULT_MAX_ACTIVE_COLLECTORS, collector_status, start_collector, stop_collector
+from ..deep_collection import (
+    add_multi_collector_wallet,
+    collector_status,
+    multi_collector_status,
+    remove_multi_collector_wallet,
+)
 from ..wallet_export import export_watchlist_wallet
 from .status import build_dashboard_status, recent_trades, wallet_detail
 
@@ -42,7 +47,6 @@ class DashboardConfig:
     cookie_secret: str = ""
     session_ttl_seconds: int = 12 * 3600
     status_cache_ttl_seconds: float = 2.0
-    max_active_deep_collectors: int = DEFAULT_MAX_ACTIVE_COLLECTORS
     static_dir: Path | None = None
 
 
@@ -237,7 +241,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             store = WatchlistStore(self.dashboard_config.data_dir / "state" / "observer.sqlite")
             try:
                 statuses = [collector_status(self.dashboard_config.data_dir, wallet) for wallet in store.wallets()]
-                self._json({"collectors": statuses})
+                self._json({"collectors": statuses, "multi_collector": multi_collector_status(self.dashboard_config.data_dir)})
             finally:
                 store.close()
             return
@@ -306,7 +310,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         store = store_cls(self.dashboard_config.data_dir / "state" / "observer.sqlite")
         try:
             if action == "remove":
-                collector_payload = stop_collector(self.dashboard_config.data_dir, wallet)
+                collector_payload = remove_multi_collector_wallet(self.dashboard_config.data_dir, wallet)
                 purge = store.remove_watchlist_wallet_and_purge(wallet)
                 payload = {
                     "ok": True,
@@ -393,20 +397,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         finally:
             store.close()
         if action == "start":
-            payload = start_collector(
-                self.dashboard_config.data_dir,
-                wallet,
-                max_active_collectors=self.dashboard_config.max_active_deep_collectors,
-            )
+            payload = add_multi_collector_wallet(self.dashboard_config.data_dir, wallet)
         elif action == "stop":
-            payload = stop_collector(self.dashboard_config.data_dir, wallet)
+            payload = remove_multi_collector_wallet(self.dashboard_config.data_dir, wallet)
         else:
             self._json({"error": "invalid_action"}, status=HTTPStatus.BAD_REQUEST)
             return
         _clear_status_cache()
-        if not payload.get("ok") and payload.get("error") == "too_many_collectors":
-            self._json(payload, status=HTTPStatus.TOO_MANY_REQUESTS)
-            return
         self._json(payload)
 
     def _authenticated(self) -> bool:

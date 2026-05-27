@@ -19,6 +19,7 @@ from poly_monitor.strategy_runtime import (
     strategy_from_name,
 )
 from poly_monitor.strategy_runner import StrategyRunner, StrategyRunnerConfig
+from poly_monitor.strategies import X32PairCostInventoryStrategy
 
 
 class FakeStream:
@@ -102,6 +103,31 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
         snapshot = env.snapshot(now=start + dt.timedelta(seconds=10))[0]
 
         self.assertTrue(snapshot.book_stale)
+
+    def test_deep_export_environment_loads_per_market_trade_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = Path(tmp) / "bundle.zip"
+            trade = {
+                "market_slug": "btc-updown-5m-1770000000",
+                "condition_id": "cond",
+                "symbol": "BTC",
+                "exchange_ts": 1770000121,
+                "outcome": "Up",
+                "side": "BUY",
+                "price": 0.49,
+                "size": 10,
+                "usdc": 4.9,
+            }
+            with zipfile.ZipFile(zip_path, "w") as bundle:
+                bundle.writestr("deep_collection/market_state_samples.jsonl", "")
+                bundle.writestr("wallet_activity.jsonl", "")
+                bundle.writestr("wallet_market_pnl.jsonl", "")
+                bundle.writestr("markets/btc-updown-5m-1770000000/market_trades.jsonl", json.dumps(trade) + "\n")
+
+            env = DeepExportBacktestEnvironment(zip_path)
+
+        self.assertEqual(len(env.market_trade_rows), 1)
+        self.assertEqual(env.market_trade_rows[0]["market_slug"], "btc-updown-5m-1770000000")
 
     def test_rejecting_live_adapter_does_not_execute(self):
         intent = TradeIntent(
@@ -250,6 +276,28 @@ class StrategyHistoryTests(unittest.TestCase):
 
 
 class StrategyFactoryTests(unittest.TestCase):
+    def test_x32_pair_cost_strategy_uses_address_specific_defaults(self):
+        strategy = strategy_from_name("x32_pair_cost_inventory_v0", wallet="0x32")
+
+        self.assertIsInstance(strategy, X32PairCostInventoryStrategy)
+        self.assertEqual(strategy.strategy_name, "x32_pair_cost_inventory_v0")
+        self.assertEqual(strategy.config.checkpoints, (1,))
+        self.assertEqual(strategy.config.target_pair_shares_per_side, 100)
+        self.assertEqual(strategy.config.notional_usdc, 5)
+        self.assertEqual(strategy.config.max_pair_cost, 0.995)
+        self.assertEqual(strategy.config.rebalance_start_sec, 180)
+        self.assertEqual(strategy.config.mid_inventory_imbalance_ratio, 0.12)
+        self.assertFalse(strategy.one_trade_per_market)
+
+    def test_d950_terminal_bias_alias_matches_legacy_name(self):
+        legacy = strategy_from_name("d950_path_v0", wallet="strategy")
+        renamed = strategy_from_name("d950_terminal_bias_v0", wallet="strategy")
+
+        self.assertEqual(legacy.strategy_name, "d950_terminal_bias_v0")
+        self.assertEqual(renamed.strategy_name, "d950_terminal_bias_v0")
+        self.assertEqual(legacy.config.checkpoints, renamed.config.checkpoints)
+        self.assertTrue(legacy.config.one_trade_per_market)
+
     def test_wallet_path_defaults_to_independent_multi_order_inventory(self):
         strategy = strategy_from_name("wallet_path_v0", wallet="0xabc")
 

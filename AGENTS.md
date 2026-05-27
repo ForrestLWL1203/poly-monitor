@@ -250,8 +250,14 @@ VPS code-change rule:
 - VPS operations are limited to read-only inspection, `git fetch`/`git pull`,
   dependency/runtime checks, and precise process restarts unless the user
   explicitly authorizes a one-off emergency edit.
-- If the VPS worktree has local modifications, stash or otherwise preserve them
-  before pulling. Do not resolve deploy conflicts by editing files on the VPS.
+- If the VPS worktree has local modifications, treat it as a policy violation
+  or an unknown external change. Do not edit, delete, stash, reset, clean,
+  overwrite, commit, or pull over those changes on the VPS unless the user
+  explicitly authorizes that exact remediation. Report the dirty files and stop
+  any deployment step that would mutate the remote repo.
+- This project has a strict no-direct-remote-edit rule: all project code changes
+  must originate locally, go through git, and reach the VPS only via a clean
+  pull of committed changes.
 
 Legacy `new-poly` layout still present on the same VPS:
 

@@ -175,6 +175,11 @@
       color: #d9ffe7;
       background: #1d3327;
     }
+    .deep-button.listed {
+      border-color: #3d5f8f;
+      color: #dceaff;
+      background: #1c2638;
+    }
     .deep-pill {
       border: 1px solid var(--line);
       border-radius: 999px;
@@ -430,7 +435,7 @@
                   <th class="watch-cell" title="加入或移出重点关注">★</th>
                   <th>用户</th>
                   <th title="ready 表示已完成复核；pending 表示还在观察或关键字段未齐">评分状态</th>
-                  <th title="重点关注钱包的单独深度采集进程状态">深采</th>
+                  <th title="加入同步深采列表；列表内钱包共享同一个市场数据采集进程">深采</th>
                   <th title="综合排序分，用来在候选池内排序，不等同于收益">综合分</th>
                   <th title="近 7 天 BTC/ETH 5m 成交笔数">7天交易</th>
                   <th title="近 30 天 BTC/ETH 5m 成交笔数">30天交易</th>
@@ -758,17 +763,19 @@
     }
 
     function deepState(row) {
-      return row.deep_collection || { state: "none", running: false };
+      return row.deep_collection || { state: "none", running: false, listed: false };
     }
 
     function deepLabel(state) {
       if (state.running) return `深采中 ${state.pid ? `pid=${state.pid}` : ""}`.trim();
       if (state.state === "stale") return "失联";
+      if (state.listed) return "已在同步深采列表";
       return "未深采";
     }
 
     function deepActionLabel(state) {
-      return state.running ? "停" : "深";
+      if (state.running || state.listed) return "移";
+      return "采";
     }
 
     async function load() {
@@ -839,8 +846,9 @@
         const subLine = row.name ? row.wallet_short : "";
         const watchlisted = Boolean(row.watchlisted);
         const deep = deepState(row);
+        const deepEnabled = deep.running || deep.listed;
         const deepButton = watchlisted
-          ? `<button class="icon-button deep-button ${deep.running ? "active" : ""}" data-deep-wallet="${row.wallet}" data-deep-action="${deep.running ? "stop" : "start"}" title="${deepLabel(deep)}">${deepActionLabel(deep)}</button>`
+          ? `<button class="icon-button deep-button ${deep.running ? "active" : ""} ${deep.listed ? "listed" : ""}" data-deep-wallet="${row.wallet}" data-deep-action="${deepEnabled ? "stop" : "start"}" title="${deepEnabled ? "移出同步深采列表" : "加入同步深采列表"} · ${deepLabel(deep)}">${deepActionLabel(deep)}</button>`
           : `<span class="deep-pill">-</span>`;
         return `<tr data-wallet="${row.wallet}">
           <td class="watch-cell">
@@ -925,12 +933,12 @@
       ];
       $("walletDetail").innerHTML = `
         <div class="kv">${kv.map(([k, v]) => `<div><div class="subtle">${k}</div><strong>${v}</strong></div>`).join("")}</div>
-        ${detail.watchlisted ? `<div class="actions"><button id="exportWalletBtn" class="button" type="button">导出深采包</button><button id="deepWalletBtn" class="button deep-button ${deep.running ? "active" : ""}" type="button" title="${deepLabel(deep)}">${deep.running ? "停止深采" : "开始深采"}</button><span class="deep-pill ${deep.state || "none"}">${deepLabel(deep)}</span><span id="exportStatus" class="subtle"></span></div>` : ""}
+        ${detail.watchlisted ? `<div class="actions"><button id="exportWalletBtn" class="button" type="button">导出深采包</button><button id="deepWalletBtn" class="button deep-button ${deep.running ? "active" : ""} ${deep.listed ? "listed" : ""}" type="button" title="${deepLabel(deep)}">${(deep.running || deep.listed) ? "移出同步深采" : "加入同步深采"}</button><span class="deep-pill ${deep.state || "none"}">${deepLabel(deep)}</span><span id="exportStatus" class="subtle"></span></div>` : ""}
         <div class="subtle">${reasonText(detail)}</div>`;
       const exportButton = $("exportWalletBtn");
       if (exportButton) exportButton.addEventListener("click", () => exportWallet(detail.wallet));
       const deepButton = $("deepWalletBtn");
-      if (deepButton) deepButton.addEventListener("click", () => setDeepCollection(detail.wallet, deep.running ? "stop" : "start").catch(() => alert("深采更新失败")));
+      if (deepButton) deepButton.addEventListener("click", () => setDeepCollection(detail.wallet, (deep.running || deep.listed) ? "stop" : "start").catch(() => alert("深采更新失败")));
       openWalletModal();
     }
 

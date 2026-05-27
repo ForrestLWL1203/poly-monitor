@@ -8,14 +8,18 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from poly_monitor.deep_collection import (
+    MultiWalletDeepCollector,
+    MultiWalletDeepCollectorConfig,
     WalletDeepCollector,
     WalletDeepCollectorConfig,
     collector_status,
+    ensure_multi_collector,
     l3_book_summary,
     process_cmdline,
     process_matches_wallet,
-    start_collector,
+    read_deep_wallets,
     stop_collector,
+    write_deep_wallets,
     write_status,
 )
 from poly_monitor.market import MarketWindow
@@ -26,6 +30,9 @@ class FakeFeed:
 
     def latest_age_sec(self):
         return 0.25
+
+    def return_bps(self, _seconds):
+        return 0.0
 
 
 class FakeHub:
@@ -39,10 +46,42 @@ class FakeStream:
             return [(0.51, 10), (0.5, 20), (0.49, 30), (0.48, 40)], [(0.52, 11), (0.53, 21), (0.54, 31), (0.55, 41)], 20
         return [(0.47, 12), (0.46, 22), (0.45, 32), (0.44, 42)], [(0.48, 13), (0.49, 23), (0.5, 33), (0.51, 43)], 30
 
+    def diagnostics(self, *, reset_counts=False):
+        return {"connected": True, "reset_counts": reset_counts}
+
 
 class FakeAsyncClient:
     async def fetch_user_activity(self, *args, **kwargs):
         raise TimeoutError("activity timeout")
+
+    async def close(self):
+        pass
+
+
+class FakeMultiWalletClient:
+    def __init__(self):
+        self.calls = []
+
+    async def fetch_user_activity(self, wallet, *args, **kwargs):
+        self.calls.append((wallet, kwargs))
+        return [
+            {
+                "type": "TRADE",
+                "timestamp": 1770000010,
+                "slug": "btc-updown-5m-1770000000",
+                "eventSlug": "btc-updown-5m-1770000000",
+                "conditionId": "0xcond",
+                "proxyWallet": wallet,
+                "side": "BUY",
+                "outcome": "Up",
+                "outcomeIndex": 0,
+                "price": 0.5,
+                "size": 10,
+                "usdcSize": 5,
+                "transactionHash": f"0x{wallet[-4:]}",
+                "id": f"fill-{wallet[-4:]}",
+            }
+        ]
 
     async def close(self):
         pass
@@ -115,50 +154,14 @@ class DeepCollectionTests(unittest.TestCase):
         with patch("poly_monitor.deep_collection.process_cmdline", return_value=f"python scripts/run_wallet_deep_collector.py --wallet {wallet}"):
             self.assertTrue(process_matches_wallet(123, wallet))
 
-    def test_start_collector_is_idempotent_when_existing_process_is_healthy(self):
+    def test_process_matches_wallet_accepts_multi_wallet_collector_args(self):
         wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
-        with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp)
-            write_status(
-                data_dir,
-                wallet,
-                {
-                    "wallet": wallet,
-                    "pid": 123,
-                    "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "last_heartbeat_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                },
-            )
-            with patch("poly_monitor.deep_collection.process_cmdline", return_value=f"python scripts/run_wallet_deep_collector.py --wallet {wallet}"), patch(
-                "poly_monitor.deep_collection.subprocess.Popen"
-            ) as popen:
-                payload = start_collector(data_dir, wallet)
+        other = "0x1111111111111111111111111111111111111111"
 
-        self.assertTrue(payload["already_running"])
-        self.assertEqual(popen.call_count, 0)
-
-    def test_start_collector_rejects_when_max_active_collectors_reached(self):
-        target = "0xabcdef1234567890abcdef1234567890abcdef12"
-        active = "0x1111111111111111111111111111111111111111"
-        now = dt.datetime.now(dt.timezone.utc).isoformat()
-        with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp)
-            write_status(
-                data_dir,
-                active,
-                {
-                    "wallet": active,
-                    "pid": 123,
-                    "started_at": now,
-                    "last_heartbeat_at": now,
-                },
-            )
-            with patch("poly_monitor.deep_collection.process_cmdline", return_value=f"python scripts/run_wallet_deep_collector.py --wallet {active}"), patch("poly_monitor.deep_collection.subprocess.Popen") as popen:
-                payload = start_collector(data_dir, target, max_active_collectors=1)
-
-        self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error"], "too_many_collectors")
-        popen.assert_not_called()
+        with patch("poly_monitor.deep_collection.process_cmdline", return_value=f"python scripts/run_multi_wallet_deep_collector.py --wallet {other} --wallet {wallet}"):
+            self.assertTrue(process_matches_wallet(123, wallet))
+        with patch("poly_monitor.deep_collection.process_cmdline", return_value=f"python scripts/run_multi_wallet_deep_collector.py --wallets {other},{wallet}"):
+            self.assertTrue(process_matches_wallet(123, wallet))
 
     def test_stop_collector_kills_only_matching_wallet_process(self):
         wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
@@ -181,6 +184,44 @@ class DeepCollectionTests(unittest.TestCase):
 
         kill.assert_any_call(123, signal.SIGTERM)
         self.assertTrue(payload["ok"])
+
+    def test_stop_collector_does_not_kill_multi_wallet_process(self):
+        wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            write_status(
+                data_dir,
+                wallet,
+                {
+                    "wallet": wallet,
+                    "pid": 123,
+                    "collector_mode": "multi_wallet",
+                    "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "last_heartbeat_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                },
+            )
+            with patch("poly_monitor.deep_collection.os.kill") as kill:
+                payload = stop_collector(data_dir, wallet)
+
+        kill.assert_not_called()
+        self.assertTrue(payload["skipped_multi_wallet"])
+
+    def test_ensure_multi_collector_merges_wallets_without_dropping_existing_list(self):
+        existing = "0x1111111111111111111111111111111111111111"
+        added = "0x2222222222222222222222222222222222222222"
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            write_deep_wallets(data_dir, [existing])
+            with patch("poly_monitor.deep_collection.subprocess.Popen") as popen, patch(
+                "poly_monitor.deep_collection.multi_collector_status",
+                return_value={"running": True, "state": "running", "wallets": [existing], "wallet_count": 1},
+            ):
+                payload = ensure_multi_collector(data_dir, [added])
+            wallets = read_deep_wallets(data_dir)
+
+        popen.assert_not_called()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(wallets, [existing, added])
 
     def test_sample_row_stores_l3_books_and_reference_price(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,6 +304,51 @@ class DeepCollectionTests(unittest.TestCase):
         self.assertEqual(status["status"], "running")
         self.assertEqual(status["last_error"]["stage"], "poll_activity")
         self.assertIn("activity timeout", status["last_error"]["message"])
+
+    def test_multi_wallet_collector_shares_market_samples_and_separates_activity(self):
+        window = MarketWindow(
+            symbol="BTC",
+            slug="btc-updown-5m-1770000000",
+            condition_id="0xcond",
+            question="",
+            up_token="up",
+            down_token="down",
+            start_time=dt.datetime.fromtimestamp(1770000000, tz=dt.timezone.utc),
+            end_time=dt.datetime.fromtimestamp(1770000300, tz=dt.timezone.utc),
+        )
+        wallet_a = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        wallet_b = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = MultiWalletDeepCollector(
+                MultiWalletDeepCollectorConfig(
+                    wallets=(wallet_a, wallet_b),
+                    data_dir=Path(tmp),
+                    symbols=("BTC",),
+                    sample_sec=0.0,
+                    activity_poll_sec=0.0,
+                )
+            )
+            collector.windows = {window.slug: window}
+            collector.stream = FakeStream()
+            collector.price_hub = FakeHub()
+            collector.data_api = FakeMultiWalletClient()
+            try:
+                collector._sample_if_due()
+                asyncio.run(collector._poll_activity_if_due())
+                samples = collector.store.market_state_samples()
+                activity_a = collector.store.wallet_activity_events(wallet_a)
+                activity_b = collector.store.wallet_activity_events(wallet_b)
+                contexts_a = collector.store.wallet_trade_contexts(wallet_a)
+                contexts_b = collector.store.wallet_trade_contexts(wallet_b)
+            finally:
+                collector.store.close()
+
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0]["sample_reason"], "multi_wallet_deep_collector")
+        self.assertEqual(len(activity_a), 1)
+        self.assertEqual(len(activity_b), 1)
+        self.assertEqual(len(contexts_a), 1)
+        self.assertEqual(len(contexts_b), 1)
 
 
 if __name__ == "__main__":

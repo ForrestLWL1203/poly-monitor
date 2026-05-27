@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from poly_monitor.strategy_live import LivePaperEnvironment
 from poly_monitor.strategy_runner import StrategyRunner, StrategyRunnerConfig
 from poly_monitor.strategy_runtime import PaperExecutionAdapter, RejectingLiveExecutionAdapter, strategy_from_name
+from poly_monitor.strategies import STRATEGY_CHOICES
 
 
 def _parse_checkpoints(value: str) -> tuple[int, ...]:
@@ -31,38 +32,39 @@ def _parse_symbols(value: str) -> tuple[str, ...]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run an independent live paper strategy plugin.")
-    parser.add_argument("--strategy", choices=("d950_path_v0", "wallet_path_v0", "wallet_path", "parity_terminal_bias_v0"), default="d950_path_v0")
+    parser.add_argument("--strategy", choices=STRATEGY_CHOICES, default="d950_terminal_bias_v0")
     parser.add_argument("--wallet", default="strategy")
     parser.add_argument("--symbols", type=_parse_symbols, default=("BTC",))
     parser.add_argument("--mode", choices=("paper", "live"), default="paper")
-    parser.add_argument("--jsonl", type=Path, default=Path("data/paper/d950_path_v0/run.jsonl"))
+    parser.add_argument("--jsonl", type=Path)
     parser.add_argument("--seconds", type=float)
     parser.add_argument("--poll-sec", type=float, default=1.0)
-    parser.add_argument("--notional", type=float, default=25.0)
-    parser.add_argument("--bias-threshold", type=float, default=25.0)
-    parser.add_argument("--max-price", type=float, default=0.95)
+    parser.add_argument("--notional", type=float)
+    parser.add_argument("--bias-threshold", type=float)
+    parser.add_argument("--max-price", type=float)
     parser.add_argument("--checkpoints", type=_parse_checkpoints)
     parser.add_argument("--min-reference-delta", type=float, default=0.0)
-    parser.add_argument("--target-pair-notional", type=float, default=25.0)
+    parser.add_argument("--target-pair-notional", type=float)
     parser.add_argument("--target-pair-shares", type=float, help="Per-side target shares by window end; overrides --target-pair-notional for wallet_path_v0")
-    parser.add_argument("--max-pair-cost", type=float, default=0.99)
-    parser.add_argument("--max-unpaired-price", type=float, default=0.6)
-    parser.add_argument("--max-inventory-imbalance-ratio", type=float, default=0.05)
-    parser.add_argument("--min-order-usdc", type=float, default=1.0)
-    parser.add_argument("--execution-style", choices=("maker", "taker"), default="maker")
-    parser.add_argument("--terminal-bias-start-sec", type=int, default=180)
-    parser.add_argument("--terminal-strong-start-sec", type=int, default=240)
-    parser.add_argument("--terminal-max-price", type=float, default=0.95)
-    parser.add_argument("--bias-score-threshold", type=int, default=3)
-    parser.add_argument("--min-reference-move-bps", type=float, default=1.0)
-    parser.add_argument("--min-recent-move-bps", type=float, default=0.5)
-    parser.add_argument("--terminal-favorite-bid", type=float, default=0.85)
-    parser.add_argument("--terminal-favorite-mid", type=float, default=0.80)
+    parser.add_argument("--max-pair-cost", type=float)
+    parser.add_argument("--max-unpaired-price", type=float)
+    parser.add_argument("--max-inventory-imbalance-ratio", type=float)
+    parser.add_argument("--min-order-usdc", type=float)
+    parser.add_argument("--execution-style", choices=("maker", "taker"))
+    parser.add_argument("--terminal-bias-start-sec", type=int)
+    parser.add_argument("--terminal-strong-start-sec", type=int)
+    parser.add_argument("--terminal-max-price", type=float)
+    parser.add_argument("--bias-score-threshold", type=int)
+    parser.add_argument("--min-reference-move-bps", type=float)
+    parser.add_argument("--min-recent-move-bps", type=float)
+    parser.add_argument("--terminal-favorite-bid", type=float)
+    parser.add_argument("--terminal-favorite-mid", type=float)
     return parser
 
 
 async def async_main() -> int:
     args = build_parser().parse_args()
+    output_path = args.jsonl or Path("data") / "paper" / args.strategy / "run.jsonl"
     strategy = strategy_from_name(
         args.strategy,
         wallet=args.wallet,
@@ -89,7 +91,7 @@ async def async_main() -> int:
     )
     adapter = RejectingLiveExecutionAdapter() if args.mode == "live" else PaperExecutionAdapter()
     runner = StrategyRunner(
-        StrategyRunnerConfig(output_path=args.jsonl, mode=args.mode),
+        StrategyRunnerConfig(output_path=output_path, mode=args.mode),
         strategy=strategy,
         execution_adapter=adapter,
     )

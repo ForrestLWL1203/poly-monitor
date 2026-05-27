@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from poly_monitor.strategy_backtest import DeepExportBacktestEnvironment, PendingMakerReplayConfig, run_strategy_backtest, run_strategy_maker_replay_backtest
 from poly_monitor.strategy_runtime import PaperExecutionAdapter, strategy_from_name
+from poly_monitor.strategies import STRATEGY_CHOICES
 
 
 def _parse_checkpoints(value: str) -> tuple[int, ...]:
@@ -26,7 +27,7 @@ def main() -> int:
     parser.add_argument("--zip", required=True, type=Path, help="Path to bundle.complete-windows.zip")
     parser.add_argument("--wallet", required=True, help="Target wallet address")
     parser.add_argument("--out", type=Path, help="Output JSON path")
-    parser.add_argument("--strategy", choices=("wallet_path_v0", "wallet_path", "d950_path_v0", "parity_terminal_bias_v0"), default="wallet_path_v0")
+    parser.add_argument("--strategy", choices=STRATEGY_CHOICES, default="wallet_path_v0")
     parser.add_argument("--notional", type=float, default=25.0, help="Paper notional per intent")
     parser.add_argument("--bias-threshold", type=float, default=25.0, help="Minimum wallet net Up-Down flow to trigger")
     parser.add_argument("--max-price", type=float, default=0.95, help="Maximum acceptable simulated buy price")

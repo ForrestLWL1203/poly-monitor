@@ -32,20 +32,43 @@ The strategy runtime is separate from the observer. It discovers live crypto 5m
 windows, subscribes to CLOB market WS depth, samples Polymarket Chainlink
 reference prices, and feeds normalized snapshots into a pluggable strategy.
 
+## Project Structure
+
+- `poly_monitor/observer.py` and `scripts/run_crypto_wallet_observer.py`: read-only wallet and market monitoring.
+- `poly_monitor/strategy_live.py`, `poly_monitor/strategy_runner.py`, `poly_monitor/strategy_backtest.py`, and `poly_monitor/strategy_runtime.py`: shared live-paper/backtest runtime, snapshot types, execution adapters, and replay plumbing.
+- `poly_monitor/strategies/`: pluggable paper strategies. Strategies consume `StrategySnapshot` plus `StrategyHistory` and return `TradeIntent`; they must not read observer SQLite, dashboard state, wallet exports, or account secrets directly.
+- `scripts/run_strategy_paper.py`: live paper runner for any registered strategy.
+- `scripts/run_strategy_backtest.py`: deep-export backtest runner for any registered strategy.
+- `scripts/run_dashboard.py`: read-only dashboard.
+
+## Paper Strategies
+
+Registered strategies are named by address tag and behavior so multiple paper
+experiments do not blur together:
+
+- `x32_pair_cost_inventory_v0`: 0x32 / KimchiJuSaeYo-style two-sided pair-cost
+  inventory. Defaults to maker-style small orders, 100 target shares per side,
+  `max_pair_cost=0.995`, rebalance after 180 seconds, and no new inventory after
+  240 seconds.
+- `d950_terminal_bias_v0`: renamed D950 terminal/path bias strategy. The legacy
+  `d950_path_v0` name remains accepted as an alias.
+- `wallet_path_v0` / `wallet_path`: generic pair-cost inventory scaffold.
+- `parity_terminal_bias_v0`: parity inventory with terminal bias overlay.
+
 ```bash
 python3 scripts/run_strategy_paper.py \
-  --strategy d950_path_v0 \
+  --strategy x32_pair_cost_inventory_v0 \
   --mode paper \
-  --jsonl data/paper/d950_path_v0/run.jsonl
+  --symbols BTC,ETH
 ```
 
 Deep wallet export backtests use the same strategy interface:
 
 ```bash
 python3 scripts/run_strategy_backtest.py \
-  --strategy d950_path_v0 \
+  --strategy x32_pair_cost_inventory_v0 \
   --zip data/exports/<wallet>/<timestamp>/bundle.zip \
-  --out data/backtests/d950_path_v0.json
+  --out data/backtests/x32_pair_cost_inventory_v0.json
 ```
 
 `wallet_path_v0` is an independent strategy distilled from the observed wallet's

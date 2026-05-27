@@ -70,7 +70,7 @@ class DeepExportBacktestEnvironment:
         self.zip_path = Path(zip_path)
         with zipfile.ZipFile(self.zip_path) as bundle:
             self.activity_rows = _load_jsonl_from_zip(bundle, "wallet_activity.jsonl")
-            self.market_trade_rows = _load_jsonl_from_zip(bundle, "market_trades.jsonl")
+            self.market_trade_rows = _load_market_trade_rows(bundle)
             self.market_state_rows = _load_jsonl_from_zip(bundle, "deep_collection/market_state_samples.jsonl")
             self.pnl_rows = _load_jsonl_from_zip(bundle, "wallet_market_pnl.jsonl")
         self.snapshots = [StrategySnapshot.from_market_state_sample(row) for row in self.market_state_rows]
@@ -88,6 +88,21 @@ class DeepExportBacktestEnvironment:
 
     def initial_history(self) -> StrategyHistory:
         return StrategyHistory(activity_rows=list(self.activity_rows), winning_sides=dict(self.winning_sides))
+
+
+def _load_market_trade_rows(bundle: zipfile.ZipFile) -> list[dict[str, Any]]:
+    rows = _load_jsonl_from_zip(bundle, "market_trades.jsonl")
+    seen = {(str(row.get("market_slug") or ""), str(row.get("tx_hash") or ""), str(row.get("fill_id") or "")) for row in rows}
+    for name in bundle.namelist():
+        if not name.startswith("markets/") or not name.endswith("/market_trades.jsonl"):
+            continue
+        for row in _load_jsonl_from_zip(bundle, name):
+            key = (str(row.get("market_slug") or ""), str(row.get("tx_hash") or ""), str(row.get("fill_id") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows
 
 
 def run_strategy_backtest(

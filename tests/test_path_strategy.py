@@ -16,11 +16,45 @@ from poly_monitor.path_strategy import (
     load_deep_export_for_path_strategy,
     replay_path_strategy,
 )
+from poly_monitor.strategies.pair_cost_inventory import X32PairCostInventoryStrategy
 from poly_monitor.strategy_backtest import BacktestResult
 from poly_monitor.strategy_runtime import StrategyHistory, StrategySnapshot, TradeIntent
 
 
 class PathStrategyTests(unittest.TestCase):
+    def test_legacy_path_strategy_imports_remain_available(self):
+        self.assertEqual(WalletPathStrategy.strategy_name, "wallet_path_v0")
+        self.assertEqual(X32PairCostInventoryStrategy.strategy_name, "x32_pair_cost_inventory_v0")
+        self.assertTrue(issubclass(X32PairCostInventoryStrategy, WalletPathStrategy))
+
+    def test_x32_strategy_stops_new_inventory_after_terminal_stop(self):
+        strategy = X32PairCostInventoryStrategy(
+            PathStrategyConfig(
+                wallet="0x32",
+                checkpoints=(1,),
+                notional_usdc=5,
+                max_price=0.95,
+                target_pair_shares_per_side=100,
+                max_pair_cost=0.995,
+                min_order_usdc=1,
+                one_trade_per_market=False,
+            )
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "btc-updown-5m-1770000000",
+                "symbol": "BTC",
+                "sampled_ts": 1770000245,
+                "book_stale": 0,
+                "up_json": {"bid": 0.48, "ask": 0.49, "ask_depth_usdc": 100, "ask_targets": {"5": {"ok": True, "avg": 0.49, "filled_usdc": 5}}},
+                "down_json": {"bid": 0.49, "ask": 0.50, "ask_depth_usdc": 100, "ask_targets": {"5": {"ok": True, "avg": 0.50, "filled_usdc": 5}}},
+            }
+        )
+
+        intent = strategy.evaluate(snapshot, StrategyHistory(snapshots_by_market={snapshot.market_slug: [snapshot]}))
+
+        self.assertIsNone(intent)
+
     def test_wallet_path_builds_scaled_pair_inventory_without_wallet_activity(self):
         strategy = WalletPathStrategy(
             PathStrategyConfig(

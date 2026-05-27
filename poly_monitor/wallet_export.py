@@ -11,6 +11,8 @@ from typing import Any, Iterable
 from .deep_collection import read_status
 from .storage import json_dumps, utc_iso
 
+DEEP_SAMPLE_REASONS = {"deep_collector", "multi_wallet_deep_collector"}
+
 
 def _connect(data_dir: Path) -> sqlite3.Connection:
     path = data_dir / "state" / "observer.sqlite"
@@ -122,7 +124,7 @@ def _coverage_summary(
     settlement = metadata.get("settlement") if isinstance(metadata.get("settlement"), dict) else None
     settlement_complete = bool(settlement and settlement.get("completed") and settlement.get("winning_side"))
     has_redeem = any(str(row.get("activity_type") or "").upper() == "REDEEM" for row in wallet_activity)
-    deep_samples = [row for row in samples if str(row.get("sample_reason") or "") == "deep_collector"]
+    deep_samples = [row for row in samples if str(row.get("sample_reason") or "") in DEEP_SAMPLE_REASONS]
     insufficient = (
         not watched
         or first_seen_delay is None
@@ -295,7 +297,7 @@ def export_watchlist_wallet(
             conn,
             f"""
             SELECT * FROM market_state_samples
-            WHERE sample_reason='deep_collector' AND market_slug IN ({placeholders}) {sample_filter}
+            WHERE sample_reason IN ('deep_collector','multi_wallet_deep_collector') AND market_slug IN ({placeholders}) {sample_filter}
             ORDER BY sampled_ts ASC, market_slug ASC
             """,
             (*slug_params, collector_started_iso) if collector_started_iso else slug_params,
