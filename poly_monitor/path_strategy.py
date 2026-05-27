@@ -14,6 +14,8 @@ from .strategy_runtime import (
     StrategyHistory,
     StrategySnapshot,
     TradeIntent,
+    _load_jsonl_from_zip,
+    winning_side_from_row,
 )
 
 
@@ -90,34 +92,16 @@ def _decode_json(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _load_jsonl(bundle: zipfile.ZipFile, name: str) -> list[dict[str, Any]]:
-    try:
-        raw = bundle.read(name).decode("utf-8")
-    except KeyError:
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
 def load_deep_export_for_path_strategy(zip_path: Path) -> DeepExportReplayInput:
     with zipfile.ZipFile(Path(zip_path)) as bundle:
-        pnl_rows = _load_jsonl(bundle, "wallet_market_pnl.jsonl")
+        pnl_rows = _load_jsonl_from_zip(bundle, "wallet_market_pnl.jsonl")
         return DeepExportReplayInput(
-            activity_rows=_load_jsonl(bundle, "wallet_activity.jsonl"),
-            market_state_samples=_load_jsonl(bundle, "deep_collection/market_state_samples.jsonl"),
+            activity_rows=_load_jsonl_from_zip(bundle, "wallet_activity.jsonl"),
+            market_state_samples=_load_jsonl_from_zip(bundle, "deep_collection/market_state_samples.jsonl"),
             winning_sides={
-                str(row.get("market_slug") or ""): str(row.get("winning_side") or row.get("winner") or row.get("resolved_outcome") or "").capitalize()
+                str(row.get("market_slug") or ""): winning_side_from_row(row)
                 for row in pnl_rows
-                if row.get("market_slug") and str(row.get("winning_side") or row.get("winner") or row.get("resolved_outcome") or "").lower() in {"up", "down"}
+                if row.get("market_slug") and winning_side_from_row(row)
             },
         )
 
@@ -207,18 +191,6 @@ def _fill_for_order(book: Any, order_notional: float) -> tuple[dict[str, Any] | 
     if ask > 0 and depth + 1e-9 >= order_notional:
         return {"ok": True, "avg": ask, "filled_usdc": round(order_notional, 6), "source": "best_ask_depth_estimate"}, ask
     return None, 0.0
-
-
-def _maker_quote_for_order(book: Any, order_notional: float) -> tuple[dict[str, Any] | None, float]:
-    bid = _safe_float(book.bid)
-    if bid <= 0:
-        return None, 0.0
-    return {
-        "ok": True,
-        "avg": bid,
-        "filled_usdc": round(order_notional, 6),
-        "source": "maker_quote_at_best_bid",
-    }, bid
 
 
 def _maker_quote_at_price(order_notional: float, quote_price: float, *, source: str) -> tuple[dict[str, Any] | None, float]:

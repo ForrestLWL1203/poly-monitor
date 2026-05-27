@@ -12,8 +12,8 @@ from .strategy_runtime import BookSnapshot, StrategySnapshot, utc_iso
 
 def _following_window(window: MarketWindow) -> MarketWindow | None:
     series = MarketSeries.from_symbol(window.symbol)
-    for offset in range(1, 5):
-        slug = series.epoch_to_slug(window.end_epoch + (offset - 1) * series.slug_step)
+    for offset in range(4):
+        slug = series.epoch_to_slug(window.end_epoch + offset * series.slug_step)
         raw = fetch_market_by_slug(slug)
         if raw is None or raw.get("closed"):
             continue

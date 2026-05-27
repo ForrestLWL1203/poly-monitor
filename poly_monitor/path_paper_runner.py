@@ -90,8 +90,9 @@ class PathPaperRunner:
         self.data_source = data_source or SqliteStrategyDataSource(config.data_dir)
         self.adapter = execution_adapter or SettlementPaperExecutionAdapter(config.winning_sides)
         self.strategy = strategy
-        self._emitted_keys: set[tuple[str, int, str]] = set()
-        self._settled_keys: set[tuple[str, int, str]] = set()
+        self._emitted_keys: set[str] = set()
+        self._settled_keys: set[str] = set()
+        self._open_rows_by_key: dict[str, dict[str, Any]] = {}
         self.output_path = config.data_dir / "paper" / config.strategy_name / self.wallet / "executions.jsonl"
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self._load_existing_keys()
@@ -111,14 +112,19 @@ class PathPaperRunner:
                 continue
             intent = payload.get("intent") if isinstance(payload, dict) else None
             if isinstance(intent, dict):
-                self._emitted_keys.add(self._intent_key(intent))
+                key = self._intent_key(intent)
+                self._emitted_keys.add(key)
                 if payload.get("record_type") == "settlement":
-                    self._settled_keys.add(self._intent_key(intent))
+                    self._settled_keys.add(key)
+                else:
+                    execution = payload.get("execution") if isinstance(payload.get("execution"), dict) else {}
+                    if execution.get("status") == "paper_open":
+                        self._open_rows_by_key[key] = payload
 
-    def _intent_key(self, intent: Any) -> tuple[str, int, str]:
+    def _intent_key(self, intent: Any) -> str:
         if hasattr(intent, "market_slug"):
-            return (str(intent.market_slug), 0, "")
-        return (str(intent.get("market_slug") or ""), 0, "")
+            return str(intent.market_slug)
+        return str(intent.get("market_slug") or "")
 
     def _intent_from_dict(self, payload: dict[str, Any]) -> TradeIntent:
         return TradeIntent(
@@ -136,30 +142,14 @@ class PathPaperRunner:
         )
 
     def _settle_open_records(self, settlements: dict[str, str]) -> int:
-        if not self.output_path.exists() or not settlements:
+        if not self._open_rows_by_key or not settlements:
             return 0
-        rows: list[dict[str, Any]] = []
-        for line in self.output_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                rows.append(payload)
         written = 0
         with self.output_path.open("a", encoding="utf-8") as handle:
-            for row in rows:
-                if row.get("record_type") == "settlement":
-                    continue
-                execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
-                if execution.get("status") != "paper_open":
-                    continue
+            for key, row in list(self._open_rows_by_key.items()):
                 intent_payload = row.get("intent") if isinstance(row.get("intent"), dict) else None
                 if not intent_payload:
                     continue
-                key = self._intent_key(intent_payload)
                 if key in self._settled_keys:
                     continue
                 slug = str(intent_payload.get("market_slug") or "")
@@ -167,9 +157,11 @@ class PathPaperRunner:
                     continue
                 adapter = SettlementPaperExecutionAdapter({slug: settlements[slug]})
                 settled = adapter.submit(self._intent_from_dict(intent_payload))
+                # Keep the ledger append-only: consumers join execution and settlement rows by market key.
                 payload = {"recorded_at": utc_iso(), "record_type": "settlement", "intent": intent_payload, "execution": settled.to_dict()}
                 handle.write(_json_dumps(payload) + "\n")
                 self._settled_keys.add(key)
+                self._open_rows_by_key.pop(key, None)
                 written += 1
         return written
 
@@ -245,6 +237,10 @@ class PathPaperRunner:
                     "target_wallet_context": self._target_wallet_context(intent, activity),
                 }
                 handle.write(_json_dumps(payload) + "\n")
+                if execution.status == "paper_open":
+                    self._open_rows_by_key[key] = payload
+                elif execution.status == "paper_settled":
+                    self._settled_keys.add(key)
                 written += 1
         return {"intents": written, "settlements": settled, "activity_rows": len(activity), "sample_rows": len(samples), "output_path": str(self.output_path)}
 

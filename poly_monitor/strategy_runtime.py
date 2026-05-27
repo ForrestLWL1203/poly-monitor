@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import zipfile
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
@@ -30,6 +31,42 @@ def _decode_json(value: Any) -> dict[str, Any]:
             return {}
         return payload if isinstance(payload, dict) else {}
     return {}
+
+
+def _coalesce(value: Any, default: Any) -> Any:
+    return default if value is None else value
+
+
+def _load_jsonl_from_zip(bundle: zipfile.ZipFile, name: str) -> list[dict[str, Any]]:
+    try:
+        raw = bundle.read(name).decode("utf-8")
+    except KeyError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def normalize_winning_side(value: Any) -> str:
+    side = str(value or "")
+    return side.capitalize() if side.lower() in {"up", "down"} else ""
+
+
+def winning_side_from_row(row: dict[str, Any]) -> str:
+    return normalize_winning_side(row.get("winning_side") or row.get("winner") or row.get("resolved_outcome"))
+
+
+def book_fill_source(features: dict[str, Any]) -> str:
+    book_fill = features.get("book_fill")
+    return str((book_fill or {}).get("source") or "") if isinstance(book_fill, dict) else ""
 
 
 def _window_start_from_slug(slug: str) -> int | None:
@@ -218,6 +255,12 @@ class PaperExecutionAdapter:
 
     def submit(self, intent: TradeIntent) -> ExecutionResult:
         self.submitted.append(intent)
+        if intent.intent.upper() != "BUY":
+            return ExecutionResult(
+                status="paper_rejected_unsupported_intent",
+                intent=intent,
+                detail={"error": "PaperExecutionAdapter only supports BUY intents"},
+            )
         winning_side = self.winning_sides.get(intent.market_slug)
         shares = intent.notional_usdc / intent.expected_price if intent.expected_price > 0 else 0.0
         base = {"filled_usdc": intent.notional_usdc, "avg_price": intent.expected_price, "shares": round(shares, 6)}
@@ -248,33 +291,33 @@ def strategy_from_name(name: str, **kwargs: Any) -> StrategyPlugin:
     if checkpoints is None:
         checkpoints = (1,) if normalized in {"wallet_path", "wallet_path_v0"} else (120, 180, 240)
     config = PathStrategyConfig(
-        wallet=str(kwargs.get("wallet") or normalized),
+        wallet=str(_coalesce(kwargs.get("wallet"), normalized)),
         checkpoints=tuple(checkpoints),
-        notional_usdc=float(kwargs.get("notional_usdc") or 25.0),
-        first_bias_min_usdc=float(kwargs.get("first_bias_min_usdc") or kwargs.get("bias_threshold") or 25.0),
-        max_price=float(kwargs.get("max_price") or 0.95),
-        target_pair_notional_usdc=float(kwargs.get("target_pair_notional_usdc") or 25.0),
+        notional_usdc=float(_coalesce(kwargs.get("notional_usdc"), 25.0)),
+        first_bias_min_usdc=float(_coalesce(kwargs.get("first_bias_min_usdc"), _coalesce(kwargs.get("bias_threshold"), 25.0))),
+        max_price=float(_coalesce(kwargs.get("max_price"), 0.95)),
+        target_pair_notional_usdc=float(_coalesce(kwargs.get("target_pair_notional_usdc"), 25.0)),
         target_pair_shares_per_side=(
             float(kwargs["target_pair_shares_per_side"])
             if kwargs.get("target_pair_shares_per_side") is not None
             else None
         ),
-        max_pair_cost=float(kwargs.get("max_pair_cost") or 0.99),
-        max_unpaired_price=float(kwargs.get("max_unpaired_price") or 0.6),
-        max_inventory_imbalance_ratio=float(kwargs.get("max_inventory_imbalance_ratio") or 0.05),
-        early_inventory_imbalance_ratio=float(kwargs.get("early_inventory_imbalance_ratio") or 0.30),
-        mid_inventory_imbalance_ratio=float(kwargs.get("mid_inventory_imbalance_ratio") or 0.15),
-        late_inventory_imbalance_ratio=float(kwargs.get("late_inventory_imbalance_ratio") or 0.08),
-        final_inventory_imbalance_ratio=float(kwargs.get("final_inventory_imbalance_ratio") or 0.03),
-        rebalance_start_sec=int(kwargs.get("rebalance_start_sec") or 240),
-        maker_rebalance_ticks=int(kwargs.get("maker_rebalance_ticks") or 1),
-        tick_size=float(kwargs.get("tick_size") or 0.01),
-        min_order_usdc=float(kwargs.get("min_order_usdc") or 1.0),
-        execution_style=str(kwargs.get("execution_style") or "maker"),
-        one_trade_per_market=bool(kwargs.get("one_trade_per_market", normalized == "d950_path_v0")),
+        max_pair_cost=float(_coalesce(kwargs.get("max_pair_cost"), 0.99)),
+        max_unpaired_price=float(_coalesce(kwargs.get("max_unpaired_price"), 0.6)),
+        max_inventory_imbalance_ratio=float(_coalesce(kwargs.get("max_inventory_imbalance_ratio"), 0.05)),
+        early_inventory_imbalance_ratio=float(_coalesce(kwargs.get("early_inventory_imbalance_ratio"), 0.30)),
+        mid_inventory_imbalance_ratio=float(_coalesce(kwargs.get("mid_inventory_imbalance_ratio"), 0.15)),
+        late_inventory_imbalance_ratio=float(_coalesce(kwargs.get("late_inventory_imbalance_ratio"), 0.08)),
+        final_inventory_imbalance_ratio=float(_coalesce(kwargs.get("final_inventory_imbalance_ratio"), 0.03)),
+        rebalance_start_sec=int(_coalesce(kwargs.get("rebalance_start_sec"), 240)),
+        maker_rebalance_ticks=int(_coalesce(kwargs.get("maker_rebalance_ticks"), 1)),
+        tick_size=float(_coalesce(kwargs.get("tick_size"), 0.01)),
+        min_order_usdc=float(_coalesce(kwargs.get("min_order_usdc"), 1.0)),
+        execution_style=str(_coalesce(kwargs.get("execution_style"), "maker")),
+        one_trade_per_market=bool(_coalesce(kwargs.get("one_trade_per_market"), normalized == "d950_path_v0")),
     )
     if normalized == "d950_path_v0":
-        return D950MarketPathStrategy(config, min_reference_delta=float(kwargs.get("min_reference_delta") or 0.0))
+        return D950MarketPathStrategy(config, min_reference_delta=float(_coalesce(kwargs.get("min_reference_delta"), 0.0)))
     if normalized in {"wallet_path", "wallet_path_v0"}:
         return WalletPathStrategy(config)
     raise ValueError(f"unknown strategy: {name}")

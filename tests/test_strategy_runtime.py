@@ -121,6 +121,24 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "live_rejected")
         self.assertIn("not implemented", result.detail["error"])
 
+    def test_paper_execution_rejects_non_buy_intents(self):
+        intent = TradeIntent(
+            strategy_name="demo",
+            market_slug="btc-updown-5m-1",
+            sampled_ts=1,
+            intent="SELL",
+            outcome="Up",
+            notional_usdc=5.0,
+            max_price=0.8,
+            expected_price=0.5,
+            reason="test",
+        )
+
+        result = PaperExecutionAdapter({"btc-updown-5m-1": "Up"}).submit(intent)
+
+        self.assertEqual(result.status, "paper_rejected_unsupported_intent")
+        self.assertNotIn("realized_pnl", result.detail)
+
     def test_deep_export_backtest_replays_strategy_with_standard_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             zip_path = Path(tmp) / "bundle.zip"
@@ -249,6 +267,25 @@ class StrategyFactoryTests(unittest.TestCase):
 
         self.assertEqual(strategy.config.checkpoints, (120, 180, 240))
         self.assertTrue(strategy.config.one_trade_per_market)
+
+    def test_factory_preserves_explicit_zero_values(self):
+        strategy = strategy_from_name(
+            "wallet_path_v0",
+            wallet="0xabc",
+            notional_usdc=0,
+            max_pair_cost=0,
+            max_inventory_imbalance_ratio=0,
+            maker_rebalance_ticks=0,
+            min_order_usdc=0,
+        )
+        d950 = strategy_from_name("d950_path_v0", wallet="strategy", min_reference_delta=0)
+
+        self.assertEqual(strategy.config.notional_usdc, 0)
+        self.assertEqual(strategy.config.max_pair_cost, 0)
+        self.assertEqual(strategy.config.max_inventory_imbalance_ratio, 0)
+        self.assertEqual(strategy.config.maker_rebalance_ticks, 0)
+        self.assertEqual(strategy.config.min_order_usdc, 0)
+        self.assertEqual(d950.min_reference_delta, 0)
 
 
 class StrategyRunnerTests(unittest.TestCase):

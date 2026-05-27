@@ -1,30 +1,22 @@
 from __future__ import annotations
 
-import json
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .strategy_runtime import ExecutionAdapter, ExecutionResult, PaperExecutionAdapter, StrategyHistory, StrategyPlugin, StrategySnapshot, TradeIntent
-
-
-def _load_jsonl(bundle: zipfile.ZipFile, name: str) -> list[dict[str, Any]]:
-    try:
-        raw = bundle.read(name).decode("utf-8")
-    except KeyError:
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
+from .strategy_runtime import (
+    ExecutionAdapter,
+    ExecutionResult,
+    PaperExecutionAdapter,
+    StrategyHistory,
+    StrategyPlugin,
+    StrategySnapshot,
+    TradeIntent,
+    _load_jsonl_from_zip,
+    book_fill_source,
+    winning_side_from_row,
+)
 
 
 @dataclass(frozen=True)
@@ -40,15 +32,15 @@ class DeepExportBacktestEnvironment:
     def __init__(self, zip_path: Path) -> None:
         self.zip_path = Path(zip_path)
         with zipfile.ZipFile(self.zip_path) as bundle:
-            self.activity_rows = _load_jsonl(bundle, "wallet_activity.jsonl")
-            self.market_trade_rows = _load_jsonl(bundle, "market_trades.jsonl")
-            self.market_state_rows = _load_jsonl(bundle, "deep_collection/market_state_samples.jsonl")
-            self.pnl_rows = _load_jsonl(bundle, "wallet_market_pnl.jsonl")
+            self.activity_rows = _load_jsonl_from_zip(bundle, "wallet_activity.jsonl")
+            self.market_trade_rows = _load_jsonl_from_zip(bundle, "market_trades.jsonl")
+            self.market_state_rows = _load_jsonl_from_zip(bundle, "deep_collection/market_state_samples.jsonl")
+            self.pnl_rows = _load_jsonl_from_zip(bundle, "wallet_market_pnl.jsonl")
         self.snapshots = [StrategySnapshot.from_market_state_sample(row) for row in self.market_state_rows]
         self.winning_sides = {
-            str(row.get("market_slug") or ""): str(row.get("winning_side") or row.get("winner") or row.get("resolved_outcome") or "").capitalize()
+            str(row.get("market_slug") or ""): winning_side_from_row(row)
             for row in self.pnl_rows
-            if row.get("market_slug") and str(row.get("winning_side") or row.get("winner") or row.get("resolved_outcome") or "").lower() in {"up", "down"}
+            if row.get("market_slug") and winning_side_from_row(row)
         }
 
     def iter_snapshots(self):
@@ -148,6 +140,12 @@ class PendingMakerReplay:
     expired: int = 0
 
     def submit(self, intent: TradeIntent) -> ExecutionResult:
+        if intent.intent.upper() != "BUY":
+            return ExecutionResult(
+                status="maker_rejected_unsupported_intent",
+                intent=intent,
+                detail={"error": "PendingMakerReplay only supports BUY intents"},
+            )
         same_market = [order for order in self.pending if order.intent.market_slug == intent.market_slug]
         if len(same_market) >= self.config.max_open_orders_per_market:
             return ExecutionResult(status="maker_rejected_open_order_limit", intent=intent, detail={"open_orders": len(same_market)})
@@ -167,7 +165,7 @@ class PendingMakerReplay:
         )
 
     def _ttl_for_intent(self, intent: TradeIntent) -> int:
-        source = str(intent.features.get("book_fill", {}).get("source") if isinstance(intent.features.get("book_fill"), dict) else "")
+        source = book_fill_source(intent.features)
         if source == "maker_rebalance_quote":
             return max(1, int(round(self.config.order_ttl_sec * self.config.rebalance_ttl_multiplier)))
         return max(1, int(round(self.config.order_ttl_sec * self.config.excess_ttl_multiplier))) if intent.features.get("deficit_side") not in {None, intent.outcome} else int(self.config.order_ttl_sec)
@@ -222,7 +220,7 @@ class PendingMakerReplay:
                 continue
             if price > intent.expected_price + 1e-9:
                 continue
-            source = str(intent.features.get("book_fill", {}).get("source") if isinstance(intent.features.get("book_fill"), dict) else "")
+            source = book_fill_source(intent.features)
             fill_rate = max(0.0, self.config.fill_rate)
             if source == "maker_rebalance_quote":
                 fill_rate *= max(0.0, self.config.rebalance_fill_multiplier)
