@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import json
 import zipfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+
+from .strategy_runtime import (
+    ExecutionAdapter,
+    ExecutionResult,
+    PaperExecutionAdapter,
+    RecordingExecutionAdapter,
+    StrategyHistory,
+    StrategySnapshot,
+    TradeIntent,
+)
 
 
 @dataclass(frozen=True)
@@ -14,78 +24,25 @@ class PathStrategyConfig:
     notional_usdc: float = 25.0
     first_bias_min_usdc: float = 25.0
     max_price: float = 0.95
+    wallet_exposure_scale: float = 0.01
+    target_pair_notional_usdc: float = 25.0
+    target_pair_shares_per_side: float | None = None
+    max_pair_cost: float = 0.99
+    max_unpaired_price: float = 0.6
+    max_inventory_imbalance_ratio: float = 0.05
+    early_inventory_imbalance_ratio: float = 0.30
+    mid_inventory_imbalance_ratio: float = 0.15
+    late_inventory_imbalance_ratio: float = 0.08
+    final_inventory_imbalance_ratio: float = 0.03
+    rebalance_start_sec: int = 240
+    maker_rebalance_ticks: int = 1
+    tick_size: float = 0.01
+    min_order_usdc: float = 1.0
+    execution_style: str = "maker"
     one_trade_per_market: bool = True
 
 
-@dataclass(frozen=True)
-class TradeIntent:
-    wallet: str
-    market_slug: str
-    sampled_ts: int
-    checkpoint_sec: int
-    intent: str
-    outcome: str
-    notional_usdc: float
-    max_price: float
-    expected_price: float
-    reason: str
-    features: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class ExecutionResult:
-    status: str
-    intent: TradeIntent
-    detail: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"status": self.status, "intent": self.intent.to_dict(), "detail": self.detail}
-
-
-class ExecutionAdapter(Protocol):
-    def submit(self, intent: TradeIntent) -> ExecutionResult:
-        ...
-
-
-class RecordingExecutionAdapter:
-    def __init__(self) -> None:
-        self.submitted: list[TradeIntent] = []
-
-    def submit(self, intent: TradeIntent) -> ExecutionResult:
-        self.submitted.append(intent)
-        return ExecutionResult(status="recorded", intent=intent)
-
-
-class SettlementPaperExecutionAdapter:
-    def __init__(self, winning_sides: dict[str, str]) -> None:
-        self.winning_sides = {str(slug): str(side).capitalize() for slug, side in winning_sides.items()}
-        self.submitted: list[TradeIntent] = []
-
-    def submit(self, intent: TradeIntent) -> ExecutionResult:
-        self.submitted.append(intent)
-        winning_side = self.winning_sides.get(intent.market_slug)
-        shares = intent.notional_usdc / intent.expected_price if intent.expected_price > 0 else 0.0
-        if not winning_side:
-            return ExecutionResult(
-                status="paper_open",
-                intent=intent,
-                detail={"filled_usdc": intent.notional_usdc, "avg_price": intent.expected_price, "shares": round(shares, 6)},
-            )
-        realized_pnl = shares - intent.notional_usdc if winning_side == intent.outcome else -intent.notional_usdc
-        return ExecutionResult(
-            status="paper_settled",
-            intent=intent,
-            detail={
-                "filled_usdc": intent.notional_usdc,
-                "avg_price": intent.expected_price,
-                "shares": round(shares, 6),
-                "winning_side": winning_side,
-                "realized_pnl": round(realized_pnl, 6),
-            },
-        )
+SettlementPaperExecutionAdapter = PaperExecutionAdapter
 
 
 @dataclass(frozen=True)
@@ -209,128 +166,302 @@ def _book_for_outcome(sample: dict[str, Any], outcome: str) -> dict[str, Any]:
     return _decode_json(sample.get(key))
 
 
+def _signed_shares(row: dict[str, Any]) -> float:
+    side = str(row.get("side") or "BUY").upper()
+    shares = _safe_float(row.get("size"))
+    return -shares if side == "SELL" else shares
+
+
+def _paper_inventory(history: StrategyHistory, market_slug: str, outcome: str) -> tuple[float, float]:
+    shares = 0.0
+    cost = 0.0
+    for intent in [*history.emitted_intents, *history.pending_intents]:
+        if intent.market_slug != market_slug or intent.outcome != outcome or intent.intent != "BUY":
+            continue
+        if intent.expected_price > 0:
+            shares += intent.notional_usdc / intent.expected_price
+            cost += intent.notional_usdc
+    return shares, cost
+
+
+def _avg_price(cost: float, shares: float) -> float | None:
+    return cost / shares if shares > 0 else None
+
+
+def _imbalance_ratio(up_shares: float, down_shares: float) -> float:
+    total = up_shares + down_shares
+    return abs(up_shares - down_shares) / total if total > 0 else 0.0
+
+
+def _fill_for_order(book: Any, order_notional: float) -> tuple[dict[str, Any] | None, float]:
+    target_key = f"{order_notional:g}"
+    fill = book.ask_targets.get(target_key)
+    if isinstance(fill, dict) and fill.get("ok"):
+        return fill, _safe_float(fill.get("avg"))
+    rounded_key = f"{round(order_notional, 6):g}"
+    fill = book.ask_targets.get(rounded_key)
+    if isinstance(fill, dict) and fill.get("ok"):
+        return fill, _safe_float(fill.get("avg"))
+    ask = _safe_float(book.ask)
+    depth = _safe_float(book.ask_depth_usdc, default=float("inf"))
+    if ask > 0 and depth + 1e-9 >= order_notional:
+        return {"ok": True, "avg": ask, "filled_usdc": round(order_notional, 6), "source": "best_ask_depth_estimate"}, ask
+    return None, 0.0
+
+
+def _maker_quote_for_order(book: Any, order_notional: float) -> tuple[dict[str, Any] | None, float]:
+    bid = _safe_float(book.bid)
+    if bid <= 0:
+        return None, 0.0
+    return {
+        "ok": True,
+        "avg": bid,
+        "filled_usdc": round(order_notional, 6),
+        "source": "maker_quote_at_best_bid",
+    }, bid
+
+
+def _maker_quote_at_price(order_notional: float, quote_price: float, *, source: str) -> tuple[dict[str, Any] | None, float]:
+    if quote_price <= 0:
+        return None, 0.0
+    return {
+        "ok": True,
+        "avg": round(quote_price, 6),
+        "filled_usdc": round(order_notional, 6),
+        "source": source,
+    }, quote_price
+
+
+def _dynamic_imbalance_limit(config: PathStrategyConfig, elapsed_sec: int) -> float:
+    if elapsed_sec >= int(config.rebalance_start_sec):
+        return float(config.final_inventory_imbalance_ratio)
+    if elapsed_sec >= 180:
+        return float(config.late_inventory_imbalance_ratio)
+    if elapsed_sec >= 60:
+        return float(config.mid_inventory_imbalance_ratio)
+    return float(config.early_inventory_imbalance_ratio)
+
+
 class WalletPathStrategy:
+    strategy_name = "wallet_path_v0"
+    one_trade_per_market = False
+
     def __init__(self, config: PathStrategyConfig) -> None:
         self.config = config
 
-    def evaluate_snapshot(self, sample: dict[str, Any], activity_rows: list[dict[str, Any]]) -> TradeIntent | None:
-        slug = str(sample.get("market_slug") or "")
-        sampled_ts = _safe_int(sample.get("sampled_ts"))
-        elapsed = _elapsed_sec(slug, sampled_ts)
-        if elapsed is None or sample.get("book_stale"):
+    def evaluate(self, snapshot: StrategySnapshot, history: StrategyHistory) -> TradeIntent | None:
+        if snapshot.book_stale:
             return None
-        checkpoint = _checkpoint_for_elapsed(elapsed, self.config.checkpoints)
+        checkpoint = _checkpoint_for_elapsed(snapshot.elapsed_sec, self.config.checkpoints)
         if checkpoint is None:
             return None
-        rows = [
-            row
-            for row in activity_rows
-            if str(row.get("wallet") or "").lower() == self.config.wallet.lower()
-            and str(row.get("market_slug") or "") == slug
-            and str(row.get("activity_type") or "").upper() == "TRADE"
-            and _safe_int(row.get("exchange_ts")) <= sampled_ts
-        ]
-        net_usdc = round(sum(_signed_flow(row) for row in rows), 6)
-        if abs(net_usdc) < self.config.first_bias_min_usdc:
+        up_ask = _safe_float(snapshot.up.ask)
+        down_ask = _safe_float(snapshot.down.ask)
+        if up_ask <= 0 or down_ask <= 0 or up_ask > self.config.max_price or down_ask > self.config.max_price:
             return None
-        outcome = _net_side(net_usdc)
-        if outcome is None:
+        up_bid = _safe_float(snapshot.up.bid)
+        down_bid = _safe_float(snapshot.down.bid)
+        top_pair_cost = round(up_ask + down_ask, 6)
+        maker_pair_cost = round(up_bid + down_bid, 6) if up_bid > 0 and down_bid > 0 else None
+        progress = min(1.0, max(0.0, snapshot.elapsed_sec / 300.0))
+        if self.config.target_pair_shares_per_side is not None and self.config.target_pair_shares_per_side > 0:
+            target_pair_shares = float(self.config.target_pair_shares_per_side) * progress
+            sizing_mode = "shares_per_side"
+        else:
+            target_pair_shares = (float(self.config.target_pair_notional_usdc) * progress) / top_pair_cost
+            sizing_mode = "notional_pair"
+        target_shares = {
+            "Up": target_pair_shares,
+            "Down": target_pair_shares,
+        }
+        current_inventory = {
+            outcome: _paper_inventory(history, snapshot.market_slug, outcome)
+            for outcome in ("Up", "Down")
+        }
+        current_shares = {outcome: current_inventory[outcome][0] for outcome in ("Up", "Down")}
+        current_cost = {outcome: current_inventory[outcome][1] for outcome in ("Up", "Down")}
+        deficits = {
+            outcome: target_shares[outcome] - current_shares[outcome]
+            for outcome in ("Up", "Down")
+        }
+        current_pair_avg = None
+        current_up_avg = _avg_price(current_cost["Up"], current_shares["Up"])
+        current_down_avg = _avg_price(current_cost["Down"], current_shares["Down"])
+        if current_up_avg is not None and current_down_avg is not None:
+            current_pair_avg = current_up_avg + current_down_avg
+        current_imbalance = _imbalance_ratio(current_shares["Up"], current_shares["Down"])
+        imbalance_limit = _dynamic_imbalance_limit(self.config, snapshot.elapsed_sec)
+        deficit_side = "Up" if current_shares["Up"] < current_shares["Down"] else "Down" if current_shares["Down"] < current_shares["Up"] else None
+        candidates: list[tuple[float, float, float, str, dict[str, Any], float, float, float | None, float]] = []
+        for outcome in ("Up", "Down"):
+            book = snapshot.book_for_outcome(outcome)
+            ask = _safe_float(book.ask)
+            if ask <= 0 or ask > self.config.max_price:
+                continue
+            quote_source = "maker_quote_at_best_bid"
+            quote_price = _safe_float(book.bid) if self.config.execution_style == "maker" else ask
+            if self.config.execution_style == "maker" and outcome == deficit_side and snapshot.elapsed_sec >= int(self.config.rebalance_start_sec):
+                quote_price = min(
+                    ask,
+                    float(self.config.max_price),
+                    quote_price + float(self.config.tick_size) * max(0, int(self.config.maker_rebalance_ticks)),
+                )
+                quote_source = "maker_rebalance_quote"
+            if quote_price <= 0 or quote_price > self.config.max_price:
+                continue
+            desired_notional = deficits[outcome] * quote_price
+            order_notional = min(float(self.config.notional_usdc), desired_notional)
+            if order_notional + 1e-9 < float(self.config.min_order_usdc):
+                continue
+            if self.config.execution_style == "maker":
+                fill, expected_price = _maker_quote_at_price(round(order_notional, 6), quote_price, source=quote_source)
+            else:
+                fill, expected_price = _fill_for_order(book, round(order_notional, 6))
+            if fill is None or expected_price <= 0 or expected_price > self.config.max_price:
+                continue
+            fill_shares = order_notional / expected_price
+            projected_shares = dict(current_shares)
+            projected_cost = dict(current_cost)
+            projected_shares[outcome] += fill_shares
+            projected_cost[outcome] += order_notional
+            projected_up_avg = _avg_price(projected_cost["Up"], projected_shares["Up"])
+            projected_down_avg = _avg_price(projected_cost["Down"], projected_shares["Down"])
+            projected_pair_avg = None
+            if projected_up_avg is not None and projected_down_avg is not None:
+                projected_pair_avg = projected_up_avg + projected_down_avg
+                if projected_pair_avg > float(self.config.max_pair_cost):
+                    continue
+            elif expected_price > float(self.config.max_unpaired_price):
+                continue
+            projected_imbalance = _imbalance_ratio(projected_shares["Up"], projected_shares["Down"])
+            if projected_pair_avg is not None and projected_imbalance > imbalance_limit:
+                if projected_imbalance >= current_imbalance:
+                    continue
+            imbalance_improvement = current_imbalance - projected_imbalance
+            candidates.append((imbalance_improvement, order_notional, deficits[outcome], outcome, fill, expected_price, desired_notional, projected_pair_avg, projected_imbalance))
+        if not candidates:
             return None
-        book = _book_for_outcome(sample, outcome)
-        ask_targets = book.get("ask_targets") if isinstance(book, dict) else None
-        if not isinstance(ask_targets, dict):
-            return None
-        target_key = f"{self.config.notional_usdc:g}"
-        fill = ask_targets.get(target_key)
-        if not isinstance(fill, dict) or not fill.get("ok"):
-            return None
-        expected_price = _safe_float(fill.get("avg"))
-        if expected_price <= 0 or expected_price > self.config.max_price:
-            return None
+        _imbalance_improvement, order_notional, _deficit_shares, outcome, fill, expected_price, desired_notional, projected_pair_avg, projected_imbalance = max(
+            candidates,
+            key=lambda item: (item[0], -item[5], item[1], item[2], item[3]),
+        )
         return TradeIntent(
+            strategy_name=self.strategy_name,
             wallet=self.config.wallet.lower(),
-            market_slug=slug,
-            sampled_ts=sampled_ts,
+            market_slug=snapshot.market_slug,
+            sampled_ts=snapshot.sampled_ts,
             checkpoint_sec=checkpoint,
             intent="BUY",
             outcome=outcome,
-            notional_usdc=float(self.config.notional_usdc),
+            notional_usdc=round(float(order_notional), 6),
             max_price=float(self.config.max_price),
             expected_price=round(expected_price, 6),
-            reason=f"checkpoint_{checkpoint}_net_bias",
+            symbol=snapshot.symbol,
+            reason=f"checkpoint_{checkpoint}_pair_cost_inventory",
             features={
-                "elapsed_sec": elapsed,
-                "wallet_net_up_down_usdc": net_usdc,
-                "wallet_trade_rows_seen": len(rows),
+                "elapsed_sec": snapshot.elapsed_sec,
+                "inventory_progress": round(progress, 6),
+                "top_pair_cost": top_pair_cost,
+                "pair_cost": top_pair_cost,
+                "maker_pair_cost": maker_pair_cost,
+                "execution_style": self.config.execution_style,
+                "max_pair_cost": float(self.config.max_pair_cost),
+                "max_unpaired_price": float(self.config.max_unpaired_price),
+                "max_inventory_imbalance_ratio": float(self.config.max_inventory_imbalance_ratio),
+                "dynamic_inventory_imbalance_limit": round(imbalance_limit, 6),
+                "deficit_side": deficit_side,
+                "rebalance_start_sec": int(self.config.rebalance_start_sec),
+                "current_pair_avg": round(current_pair_avg, 6) if current_pair_avg is not None else None,
+                "projected_pair_avg": round(projected_pair_avg, 6) if projected_pair_avg is not None else None,
+                "current_imbalance_ratio": round(current_imbalance, 6),
+                "projected_imbalance_ratio": round(projected_imbalance, 6),
+                "sizing_mode": sizing_mode,
+                "target_pair_notional_usdc": float(self.config.target_pair_notional_usdc),
+                "target_pair_shares_per_side": self.config.target_pair_shares_per_side,
+                "target_pair_shares": round(target_pair_shares, 6),
+                "target_up_shares": round(target_shares["Up"], 6),
+                "target_down_shares": round(target_shares["Down"], 6),
+                "current_up_shares": round(current_shares["Up"], 6),
+                "current_down_shares": round(current_shares["Down"], 6),
+                "deficit_up_shares": round(deficits["Up"], 6),
+                "deficit_down_shares": round(deficits["Down"], 6),
+                "desired_notional_usdc": round(desired_notional, 6),
                 "book_fill": fill,
             },
         )
 
+    def evaluate_snapshot(self, sample: dict[str, Any], activity_rows: list[dict[str, Any]]) -> TradeIntent | None:
+        snapshot = StrategySnapshot.from_market_state_sample(sample)
+        return self.evaluate(snapshot, StrategyHistory(activity_rows=activity_rows, snapshots_by_market={snapshot.market_slug: [snapshot]}))
+
 
 class D950MarketPathStrategy:
+    strategy_name = "d950_path_v0"
+
     def __init__(self, config: PathStrategyConfig, *, min_reference_delta: float = 0.0) -> None:
         self.config = config
         self.min_reference_delta = float(min_reference_delta)
 
-    def evaluate_snapshot(self, sample: dict[str, Any], activity_rows: list[dict[str, Any]]) -> TradeIntent | None:
-        slug = str(sample.get("market_slug") or "")
-        sampled_ts = _safe_int(sample.get("sampled_ts"))
-        elapsed = _elapsed_sec(slug, sampled_ts)
-        if elapsed is None or sample.get("book_stale"):
+    def evaluate(self, snapshot: StrategySnapshot, history: StrategyHistory) -> TradeIntent | None:
+        if snapshot.book_stale:
             return None
-        checkpoint = _checkpoint_for_elapsed(elapsed, self.config.checkpoints)
+        checkpoint = _checkpoint_for_elapsed(snapshot.elapsed_sec, self.config.checkpoints)
         if checkpoint is None:
             return None
-        history = sample.get("_market_state_history")
-        if not isinstance(history, list):
-            history = []
-        current_ref = _safe_float(sample.get("reference_price"))
+        current_ref = _safe_float(snapshot.reference_price)
         if current_ref <= 0:
             return None
         refs = [
-            row
-            for row in history
-            if str(row.get("market_slug") or "") == slug
-            and _safe_int(row.get("sampled_ts")) <= sampled_ts
-            and _safe_float(row.get("reference_price")) > 0
+            item
+            for item in history.snapshots_for_market(snapshot.market_slug)
+            if item.sampled_ts <= snapshot.sampled_ts and _safe_float(item.reference_price) > 0
         ]
-        first_ref = _safe_float(refs[0].get("reference_price")) if refs else current_ref
+        first_ref = _safe_float(refs[0].reference_price) if refs else current_ref
         if first_ref <= 0:
             return None
         reference_delta = round(current_ref - first_ref, 6)
         if abs(reference_delta) <= self.min_reference_delta:
             return None
         outcome = "Up" if reference_delta > 0 else "Down"
-        book = _book_for_outcome(sample, outcome)
-        ask_targets = book.get("ask_targets") if isinstance(book, dict) else None
-        if not isinstance(ask_targets, dict):
-            return None
+        book = snapshot.book_for_outcome(outcome)
         target_key = f"{self.config.notional_usdc:g}"
-        fill = ask_targets.get(target_key)
+        fill = book.ask_targets.get(target_key)
         if not isinstance(fill, dict) or not fill.get("ok"):
             return None
         expected_price = _safe_float(fill.get("avg"))
         if expected_price <= 0 or expected_price > self.config.max_price:
             return None
         return TradeIntent(
+            strategy_name=self.strategy_name,
             wallet=self.config.wallet.lower(),
-            market_slug=slug,
-            sampled_ts=sampled_ts,
+            market_slug=snapshot.market_slug,
+            sampled_ts=snapshot.sampled_ts,
             checkpoint_sec=checkpoint,
             intent="BUY",
             outcome=outcome,
             notional_usdc=float(self.config.notional_usdc),
             max_price=float(self.config.max_price),
             expected_price=round(expected_price, 6),
+            symbol=snapshot.symbol,
             reason="d950_path_v0_reference_momentum",
             features={
-                "elapsed_sec": elapsed,
+                "elapsed_sec": snapshot.elapsed_sec,
                 "reference_delta": reference_delta,
                 "reference_price": current_ref,
                 "reference_start_price": first_ref,
                 "book_fill": fill,
             },
         )
+
+    def evaluate_snapshot(self, sample: dict[str, Any], activity_rows: list[dict[str, Any]]) -> TradeIntent | None:
+        snapshot = StrategySnapshot.from_market_state_sample(sample)
+        history_rows = sample.get("_market_state_history")
+        history_snapshots = [
+            StrategySnapshot.from_market_state_sample(row)
+            for row in history_rows
+            if isinstance(row, dict)
+        ] if isinstance(history_rows, list) else [snapshot]
+        return self.evaluate(snapshot, StrategyHistory(activity_rows=activity_rows, snapshots_by_market={snapshot.market_slug: history_snapshots}))
 
 
 def replay_path_strategy(
@@ -345,14 +476,18 @@ def replay_path_strategy(
     emitted_markets: set[str] = set()
     intents: list[TradeIntent] = []
     executions: list[ExecutionResult] = []
+    history = StrategyHistory(activity_rows=activity_rows)
     for sample in sorted(market_state_samples, key=lambda row: (_safe_int(row.get("sampled_ts")), str(row.get("market_slug") or ""))):
         slug = str(sample.get("market_slug") or "")
         if config.one_trade_per_market and slug in emitted_markets:
             continue
-        intent = strategy.evaluate_snapshot(sample, activity_rows)
+        snapshot = StrategySnapshot.from_market_state_sample(sample)
+        history.snapshots_by_market.setdefault(snapshot.market_slug, []).append(snapshot)
+        intent = strategy.evaluate(snapshot, history)
         if not intent:
             continue
         emitted_markets.add(slug)
         intents.append(intent)
+        history.emitted_intents.append(intent)
         executions.append(execution_adapter.submit(intent))
     return ReplayResult(intents=intents, executions=executions)

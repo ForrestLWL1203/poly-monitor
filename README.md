@@ -26,9 +26,48 @@ python3 scripts/run_crypto_wallet_observer.py \
   --data-dir /tmp/poly-monitor-smoke
 ```
 
+## Independent Strategy Paper/Backtest
+
+The strategy runtime is separate from the observer. It discovers live crypto 5m
+windows, subscribes to CLOB market WS depth, samples Polymarket Chainlink
+reference prices, and feeds normalized snapshots into a pluggable strategy.
+
+```bash
+python3 scripts/run_strategy_paper.py \
+  --strategy d950_path_v0 \
+  --mode paper \
+  --jsonl data/paper/d950_path_v0/run.jsonl
+```
+
+Deep wallet export backtests use the same strategy interface:
+
+```bash
+python3 scripts/run_strategy_backtest.py \
+  --strategy d950_path_v0 \
+  --zip data/exports/<wallet>/<timestamp>/bundle.zip \
+  --out data/backtests/d950_path_v0.json
+```
+
+`wallet_path_v0` is an independent strategy distilled from the observed wallet's
+behavior. It does not read target-wallet activity at runtime; it builds scaled
+two-sided Up/Down inventory from normalized market snapshots. The core rule is
+window-level pair-cost inventory: keep Up/Down shares close to balanced and only
+continue buying when the projected cumulative `avg_up + avg_down` stays under
+`--max-pair-cost`. Use `--target-pair-shares` to scale from the learned wallet's
+per-window share inventory, or `--target-pair-notional` for a notional-derived
+target. Use `--notional`, `--max-unpaired-price`,
+`--max-inventory-imbalance-ratio`, and `--min-order-usdc` to choose order cadence
+and fill limits. The default `--execution-style maker` evaluates quotes at the
+current best bid; `--execution-style taker` is available only as a conservative
+shape check against ask-side fills.
+
+`--mode live` is intentionally wired to a rejecting adapter in this project for
+now. It records that live execution is not implemented and does not read account
+secrets or submit orders.
+
 ## Outputs
 
-- `data/raw/YYYY-MM-DD/events.jsonl`: compact raw events, 3-day rolling retention by default.
+- `data/raw/YYYY-MM-DD/events.jsonl`: compact raw events, 2-day rolling retention by default.
 - `data/state/observer.sqlite`: dedupe state, trades, candidate scores,
   watchlist wallets, watchlist activity events, compact trade contexts, low-rate
   market-state samples, and local PnL ledger for non-watchlist trade rows.
@@ -135,10 +174,10 @@ Watchlisted wallets are treated as manually protected research targets:
   `size`. If a future API response breaks that invariant, the observer writes a
   `watchlist_activity_value_warning` raw event and the dashboard surfaces it in
   recent events without stopping collection.
-- Activity rows are retained for 30 days while the wallet remains watchlisted
-  and 7 days after it is no longer watchlisted. Trade contexts are hot for 30
-  days and market-state samples are hot for 7 days before gzip archive export.
-- Strategy archive runs every 6 hours by default, writes JSONL gzip files plus an
+- Activity rows, trade contexts, and market-state samples are retained hot for
+  2 days by default. Export deep-collection bundles before that window expires
+  when a wallet needs longer offline analysis.
+- Strategy archive runs every hour by default, writes JSONL gzip files plus an
   `archive_manifest` row, then deletes exported SQLite rows in batches and asks
   SQLite for incremental vacuum.
 - When a watchlisted wallet emits a BTC/ETH/SOL/XRP 5m `TRADE`, `SPLIT`,

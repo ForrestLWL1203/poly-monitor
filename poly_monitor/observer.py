@@ -32,11 +32,11 @@ class ObserverConfig:
     max_candidates: int = 15
     min_trade_usdc: float = 1.0
     data_dir: Path = Path("data")
-    raw_retention_days: int = 3
+    raw_retention_days: int = 2
     score_refresh_sec: float = 60.0
     score_wallets_per_cycle: int = 2
     score_wallet_pool_limit: int = 50
-    cleanup_interval_hours: float = 6.0
+    cleanup_interval_hours: float = 1.0
     inactive_wallet_ttl_hours: float = 48.0
     max_non_candidate_wallets: int = 100
     report_refresh_sec: float = 60.0
@@ -61,12 +61,12 @@ class ObserverConfig:
     watchlist_activity_lookback_sec: int = 6 * 3600
     watchlist_activity_safety_window_sec: int = 300
     watchlist_activity_pages: int = 2
-    watchlist_activity_retention_days: int = 7
-    non_watchlist_activity_retention_days: int = 3
-    context_retention_days: int = 7
+    watchlist_activity_retention_days: int = 2
+    non_watchlist_activity_retention_days: int = 2
+    context_retention_days: int = 2
     research_cleanup_dormant_wallets: int = 10
-    market_state_retention_days: int = 7
-    strategy_archive_interval_hours: float = 6.0
+    market_state_retention_days: int = 2
+    strategy_archive_interval_hours: float = 1.0
     market_state_sample_sec: float = 5.0
     market_state_terminal_sample_sec: float = 2.0
     market_state_terminal_window_sec: float = 60.0
@@ -1279,6 +1279,10 @@ class CryptoWalletObserver:
             non_watchlist_cutoff_ts=int((now - dt.timedelta(days=self.config.non_watchlist_activity_retention_days)).timestamp()),
         )
         result.update(activity_cleanup)
+        hot_cleanup = self.store.cleanup_hot_research_rows(
+            cutoff_ts=int((now - dt.timedelta(days=self.config.watchlist_activity_retention_days)).timestamp()),
+        )
+        result.update(hot_cleanup)
         research_cleanup = self.store.cleanup_non_focus_research_data(
             dormant_limit=self.config.research_cleanup_dormant_wallets
         )

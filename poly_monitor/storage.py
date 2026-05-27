@@ -1107,6 +1107,29 @@ class ObserverStore:
             "vacuum_pages": vacuum_pages,
         }
 
+    def cleanup_hot_research_rows(self, *, cutoff_ts: int) -> dict[str, int]:
+        cutoff_iso = dt.datetime.fromtimestamp(int(cutoff_ts), dt.timezone.utc).isoformat()
+        trades = self.conn.execute(
+            "DELETE FROM trades WHERE exchange_ts < ?",
+            (int(cutoff_ts),),
+        )
+        pnl = self.conn.execute(
+            "DELETE FROM wallet_market_pnl WHERE settled_at < ?",
+            (cutoff_iso,),
+        )
+        removed_trades = int(trades.rowcount or 0)
+        removed_pnl = int(pnl.rowcount or 0)
+        vacuum_pages = 0
+        if removed_trades or removed_pnl:
+            vacuum_pages = self._incremental_vacuum_pages(1000)
+            self.conn.commit()
+            self._checkpoint_wal()
+        return {
+            "removed_trades": removed_trades,
+            "removed_wallet_market_pnl": removed_pnl,
+            "hot_research_vacuum_pages": vacuum_pages,
+        }
+
     def archive_strategy_rows(
         self,
         archive_dir: Path,

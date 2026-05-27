@@ -8,6 +8,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Iterable
 
+from .deep_collection import read_status
 from .storage import json_dumps, utc_iso
 
 
@@ -182,6 +183,19 @@ def _deep_collection_summary(
     }
 
 
+def _collector_started_at(data_dir: Path, wallet: str) -> dt.datetime | None:
+    status = read_status(data_dir, wallet) or {}
+    return _parse_iso(status.get("started_at"))
+
+
+def _trade_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(row.get("tx_hash") or ""),
+        str(row.get("fill_id") or ""),
+        str(row.get("market_slug") or ""),
+    )
+
+
 def _zip_dir(source_dir: Path, zip_path: Path) -> None:
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         for path in sorted(source_dir.rglob("*")):
@@ -223,34 +237,47 @@ def export_watchlist_wallet(
         watch = conn.execute("SELECT 1 FROM watchlist_wallets WHERE wallet=?", (wallet,)).fetchone()
         if watch is None:
             raise ValueError("wallet_not_watchlisted")
+        collector_started_at = _collector_started_at(data_dir, wallet)
+        collector_started_iso = collector_started_at.isoformat() if collector_started_at else None
+        collector_started_ts = int(collector_started_at.timestamp()) if collector_started_at else None
         activity = _rows(
             conn,
-            "SELECT * FROM wallet_activity_events WHERE wallet=? ORDER BY exchange_ts ASC, tx_hash ASC",
-            (wallet,),
+            (
+                "SELECT * FROM wallet_activity_events WHERE wallet=? AND observed_at>=? "
+                "ORDER BY exchange_ts ASC, tx_hash ASC"
+                if collector_started_iso
+                else "SELECT * FROM wallet_activity_events WHERE wallet=? ORDER BY exchange_ts ASC, tx_hash ASC"
+            ),
+            (wallet, collector_started_iso) if collector_started_iso else (wallet,),
         )
-        wallet_trades = _rows(
+        all_wallet_trades = _rows(
             conn,
             "SELECT * FROM trades WHERE wallet=? ORDER BY exchange_ts ASC, tx_hash ASC",
             (wallet,),
         )
-        wallet_pnl = _rows(
+        trade_keys = {_trade_key(row) for row in activity if str(row.get("activity_type") or "").upper() == "TRADE"}
+        if collector_started_ts is not None:
+            wallet_trades = [row for row in all_wallet_trades if int(row.get("exchange_ts") or 0) >= collector_started_ts]
+        else:
+            wallet_trades = [row for row in all_wallet_trades if _trade_key(row) in trade_keys]
+        all_wallet_pnl = _rows(
             conn,
             "SELECT * FROM wallet_market_pnl WHERE wallet=? ORDER BY settled_at ASC, market_slug ASC",
             (wallet,),
         )
         slugs = {
             str(row.get("market_slug") or "")
-            for row in [*activity, *wallet_trades, *wallet_pnl]
+            for row in [*activity, *wallet_trades]
             if row.get("market_slug")
         }
         if _table_exists(conn, "watched_market_windows"):
             if slugs:
                 placeholders = ",".join("?" for _ in slugs)
-                watched_query = f"SELECT * FROM watched_market_windows WHERE source_wallet=? OR market_slug IN ({placeholders})"
-                watched_params: tuple[Any, ...] = (wallet, *sorted(slugs))
+                watched_query = f"SELECT * FROM watched_market_windows WHERE market_slug IN ({placeholders})"
+                watched_params: tuple[Any, ...] = tuple(sorted(slugs))
             else:
-                watched_query = "SELECT * FROM watched_market_windows WHERE source_wallet=?"
-                watched_params = (wallet,)
+                watched_query = "SELECT * FROM watched_market_windows WHERE 0"
+                watched_params = ()
             watched_rows = {
                 str(row["market_slug"]): dict(row)
                 for row in conn.execute(watched_query, watched_params).fetchall()
@@ -263,28 +290,37 @@ def export_watchlist_wallet(
 
         placeholders = ",".join("?" for _ in slugs)
         slug_params = tuple(sorted(slugs))
+        sample_filter = "AND observed_at>=?" if collector_started_iso else ""
         deep_samples = _rows(
             conn,
             f"""
             SELECT * FROM market_state_samples
-            WHERE sample_reason='deep_collector' AND market_slug IN ({placeholders})
+            WHERE sample_reason='deep_collector' AND market_slug IN ({placeholders}) {sample_filter}
             ORDER BY sampled_ts ASC, market_slug ASC
             """,
-            slug_params,
+            (*slug_params, collector_started_iso) if collector_started_iso else slug_params,
         )
         if not deep_samples:
             raise ValueError("no_deep_collection_data")
         deep_slugs = {str(row.get("market_slug") or "") for row in deep_samples if row.get("market_slug")}
+        activity = [row for row in activity if row.get("market_slug") in deep_slugs]
+        wallet_trades = [row for row in wallet_trades if row.get("market_slug") in deep_slugs]
+        wallet_pnl = [row for row in all_wallet_pnl if row.get("market_slug") in deep_slugs]
+        slugs = deep_slugs
+        slug_params = tuple(sorted(slugs))
+        placeholders = ",".join("?" for _ in slugs)
+        watched_rows = {slug: watched_rows[slug] for slug in slugs if slug in watched_rows}
         deep_activity = [row for row in activity if row.get("market_slug") in deep_slugs]
         deep_wallet_trades = [row for row in wallet_trades if row.get("market_slug") in deep_slugs]
+        context_filter = "AND observed_at>=?" if collector_started_iso else ""
         deep_contexts = _rows(
             conn,
             f"""
             SELECT * FROM wallet_trade_contexts
-            WHERE wallet=? AND market_slug IN ({placeholders})
+            WHERE wallet=? AND market_slug IN ({placeholders}) {context_filter}
             ORDER BY exchange_ts ASC, tx_hash ASC
             """,
-            (wallet, *slug_params),
+            (wallet, *slug_params, collector_started_iso) if collector_started_iso else (wallet, *slug_params),
         )
 
         root_counts = {
@@ -317,8 +353,12 @@ def export_watchlist_wallet(
             )
             samples = _rows(
                 conn,
-                "SELECT * FROM market_state_samples WHERE market_slug=? ORDER BY sampled_ts ASC",
-                (slug,),
+                (
+                    "SELECT * FROM market_state_samples WHERE market_slug=? AND observed_at>=? ORDER BY sampled_ts ASC"
+                    if collector_started_iso
+                    else "SELECT * FROM market_state_samples WHERE market_slug=? ORDER BY sampled_ts ASC"
+                ),
+                (slug, collector_started_iso) if collector_started_iso else (slug,),
             )
             metadata = _window_metadata(
                 conn,
@@ -352,6 +392,7 @@ def export_watchlist_wallet(
             "data_dir": str(data_dir),
             "export_dir": str(target),
             "policy": "local_capture_only_no_historical_market_backfill",
+            "collector_started_at": collector_started_iso,
             "deep_collection": {
                 **_deep_collection_summary(
                     deep_samples=deep_samples,

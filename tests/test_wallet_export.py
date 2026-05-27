@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from poly_monitor.deep_collection import write_status
 from poly_monitor.storage import ObserverStore
 from poly_monitor.wallet_export import export_watchlist_wallet
 
@@ -214,6 +215,181 @@ class WalletExportTests(unittest.TestCase):
                 export_watchlist_wallet(wallet, data_dir=data_dir)
 
         self.assertEqual(str(exc.exception), "no_deep_collection_data")
+
+    def test_export_watchlist_wallet_only_includes_rows_since_deep_collector_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            old_slug = "btc-updown-5m-1770000000"
+            deep_slug = "btc-updown-5m-1770000300"
+            started_at = dt.datetime.fromtimestamp(1770000301, dt.timezone.utc).isoformat()
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.add_watchlist_wallet(wallet)
+                write_status(
+                    data_dir,
+                    wallet,
+                    {
+                        "wallet": wallet,
+                        "pid": 123,
+                        "status": "running",
+                        "started_at": started_at,
+                        "last_heartbeat_at": started_at,
+                        "sample_sec": 1.0,
+                        "book_depth_levels": 3,
+                    },
+                )
+                for slug, ts in [(old_slug, 1770000000), (deep_slug, 1770000300)]:
+                    store.upsert_watched_market_window(
+                        {
+                            "market_slug": slug,
+                            "condition_id": f"0xcond-{slug}",
+                            "symbol": "BTC",
+                            "first_seen_at": dt.datetime.fromtimestamp(ts + 1, dt.timezone.utc).isoformat(),
+                            "window_start": dt.datetime.fromtimestamp(ts, dt.timezone.utc).isoformat(),
+                            "window_end": dt.datetime.fromtimestamp(ts + 300, dt.timezone.utc).isoformat(),
+                            "tracking_reason": "watchlist_activity",
+                            "source_wallet": wallet,
+                            "capture_until": dt.datetime.fromtimestamp(ts + 2100, dt.timezone.utc).isoformat(),
+                            "status": "tracking",
+                        }
+                    )
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xold",
+                            "wallet": wallet,
+                            "market_slug": old_slug,
+                            "condition_id": "0xold",
+                            "symbol": "BTC",
+                            "exchange_ts": 1770000010,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.5,
+                            "size": 20,
+                            "usdc": 10,
+                            "asset": "up",
+                            "observed_at": dt.datetime.fromtimestamp(1770000011, dt.timezone.utc).isoformat(),
+                        },
+                        {
+                            "tx_hash": "0xdeep",
+                            "wallet": wallet,
+                            "market_slug": deep_slug,
+                            "condition_id": "0xdeep",
+                            "symbol": "BTC",
+                            "exchange_ts": 1770000310,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Down",
+                            "outcome_index": 1,
+                            "price": 0.4,
+                            "size": 20,
+                            "usdc": 8,
+                            "asset": "down",
+                            "observed_at": dt.datetime.fromtimestamp(1770000311, dt.timezone.utc).isoformat(),
+                        },
+                    ],
+                    recompute=False,
+                )
+                store.insert_trades(
+                    [
+                        {
+                            "tx_hash": "0xold",
+                            "wallet": wallet,
+                            "market_slug": old_slug,
+                            "condition_id": "0xold",
+                            "symbol": "BTC",
+                            "exchange_ts": 1770000010,
+                            "outcome": "Up",
+                            "side": "BUY",
+                            "price": 0.5,
+                            "size": 20,
+                            "usdc": 10,
+                        },
+                        {
+                            "tx_hash": "0xdeep",
+                            "wallet": wallet,
+                            "market_slug": deep_slug,
+                            "condition_id": "0xdeep",
+                            "symbol": "BTC",
+                            "exchange_ts": 1770000310,
+                            "outcome": "Down",
+                            "side": "BUY",
+                            "price": 0.4,
+                            "size": 20,
+                            "usdc": 8,
+                        },
+                    ]
+                )
+                store.insert_market_state_samples(
+                    [
+                        {
+                            "market_slug": old_slug,
+                            "condition_id": "0xold",
+                            "symbol": "BTC",
+                            "sampled_ts": 1770000012,
+                            "observed_at": dt.datetime.fromtimestamp(1770000012, dt.timezone.utc).isoformat(),
+                            "window_remaining_sec": 288,
+                            "reference_price": 100000,
+                            "reference_price_age_sec": 0.5,
+                            "up_json": {"bid": 0.49, "ask": 0.51},
+                            "down_json": {"bid": 0.49, "ask": 0.51},
+                            "book_stale": False,
+                            "sample_reason": "deep_collector",
+                        },
+                        {
+                            "market_slug": deep_slug,
+                            "condition_id": "0xdeep",
+                            "symbol": "BTC",
+                            "sampled_ts": 1770000312,
+                            "observed_at": dt.datetime.fromtimestamp(1770000312, dt.timezone.utc).isoformat(),
+                            "window_remaining_sec": 288,
+                            "reference_price": 100100,
+                            "reference_price_age_sec": 0.5,
+                            "up_json": {"bid": 0.59, "ask": 0.61},
+                            "down_json": {"bid": 0.39, "ask": 0.41},
+                            "book_stale": False,
+                            "sample_reason": "deep_collector",
+                        },
+                    ]
+                )
+                store.insert_wallet_trade_contexts(
+                    [
+                        {
+                            "wallet": wallet,
+                            "tx_hash": "0xdeep",
+                            "fill_id": "",
+                            "market_slug": deep_slug,
+                            "condition_id": "0xdeep",
+                            "symbol": "BTC",
+                            "exchange_ts": 1770000310,
+                            "observed_at": dt.datetime.fromtimestamp(1770000312, dt.timezone.utc).isoformat(),
+                            "context_json": {"source": "deep_collector"},
+                            "book_stale": False,
+                        }
+                    ]
+                )
+                store.recompute_market_pnl_for_markets({old_slug, deep_slug})
+            finally:
+                store.close()
+
+            result = export_watchlist_wallet(wallet, data_dir=data_dir)
+            export_dir = Path(result["export_dir"])
+            manifest = json.loads((export_dir / "manifest.json").read_text())
+            root_activity = (export_dir / "wallet_activity.jsonl").read_text()
+            root_trades = (export_dir / "wallet_trades.jsonl").read_text()
+            deep_samples = (export_dir / "deep_collection" / "market_state_samples.jsonl").read_text()
+
+        self.assertEqual(manifest["window_count"], 1)
+        self.assertEqual(manifest["windows"][0]["market_slug"], deep_slug)
+        self.assertIn("0xdeep", root_activity)
+        self.assertNotIn("0xold", root_activity)
+        self.assertIn("0xdeep", root_trades)
+        self.assertNotIn("0xold", root_trades)
+        self.assertIn(deep_slug, deep_samples)
+        self.assertNotIn(old_slug, deep_samples)
 
     def test_export_watchlist_wallet_prunes_old_timestamped_exports(self):
         with tempfile.TemporaryDirectory() as tmp:

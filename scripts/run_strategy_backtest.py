@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from poly_monitor.strategy_backtest import DeepExportBacktestEnvironment, PendingMakerReplayConfig, run_strategy_backtest, run_strategy_maker_replay_backtest
-from poly_monitor.strategy_runtime import PaperExecutionAdapter, strategy_from_name
+from poly_monitor.strategy_runtime import PaperExecutionAdapter, RejectingLiveExecutionAdapter, strategy_from_name
 
 
 def _parse_checkpoints(value: str) -> tuple[int, ...]:
@@ -21,16 +21,17 @@ def _parse_checkpoints(value: str) -> tuple[int, ...]:
     return checkpoints
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Compatibility wrapper for run_strategy_backtest.py.")
-    parser.add_argument("--zip", required=True, type=Path, help="Path to bundle.complete-windows.zip")
-    parser.add_argument("--wallet", required=True, help="Target wallet address")
-    parser.add_argument("--out", type=Path, help="Output JSON path")
-    parser.add_argument("--strategy", choices=("wallet_path_v0", "wallet_path", "d950_path_v0"), default="wallet_path_v0")
-    parser.add_argument("--notional", type=float, default=25.0, help="Paper notional per intent")
-    parser.add_argument("--bias-threshold", type=float, default=25.0, help="Minimum wallet net Up-Down flow to trigger")
-    parser.add_argument("--max-price", type=float, default=0.95, help="Maximum acceptable simulated buy price")
-    parser.add_argument("--checkpoints", type=_parse_checkpoints, help="Comma-separated elapsed-second checkpoints")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Replay a strategy plugin against a deep wallet export zip.")
+    parser.add_argument("--zip", required=True, type=Path)
+    parser.add_argument("--strategy", choices=("d950_path_v0", "wallet_path_v0", "wallet_path"), default="d950_path_v0")
+    parser.add_argument("--wallet", default="strategy")
+    parser.add_argument("--mode", choices=("paper", "live"), default="paper")
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--notional", type=float, default=25.0)
+    parser.add_argument("--bias-threshold", type=float, default=25.0)
+    parser.add_argument("--max-price", type=float, default=0.95)
+    parser.add_argument("--checkpoints", type=_parse_checkpoints)
     parser.add_argument("--min-reference-delta", type=float, default=0.0)
     parser.add_argument("--target-pair-notional", type=float, default=25.0)
     parser.add_argument("--target-pair-shares", type=float, help="Per-side target shares by window end; overrides --target-pair-notional for wallet_path_v0")
@@ -47,8 +48,11 @@ def main() -> int:
     parser.add_argument("--maker-excess-ttl-multiplier", type=float, default=0.5)
     parser.add_argument("--rebalance-start-sec", type=int, default=240)
     parser.add_argument("--maker-rebalance-ticks", type=int, default=1)
-    args = parser.parse_args()
+    return parser
 
+
+def main() -> int:
+    args = build_parser().parse_args()
     env = DeepExportBacktestEnvironment(args.zip)
     strategy = strategy_from_name(
         args.strategy,
@@ -68,7 +72,8 @@ def main() -> int:
         min_order_usdc=args.min_order_usdc,
         execution_style=args.execution_style,
     )
-    if args.execution_style == "maker":
+    adapter = RejectingLiveExecutionAdapter() if args.mode == "live" else PaperExecutionAdapter(env.winning_sides)
+    if args.mode == "paper" and args.execution_style == "maker":
         result = run_strategy_maker_replay_backtest(
             strategy,
             env,
@@ -82,38 +87,42 @@ def main() -> int:
             ),
         )
     else:
-        result = run_strategy_backtest(strategy, env, PaperExecutionAdapter(env.winning_sides))
-    payload = result.to_dict()
-    payload["config"] = {
-        "wallet": args.wallet.lower(),
-        "strategy": args.strategy,
-        "notional_usdc": args.notional,
-        "bias_threshold": args.bias_threshold,
-        "max_price": args.max_price,
-        "checkpoints": list(strategy.config.checkpoints) if hasattr(strategy, "config") else args.checkpoints,
-        "target_pair_notional_usdc": args.target_pair_notional,
-        "target_pair_shares_per_side": args.target_pair_shares,
-        "max_pair_cost": args.max_pair_cost,
-        "max_unpaired_price": args.max_unpaired_price,
-        "max_inventory_imbalance_ratio": args.max_inventory_imbalance_ratio,
-        "min_order_usdc": args.min_order_usdc,
-        "execution_style": args.execution_style,
-        "maker_fill_rate": args.maker_fill_rate,
-        "maker_order_ttl_sec": args.maker_order_ttl_sec,
-        "maker_max_open_orders_per_market": args.maker_max_open_orders_per_market,
-        "maker_rebalance_fill_multiplier": args.maker_rebalance_fill_multiplier,
-        "maker_rebalance_ttl_multiplier": args.maker_rebalance_ttl_multiplier,
-        "maker_excess_ttl_multiplier": args.maker_excess_ttl_multiplier,
-        "rebalance_start_sec": args.rebalance_start_sec,
-        "maker_rebalance_ticks": args.maker_rebalance_ticks,
-        "source_zip": str(args.zip),
+        result = run_strategy_backtest(strategy, env, adapter)
+    payload = {
+        **result.to_dict(),
+        "config": {
+            "strategy": args.strategy,
+            "wallet": args.wallet.lower(),
+            "mode": args.mode,
+            "notional_usdc": args.notional,
+            "bias_threshold": args.bias_threshold,
+            "max_price": args.max_price,
+            "checkpoints": list(strategy.config.checkpoints) if hasattr(strategy, "config") else args.checkpoints,
+            "target_pair_notional_usdc": args.target_pair_notional,
+            "target_pair_shares_per_side": args.target_pair_shares,
+            "max_pair_cost": args.max_pair_cost,
+            "max_unpaired_price": args.max_unpaired_price,
+            "max_inventory_imbalance_ratio": args.max_inventory_imbalance_ratio,
+            "min_order_usdc": args.min_order_usdc,
+            "execution_style": args.execution_style,
+            "maker_fill_rate": args.maker_fill_rate,
+            "maker_order_ttl_sec": args.maker_order_ttl_sec,
+            "maker_max_open_orders_per_market": args.maker_max_open_orders_per_market,
+            "maker_rebalance_fill_multiplier": args.maker_rebalance_fill_multiplier,
+            "maker_rebalance_ttl_multiplier": args.maker_rebalance_ttl_multiplier,
+            "maker_excess_ttl_multiplier": args.maker_excess_ttl_multiplier,
+            "rebalance_start_sec": args.rebalance_start_sec,
+            "maker_rebalance_ticks": args.maker_rebalance_ticks,
+            "source_zip": str(args.zip),
+        },
     }
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        args.out.write_text(text, encoding="utf-8")
         print(str(args.out))
     else:
-        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        print(text, end="")
     return 0
 
 

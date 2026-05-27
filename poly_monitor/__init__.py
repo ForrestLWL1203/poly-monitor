@@ -7,4 +7,8 @@ __all__ = [
     "price_feed",
     "scoring",
     "storage",
+    "strategy_backtest",
+    "strategy_live",
+    "strategy_runner",
+    "strategy_runtime",
 ]

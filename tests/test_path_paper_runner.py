@@ -89,8 +89,8 @@ class PathPaperRunnerTests(unittest.TestCase):
                         "sampled_ts": 1770000120,
                         "observed_at": "2026-05-26T00:02:00+00:00",
                         "window_remaining_sec": 180,
-                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
-                        "down_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "up_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "down_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
                         "book_stale": 0,
                         "sample_reason": "deep_collection",
                     }
@@ -104,6 +104,9 @@ class PathPaperRunnerTests(unittest.TestCase):
                     poll_sec=0.01,
                     checkpoints=(120,),
                     notional_usdc=25,
+                    target_pair_notional_usdc=125,
+                    max_pair_cost=1.01,
+                    execution_style="taker",
                     winning_sides={"btc-updown-5m-1770000000": "Up"},
                 )
             )
@@ -139,7 +142,8 @@ class PathPaperRunnerTests(unittest.TestCase):
                         "market_slug": "btc-updown-5m-1770000000",
                         "sampled_ts": 1770000120,
                         "book_stale": 0,
-                        "down_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "up_json": {"ask": 0.49, "ask_depth_usdc": 100, "ask_targets": {"24.75": {"ok": True, "avg": 0.49}}},
+                        "down_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
                     }
                 ],
             )
@@ -148,6 +152,9 @@ class PathPaperRunnerTests(unittest.TestCase):
                     wallet=wallet,
                     data_dir=Path(tmp),
                     checkpoints=(120,),
+                    target_pair_notional_usdc=125,
+                    max_pair_cost=1.01,
+                    execution_style="taker",
                     winning_sides={"btc-updown-5m-1770000000": "Down"},
                 ),
                 data_source=data_source,
@@ -159,7 +166,7 @@ class PathPaperRunnerTests(unittest.TestCase):
             self.assertEqual(result["intents"], 1)
             out_path = Path(result["output_path"])
             row = json.loads(out_path.read_text(encoding="utf-8").splitlines()[0])
-            self.assertEqual(row["intent"]["outcome"], "Down")
+            self.assertEqual(row["intent"]["outcome"], "Up")
 
     def test_duplicate_ticks_do_not_resubmit_to_execution_adapter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,13 +188,14 @@ class PathPaperRunnerTests(unittest.TestCase):
                         "market_slug": "btc-updown-5m-1770000000",
                         "sampled_ts": 1770000120,
                         "book_stale": 0,
-                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "up_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "down_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
                     }
                 ],
             )
             adapter = CountingAdapter()
             runner = PathPaperRunner(
-                PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120,)),
+                PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120,), target_pair_notional_usdc=125, max_pair_cost=1.01, execution_style="taker"),
                 data_source=data_source,
                 execution_adapter=adapter,
             )
@@ -217,19 +225,21 @@ class PathPaperRunnerTests(unittest.TestCase):
                         "market_slug": "btc-updown-5m-1770000000",
                         "sampled_ts": 1770000120,
                         "book_stale": 0,
-                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "up_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "down_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
                     },
                     {
                         "market_slug": "btc-updown-5m-1770000000",
                         "sampled_ts": 1770000180,
                         "book_stale": 0,
-                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.55}}},
+                        "up_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "down_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
                     },
                 ],
             )
             adapter = CountingAdapter()
             runner = PathPaperRunner(
-                PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120, 180)),
+                PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120, 180), target_pair_notional_usdc=125, max_pair_cost=1.01, execution_style="taker"),
                 data_source=data_source,
                 execution_adapter=adapter,
             )
@@ -278,11 +288,15 @@ class PathPaperRunnerTests(unittest.TestCase):
                         "market_slug": "btc-updown-5m-1770000000",
                         "sampled_ts": 1770000120,
                         "book_stale": 0,
-                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "up_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "down_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
                     }
                 ],
             )
-            runner = PathPaperRunner(PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120,)), data_source=data_source)
+            runner = PathPaperRunner(
+                PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120,), target_pair_notional_usdc=125, max_pair_cost=1.01, execution_style="taker"),
+                data_source=data_source,
+            )
 
             first = runner.tick()
             data_source.settlements = {"btc-updown-5m-1770000000": "Up"}
@@ -315,12 +329,21 @@ class PathPaperRunnerTests(unittest.TestCase):
                         "market_slug": "btc-updown-5m-1770000000",
                         "sampled_ts": 1770000120,
                         "book_stale": 0,
-                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "up_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "down_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
                     }
                 ],
             )
             runner = PathPaperRunner(
-                PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120,), start_sampled_ts=1770000121),
+                PathPaperRunnerConfig(
+                    wallet=wallet,
+                    data_dir=Path(tmp),
+                    checkpoints=(120,),
+                    start_sampled_ts=1770000121,
+                    target_pair_notional_usdc=125,
+                    max_pair_cost=1.01,
+                    execution_style="taker",
+                ),
                 data_source=data_source,
             )
 
@@ -348,11 +371,15 @@ class PathPaperRunnerTests(unittest.TestCase):
                         "market_slug": "btc-updown-5m-1770000000",
                         "sampled_ts": 1770000120,
                         "book_stale": 0,
-                        "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "up_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
+                        "down_json": {"ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5}}},
                     }
                 ],
             )
-            runner = PathPaperRunner(PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120,)), data_source=data_source)
+            runner = PathPaperRunner(
+                PathPaperRunnerConfig(wallet=wallet, data_dir=Path(tmp), checkpoints=(120,), target_pair_notional_usdc=125, max_pair_cost=1.01, execution_style="taker"),
+                data_source=data_source,
+            )
 
             result = runner.tick()
 

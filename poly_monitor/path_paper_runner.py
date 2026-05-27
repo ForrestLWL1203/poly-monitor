@@ -20,6 +20,13 @@ class PathPaperRunnerConfig:
     notional_usdc: float = 25.0
     first_bias_min_usdc: float = 25.0
     max_price: float = 0.95
+    target_pair_notional_usdc: float = 25.0
+    target_pair_shares_per_side: float | None = None
+    max_pair_cost: float = 0.99
+    max_unpaired_price: float = 0.6
+    max_inventory_imbalance_ratio: float = 0.05
+    min_order_usdc: float = 1.0
+    execution_style: str = "maker"
     start_sampled_ts: int = 0
     winning_sides: dict[str, str] = field(default_factory=dict)
 
@@ -204,6 +211,13 @@ class PathPaperRunner:
                     notional_usdc=self.config.notional_usdc,
                     first_bias_min_usdc=self.config.first_bias_min_usdc,
                     max_price=self.config.max_price,
+                    target_pair_notional_usdc=self.config.target_pair_notional_usdc,
+                    target_pair_shares_per_side=self.config.target_pair_shares_per_side,
+                    max_pair_cost=self.config.max_pair_cost,
+                    max_unpaired_price=self.config.max_unpaired_price,
+                    max_inventory_imbalance_ratio=self.config.max_inventory_imbalance_ratio,
+                    min_order_usdc=self.config.min_order_usdc,
+                    execution_style=self.config.execution_style,
                 )
             )
         )

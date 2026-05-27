@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 data/
+deep_exports/
 logs/
 reports/
 review/

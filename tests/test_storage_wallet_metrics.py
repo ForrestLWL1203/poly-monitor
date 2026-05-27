@@ -459,6 +459,63 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual(context_rows[0]["tx_hash"], "0xold")
         self.assertEqual({row["data_type"] for row in manifest}, {"wallet_activity_events", "wallet_trade_contexts"})
 
+    def test_cleanup_hot_research_rows_removes_old_trades_and_pnl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObserverStore(Path(tmp) / "state" / "observer.sqlite")
+            try:
+                store.insert_trades(
+                    [
+                        {
+                            "tx_hash": "0xold",
+                            "wallet": "0xabc",
+                            "market_slug": "btc-updown-5m-100",
+                            "condition_id": "0xold",
+                            "symbol": "BTC",
+                            "exchange_ts": 100,
+                            "outcome": "Up",
+                            "side": "BUY",
+                            "price": 0.5,
+                            "size": 10,
+                            "usdc": 5,
+                        },
+                        {
+                            "tx_hash": "0xnew",
+                            "wallet": "0xabc",
+                            "market_slug": "btc-updown-5m-300",
+                            "condition_id": "0xnew",
+                            "symbol": "BTC",
+                            "exchange_ts": 300,
+                            "outcome": "Down",
+                            "side": "BUY",
+                            "price": 0.5,
+                            "size": 10,
+                            "usdc": 5,
+                        },
+                    ]
+                )
+                store.conn.execute(
+                    """
+                    INSERT INTO wallet_market_pnl(
+                        wallet,market_slug,condition_id,symbol,realized_pnl,buy_usdc,sell_usdc,
+                        settled_value,net_shares_up,net_shares_down,trades,winning_side,settled_at
+                    ) VALUES
+                    ('0xabc','btc-updown-5m-100','0xold','BTC',1,5,0,6,0,0,1,'Up','1970-01-01T00:01:40+00:00'),
+                    ('0xabc','btc-updown-5m-300','0xnew','BTC',2,5,0,7,0,0,1,'Down','1970-01-01T00:05:00+00:00')
+                    """
+                )
+                store.conn.commit()
+
+                result = store.cleanup_hot_research_rows(cutoff_ts=200)
+                trades = store.conn.execute("SELECT tx_hash FROM trades ORDER BY tx_hash").fetchall()
+                pnl = store.conn.execute("SELECT market_slug FROM wallet_market_pnl ORDER BY market_slug").fetchall()
+            finally:
+                store.close()
+
+        self.assertEqual(result["removed_trades"], 1)
+        self.assertEqual(result["removed_wallet_market_pnl"], 1)
+        self.assertEqual([row["tx_hash"] for row in trades], ["0xnew"])
+        self.assertEqual([row["market_slug"] for row in pnl], ["btc-updown-5m-300"])
+
     def test_watchlist_merge_activity_creates_wallet_market_pnl_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")

@@ -15,17 +15,215 @@ from poly_monitor.path_strategy import (
     load_deep_export_for_path_strategy,
     replay_path_strategy,
 )
+from poly_monitor.strategy_runtime import StrategyHistory, StrategySnapshot, TradeIntent
 
 
 class PathStrategyTests(unittest.TestCase):
+    def test_wallet_path_builds_scaled_pair_inventory_without_wallet_activity(self):
+        strategy = WalletPathStrategy(
+            PathStrategyConfig(
+                wallet="0xabc",
+                checkpoints=(1,),
+                notional_usdc=10,
+                max_price=0.7,
+                target_pair_notional_usdc=100,
+                max_pair_cost=1.01,
+                min_order_usdc=1,
+                one_trade_per_market=False,
+            )
+        )
+        first = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "btc-updown-5m-1770000000",
+                "symbol": "BTC",
+                "sampled_ts": 1770000120,
+                "book_stale": 0,
+                "up_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5, "filled_usdc": 10}}},
+                "down_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5, "filled_usdc": 10}}},
+            }
+        )
+        second = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "btc-updown-5m-1770000000",
+                "symbol": "BTC",
+                "sampled_ts": 1770000121,
+                "book_stale": 0,
+                "up_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5, "filled_usdc": 10}}},
+                "down_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5, "filled_usdc": 10}}},
+            }
+        )
+        history = StrategyHistory(snapshots_by_market={"btc-updown-5m-1770000000": [first, second]})
+
+        first_intent = strategy.evaluate(first, history)
+        assert first_intent is not None
+        history.emitted_intents.append(first_intent)
+        second_intent = strategy.evaluate(second, history)
+
+        self.assertEqual(first_intent.outcome, "Up")
+        self.assertEqual(first_intent.notional_usdc, 10)
+        self.assertEqual(first_intent.features["target_up_shares"], 40)
+        self.assertEqual(first_intent.features["current_up_shares"], 0)
+        self.assertIsNotNone(second_intent)
+        assert second_intent is not None
+        self.assertEqual(second_intent.outcome, "Down")
+        self.assertEqual(second_intent.notional_usdc, 10)
+        self.assertEqual(second_intent.features["target_down_shares"], 40.333333)
+        self.assertEqual(second_intent.features["pair_cost"], 1.0)
+
+    def test_wallet_path_inventory_logic_is_symbol_agnostic(self):
+        strategy = WalletPathStrategy(
+            PathStrategyConfig(
+                wallet="0xabc",
+                checkpoints=(1,),
+                notional_usdc=10,
+                max_price=0.7,
+                target_pair_notional_usdc=100,
+                max_pair_cost=1.01,
+                min_order_usdc=1,
+                one_trade_per_market=False,
+            )
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "eth-updown-5m-1770000000",
+                "symbol": "ETH",
+                "sampled_ts": 1770000010,
+                "book_stale": 0,
+                "up_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5, "filled_usdc": 10}}},
+                "down_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5, "filled_usdc": 10}}},
+            }
+        )
+        history = StrategyHistory(snapshots_by_market={"eth-updown-5m-1770000000": [snapshot]})
+
+        intent = strategy.evaluate(snapshot, history)
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.symbol, "ETH")
+        self.assertEqual(intent.outcome, "Up")
+
+    def test_wallet_path_rejects_expensive_pair_cost(self):
+        strategy = WalletPathStrategy(
+            PathStrategyConfig(
+                wallet="0xabc",
+                checkpoints=(1,),
+                notional_usdc=10,
+                max_price=0.7,
+                target_pair_notional_usdc=100,
+                max_pair_cost=0.99,
+                min_order_usdc=1,
+                one_trade_per_market=False,
+            )
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "eth-updown-5m-1770000000",
+                "symbol": "ETH",
+                "sampled_ts": 1770000010,
+                "book_stale": 0,
+                "up_json": {"bid": 0.50, "ask": 0.51, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.51, "filled_usdc": 10}}},
+                "down_json": {"bid": 0.49, "ask": 0.50, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.50, "filled_usdc": 10}}},
+            }
+        )
+
+        history = StrategyHistory(
+            snapshots_by_market={"eth-updown-5m-1770000000": [snapshot]},
+            emitted_intents=[
+                TradeIntent(
+                    market_slug="eth-updown-5m-1770000000",
+                    sampled_ts=1770000009,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=10,
+                    max_price=0.7,
+                    expected_price=0.51,
+                    reason="seed",
+                )
+            ],
+        )
+
+        intent = strategy.evaluate(snapshot, history)
+
+        self.assertIsNone(intent)
+
+    def test_wallet_path_can_size_by_target_shares_per_side(self):
+        strategy = WalletPathStrategy(
+            PathStrategyConfig(
+                wallet="0xabc",
+                checkpoints=(1,),
+                notional_usdc=10,
+                max_price=0.7,
+                target_pair_notional_usdc=1000,
+                target_pair_shares_per_side=40,
+                max_pair_cost=1.01,
+                min_order_usdc=1,
+                one_trade_per_market=False,
+            )
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "btc-updown-5m-1770000000",
+                "symbol": "BTC",
+                "sampled_ts": 1770000150,
+                "book_stale": 0,
+                "up_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5, "filled_usdc": 10}}},
+                "down_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5, "filled_usdc": 10}}},
+            }
+        )
+
+        intent = strategy.evaluate(snapshot, StrategyHistory(snapshots_by_market={"btc-updown-5m-1770000000": [snapshot]}))
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.notional_usdc, 9.8)
+        self.assertEqual(intent.features["sizing_mode"], "shares_per_side")
+        self.assertEqual(intent.features["target_pair_shares_per_side"], 40)
+        self.assertEqual(intent.features["target_up_shares"], 20)
+
+    def test_wallet_path_replay_can_emit_multiple_inventory_orders_in_same_market(self):
+        adapter = RecordingExecutionAdapter()
+        samples = [
+            {
+                "market_slug": "btc-updown-5m-1770000000",
+                "sampled_ts": 1770000010,
+                "book_stale": 0,
+                "up_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5}}},
+                "down_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5}}},
+            },
+            {
+                "market_slug": "btc-updown-5m-1770000000",
+                "sampled_ts": 1770000020,
+                "book_stale": 0,
+                "up_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5}}},
+                "down_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"10": {"ok": True, "avg": 0.5}}},
+            },
+        ]
+
+        result = replay_path_strategy(
+            [],
+            samples,
+            PathStrategyConfig(
+                wallet="0xabc",
+                checkpoints=(1,),
+                notional_usdc=10,
+                target_pair_notional_usdc=100,
+                max_pair_cost=1.01,
+                min_order_usdc=1,
+                one_trade_per_market=False,
+            ),
+            adapter=adapter,
+        )
+
+        self.assertEqual([intent.outcome for intent in result.intents], ["Up", "Down"])
+
     def test_emits_intent_when_checkpoint_bias_and_book_are_fillable(self):
-        strategy = WalletPathStrategy(PathStrategyConfig(wallet="0xabc", checkpoints=(120,), notional_usdc=25, max_price=0.7))
+        strategy = WalletPathStrategy(PathStrategyConfig(wallet="0xabc", checkpoints=(120,), notional_usdc=25, max_price=0.7, target_pair_notional_usdc=100, max_pair_cost=1.1))
         sample = {
             "market_slug": "btc-updown-5m-1770000000",
             "sampled_ts": 1770000120,
             "book_stale": 0,
-            "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.61, "filled_usdc": 25}}},
-            "down_json": {"ask_targets": {"25": {"ok": True, "avg": 0.45, "filled_usdc": 25}}},
+            "up_json": {"bid": 0.60, "ask": 0.61, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.61, "filled_usdc": 25}}},
+            "down_json": {"bid": 0.44, "ask": 0.45, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.45, "filled_usdc": 25}}},
         }
         activity = [
             {
@@ -45,12 +243,14 @@ class PathStrategyTests(unittest.TestCase):
         assert intent is not None
         self.assertEqual(intent.wallet, "0xabc")
         self.assertEqual(intent.market_slug, "btc-updown-5m-1770000000")
-        self.assertEqual(intent.outcome, "Up")
+        self.assertEqual(intent.outcome, "Down")
         self.assertEqual(intent.intent, "BUY")
-        self.assertEqual(intent.notional_usdc, 25)
-        self.assertEqual(intent.expected_price, 0.61)
-        self.assertEqual(intent.reason, "checkpoint_120_net_bias")
-        self.assertEqual(intent.features["wallet_net_up_down_usdc"], 42.0)
+        self.assertEqual(intent.notional_usdc, 16.603774)
+        self.assertEqual(intent.expected_price, 0.44)
+        self.assertEqual(intent.reason, "checkpoint_120_pair_cost_inventory")
+        self.assertEqual(intent.features["pair_cost"], 1.06)
+        self.assertEqual(intent.features["execution_style"], "maker")
+        self.assertEqual(intent.features["book_fill"]["source"], "maker_quote_at_best_bid")
 
     def test_rejects_expensive_or_unfillable_book(self):
         strategy = WalletPathStrategy(PathStrategyConfig(wallet="0xabc", checkpoints=(120,), notional_usdc=25, max_price=0.7))
@@ -106,37 +306,40 @@ class PathStrategyTests(unittest.TestCase):
                 "market_slug": "btc-updown-5m-1770000000",
                 "sampled_ts": 1770000120,
                 "book_stale": 0,
-                "down_json": {"ask_targets": {"25": {"ok": True, "avg": 0.52}}},
+                "up_json": {"bid": 0.47, "ask": 0.48, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.48}}},
+                "down_json": {"bid": 0.51, "ask": 0.52, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.52}}},
             },
             {
                 "market_slug": "btc-updown-5m-1770000000",
                 "sampled_ts": 1770000180,
                 "book_stale": 0,
-                "down_json": {"ask_targets": {"25": {"ok": True, "avg": 0.54}}},
+                "up_json": {"bid": 0.45, "ask": 0.46, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.46}}},
+                "down_json": {"bid": 0.53, "ask": 0.54, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.54}}},
             },
         ]
 
         result = replay_path_strategy(
             activity,
             samples,
-            PathStrategyConfig(wallet="0xabc", checkpoints=(120, 180), notional_usdc=25),
+            PathStrategyConfig(wallet="0xabc", checkpoints=(120, 180), notional_usdc=25, target_pair_notional_usdc=100, max_pair_cost=1.1),
             adapter=adapter,
         )
 
         self.assertEqual(len(result.intents), 1)
         self.assertEqual(len(adapter.submitted), 1)
-        self.assertEqual(adapter.submitted[0].outcome, "Down")
+        self.assertEqual(adapter.submitted[0].outcome, "Up")
         self.assertEqual(result.executions[0].status, "recorded")
 
     def test_settlement_paper_adapter_computes_simulated_pnl_without_live_orders(self):
         adapter = SettlementPaperExecutionAdapter({"btc-updown-5m-1770000000": "Up"})
-        strategy = WalletPathStrategy(PathStrategyConfig(wallet="0xabc", checkpoints=(120,), notional_usdc=25, max_price=0.7))
+        strategy = WalletPathStrategy(PathStrategyConfig(wallet="0xabc", checkpoints=(120,), notional_usdc=25, max_price=0.7, target_pair_notional_usdc=100, max_pair_cost=1.1))
         intent = strategy.evaluate_snapshot(
             {
                 "market_slug": "btc-updown-5m-1770000000",
                 "sampled_ts": 1770000120,
                 "book_stale": 0,
-                "up_json": {"ask_targets": {"25": {"ok": True, "avg": 0.5, "filled_usdc": 25}}},
+                "up_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5, "filled_usdc": 25}}},
+                "down_json": {"bid": 0.49, "ask": 0.5, "ask_depth_usdc": 100, "ask_targets": {"25": {"ok": True, "avg": 0.5, "filled_usdc": 25}}},
             },
             [
                 {
@@ -156,8 +359,8 @@ class PathStrategyTests(unittest.TestCase):
 
         self.assertEqual(result.status, "paper_settled")
         self.assertEqual(result.detail["winning_side"], "Up")
-        self.assertEqual(result.detail["shares"], 50.0)
-        self.assertEqual(result.detail["realized_pnl"], 25.0)
+        self.assertEqual(result.detail["shares"], 40.0)
+        self.assertEqual(result.detail["realized_pnl"], 20.4)
 
     def test_loads_replay_inputs_from_deep_export_zip(self):
         with tempfile.TemporaryDirectory() as tmp:
