@@ -1273,6 +1273,54 @@ class ObserverStore:
             return 0
         return max(0, before - after)
 
+    def compact_database_if_needed(
+        self,
+        *,
+        min_freelist_pages: int = 32768,
+        min_freelist_ratio: float = 0.25,
+    ) -> dict[str, Any]:
+        try:
+            page_count = int(self.conn.execute("PRAGMA page_count").fetchone()[0] or 0)
+            freelist_count = int(self.conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+            page_size = int(self.conn.execute("PRAGMA page_size").fetchone()[0] or 0)
+        except sqlite3.Error:
+            return {
+                "compacted": False,
+                "compact_error": "pragma_failed",
+            }
+        ratio = (freelist_count / page_count) if page_count > 0 else 0.0
+        if freelist_count < max(1, int(min_freelist_pages)) or ratio < max(0.0, float(min_freelist_ratio)):
+            return {
+                "compacted": False,
+                "compact_page_count": page_count,
+                "compact_freelist_count": freelist_count,
+                "compact_free_bytes": freelist_count * page_size,
+            }
+        try:
+            self.conn.commit()
+            self._checkpoint_wal()
+            self.conn.execute("VACUUM")
+            self._checkpoint_wal()
+            after_pages = int(self.conn.execute("PRAGMA page_count").fetchone()[0] or 0)
+            after_free = int(self.conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+        except sqlite3.Error as exc:
+            return {
+                "compacted": False,
+                "compact_error": str(exc),
+                "compact_page_count": page_count,
+                "compact_freelist_count": freelist_count,
+                "compact_free_bytes": freelist_count * page_size,
+            }
+        return {
+            "compacted": True,
+            "compact_page_count": page_count,
+            "compact_freelist_count": freelist_count,
+            "compact_free_bytes": freelist_count * page_size,
+            "compact_after_page_count": after_pages,
+            "compact_after_freelist_count": after_free,
+            "compact_reclaimed_pages": max(0, page_count - after_pages),
+        }
+
     def _checkpoint_wal(self) -> None:
         try:
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

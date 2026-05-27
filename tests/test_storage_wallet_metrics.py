@@ -516,6 +516,30 @@ class StorageWalletMetricsTests(unittest.TestCase):
         self.assertEqual([row["tx_hash"] for row in trades], ["0xnew"])
         self.assertEqual([row["market_slug"] for row in pnl], ["btc-updown-5m-300"])
 
+    def test_compact_database_if_needed_shrinks_large_freelist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state" / "observer.sqlite"
+            store = ObserverStore(db_path)
+            try:
+                store.conn.execute("CREATE TABLE compact_blob_test(payload BLOB)")
+                blob = b"x" * 4096
+                store.conn.executemany("INSERT INTO compact_blob_test(payload) VALUES(?)", [(blob,) for _ in range(600)])
+                store.conn.commit()
+                store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                expanded_size = db_path.stat().st_size
+                store.conn.execute("DELETE FROM compact_blob_test")
+                store.conn.commit()
+                before_free = int(store.conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+
+                result = store.compact_database_if_needed(min_freelist_pages=1, min_freelist_ratio=0.01)
+                compacted_size = db_path.stat().st_size
+            finally:
+                store.close()
+
+        self.assertGreater(before_free, 0)
+        self.assertTrue(result["compacted"])
+        self.assertLess(compacted_size, expanded_size)
+
     def test_watchlist_merge_activity_creates_wallet_market_pnl_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ObserverStore(Path(tmp) / "observer.sqlite")

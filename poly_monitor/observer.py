@@ -244,7 +244,15 @@ class CryptoWalletObserver:
         if time.monotonic() - self._last_window_refresh < self.config.window_refresh_sec:
             return
         self._last_window_refresh = time.monotonic()
-        await self._refresh_windows()
+        try:
+            await self._refresh_windows()
+        except Exception as exc:
+            self.writer.write({
+                "event": "observer_error",
+                "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "stage": "refresh_windows",
+                "error": str(exc),
+            })
 
     async def _refresh_window_open_prices_if_due(self) -> None:
         if not self._has_missing_open_prices():
@@ -1292,6 +1300,8 @@ class CryptoWalletObserver:
             dormant_limit=self.config.research_cleanup_dormant_wallets
         )
         result.update(research_cleanup)
+        compact_result = self.store.compact_database_if_needed()
+        result.update(compact_result)
         cleanup_changed = any(
             value
             for key, value in result.items()

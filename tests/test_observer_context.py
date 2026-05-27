@@ -1615,6 +1615,25 @@ class ObserverContextTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run_case()), (0, 0, 0, 0))
 
+    def test_window_refresh_timeout_is_logged_without_stopping_observer(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), window_refresh_sec=0))
+                observer._last_window_refresh = 0
+                try:
+                    with patch.object(observer, "_refresh_windows", new=AsyncMock(side_effect=TimeoutError("gamma timeout"))):
+                        await observer._refresh_windows_if_due()
+                finally:
+                    observer.store.close()
+                    observer.writer.close()
+                events_path = Path(tmp) / "raw" / dt.datetime.now(dt.timezone.utc).date().isoformat() / "events.jsonl"
+                return events_path.read_text(encoding="utf-8")
+
+        events = asyncio.run(run_case())
+
+        self.assertIn("observer_error", events)
+        self.assertIn("gamma timeout", events)
+
     def test_cleanup_stale_data_prunes_old_context_snapshot_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
             observer = CryptoWalletObserver(ObserverConfig(data_dir=Path(tmp), cleanup_interval_hours=0.001))
