@@ -238,6 +238,71 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(score.status, "active_candidate")
         self.assertNotIn("wins_7d_below_losses", score.reasons)
 
+    def test_score_wallet_rejects_high_win_rate_low_economic_pnl_profile(self):
+        metrics = {
+            "wallet": "0xbb910ef0ae2cc4d13b201b9392e44eeee5446959",
+            "trades_24h": 317,
+            "markets_24h": 112,
+            "trades_7d": 1176,
+            "trades_30d": 1176,
+            "markets_7d": 345,
+            "pnl_7d": 2.73101,
+            "pnl_30d": 3.12415,
+            "pnl_source": "profile_portfolio_pnl",
+            "crypto_closed_position_wins_7d": 163,
+            "crypto_closed_position_losses_7d": 0,
+            "local_observed_settled_markets_7d": 3,
+            "local_observed_pnl_7d": -2.847222,
+            "local_observed_wins_7d": 2,
+            "local_observed_losses_7d": 1,
+            "top1_concentration": 0.031731,
+            "top3_concentration": 0.08024,
+            "longshot_profit_share": 0.038176,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.025,
+            "historical_trades": 1176,
+            "historical_markets": 345,
+            "historical_pnl": 3.12415,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds())
+
+        self.assertEqual(score.status, "archive_candidate")
+        self.assertIn("profile_pnl_30d_below_economic_threshold", score.reasons)
+
+    def test_local_observed_profit_can_relieve_low_profile_pnl_gate(self):
+        metrics = {
+            "wallet": "0xlocaledge",
+            "trades_24h": 320,
+            "markets_24h": 120,
+            "trades_7d": 1000,
+            "trades_30d": 1200,
+            "markets_7d": 180,
+            "pnl_7d": 5,
+            "pnl_30d": 5,
+            "pnl_source": "profile_portfolio_pnl",
+            "crypto_closed_position_wins_7d": 40,
+            "crypto_closed_position_losses_7d": 10,
+            "local_observed_settled_markets_7d": 40,
+            "local_observed_span_hours": 30,
+            "local_observed_pnl_7d": 80,
+            "local_observed_wins_7d": 30,
+            "local_observed_losses_7d": 10,
+            "top1_concentration": 0.05,
+            "top3_concentration": 0.15,
+            "longshot_profit_share": 0.02,
+            "longshot_profit_markets": 1,
+            "last_active_age_hours": 0.05,
+            "historical_trades": 1200,
+            "historical_markets": 180,
+            "historical_pnl": 5,
+        }
+
+        score = score_wallet(metrics, CandidateThresholds(min_active_rank_score=0))
+
+        self.assertEqual(score.status, "active_candidate")
+        self.assertNotIn("profile_pnl_30d_below_economic_threshold", score.reasons)
+
     def test_quality_gate_uses_only_crypto_closed_position_win_loss_fallback(self):
         metrics = {
             "wallet": "0xmixedprofile",

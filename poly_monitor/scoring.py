@@ -19,6 +19,8 @@ class CandidateThresholds:
     min_local_quality_markets_for_gate: int = 10
     min_local_quality_observed_hours: float = 24.0
     min_quality_markets_24h: int = 30
+    min_reliable_profile_pnl_30d: float = 25.0
+    min_local_observed_pnl_7d_for_profile_pnl_relief: float = 25.0
     active_max_age_hours: float = 1.0
     min_active_rank_score: float = 550.0
     archive_age_hours: float = 14 * 24.0
@@ -115,6 +117,17 @@ def _reliable_profile_pnl_passes(metrics: dict[str, Any]) -> bool:
     return _num(metrics, "pnl_7d") > 0 and _num(metrics, "pnl_30d") > 0
 
 
+def _reliable_profile_pnl_economic_passes(metrics: dict[str, Any], thresholds: CandidateThresholds) -> bool:
+    if not _has_reliable_profile_pnl(metrics):
+        return True
+    if _num(metrics, "pnl_30d") >= thresholds.min_reliable_profile_pnl_30d:
+        return True
+    return (
+        _local_quality_passes(metrics, thresholds)
+        and _local_pnl_7d(metrics) >= thresholds.min_local_observed_pnl_7d_for_profile_pnl_relief
+    )
+
+
 def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -> list[str]:
     longshot_high = _num(metrics, "longshot_profit_share") > thresholds.max_longshot_profit_share
     repeat_longshot = _num(metrics, "longshot_profit_markets") >= thresholds.min_repeat_longshot_profit_markets
@@ -161,6 +174,7 @@ def _active_failures(metrics: dict[str, Any], thresholds: CandidateThresholds) -
             has_local_quality_sample and _local_wins_7d(metrics) <= _local_losses_7d(metrics),
         ),
         ("pnl_30d_not_positive", use_historical_quality_gates and _num(metrics, "pnl_30d") <= 0),
+        ("profile_pnl_30d_below_economic_threshold", not _reliable_profile_pnl_economic_passes(metrics, thresholds)),
         ("wins_7d_below_losses", win_loss_failed),
         ("top1_concentration_high", use_historical_quality_gates and _num(metrics, "top1_concentration") > thresholds.max_top1_concentration),
         ("top3_concentration_high", use_historical_quality_gates and _num(metrics, "top3_concentration") > thresholds.max_top3_concentration),
