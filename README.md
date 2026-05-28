@@ -90,6 +90,9 @@ The default maker quote TTL is short (`5s`). Each tick reconciles pending
 quotes before submitting new ones: stale prices are cancelled as
 `quote_moved`, balanced inventory cancels as `balance_reconciled`, and surplus
 side quotes cancel as `side_no_longer_needed`.
+TTL can be swept as a fixed value with `--maker-order-ttl-sec`, or by phase with
+`--maker-early-ttl-sec`, `--maker-mid-ttl-sec`, `--maker-late-ttl-sec`, and
+`--maker-final-ttl-sec` for offline replay comparisons.
 The independent live paper runner intentionally runs one symbol/current market
 at a time; start separate runs for BTC and ETH when comparing symbols.
 

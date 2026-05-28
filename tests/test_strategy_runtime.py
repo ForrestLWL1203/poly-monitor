@@ -325,6 +325,28 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.detail["ttl_sec"], 5)
 
+    def test_pending_maker_replay_uses_dynamic_ttl_by_elapsed_phase(self):
+        replay = PendingMakerReplay(config=PendingMakerReplayConfig(order_ttl_sec=5, early_ttl_sec=4, mid_ttl_sec=3, late_ttl_sec=2, final_ttl_sec=1))
+
+        def intent_at(elapsed: int) -> TradeIntent:
+            return TradeIntent(
+                strategy_name="demo",
+                market_slug=f"btc-updown-5m-{elapsed}",
+                sampled_ts=20,
+                intent="BUY",
+                outcome="Up",
+                notional_usdc=5,
+                max_price=0.9,
+                expected_price=0.5,
+                reason="test",
+                features={"elapsed_sec": elapsed},
+            )
+
+        self.assertEqual(replay.ttl_for_intent(intent_at(1)), 4)
+        self.assertEqual(replay.ttl_for_intent(intent_at(60)), 3)
+        self.assertEqual(replay.ttl_for_intent(intent_at(180)), 2)
+        self.assertEqual(replay.ttl_for_intent(intent_at(240)), 1)
+
     def test_x32_trace_explains_pair_cost_skip(self):
         strategy = strategy_from_name("x32_pair_cost_inventory_v0", wallet="0x32")
         snapshot = StrategySnapshot.from_market_state_sample(

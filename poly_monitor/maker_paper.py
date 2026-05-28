@@ -6,6 +6,13 @@ from typing import Any
 from .strategy_runtime import ExecutionResult, PaperExecutionAdapter, TradeIntent, book_fill_source
 
 
+def _safe_int(value: Any, *, default: int | None = 0) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class PendingMakerOrder:
     order_id: str
@@ -35,6 +42,10 @@ class PendingMakerOrder:
 class PendingMakerReplayConfig:
     fill_rate: float = 0.1
     order_ttl_sec: int = 5
+    early_ttl_sec: int | None = None
+    mid_ttl_sec: int | None = None
+    late_ttl_sec: int | None = None
+    final_ttl_sec: int | None = None
     max_open_orders_per_market: int = 20
     rebalance_fill_multiplier: float = 2.0
     rebalance_ttl_multiplier: float = 1.0
@@ -137,11 +148,26 @@ class PendingMakerReplay:
         )
 
     def ttl_for_intent(self, intent: TradeIntent) -> int:
+        base_ttl = self._base_ttl_for_intent(intent)
         source = book_fill_source(intent.features)
         if source == "maker_rebalance_quote":
-            return max(1, int(round(self.config.order_ttl_sec * self.config.rebalance_ttl_multiplier)))
+            return max(1, int(round(base_ttl * self.config.rebalance_ttl_multiplier)))
         if intent.features.get("deficit_side") not in {None, intent.outcome}:
-            return max(1, int(round(self.config.order_ttl_sec * self.config.excess_ttl_multiplier)))
+            return max(1, int(round(base_ttl * self.config.excess_ttl_multiplier)))
+        return max(1, int(base_ttl))
+
+    def _base_ttl_for_intent(self, intent: TradeIntent) -> int:
+        elapsed = _safe_int(intent.features.get("elapsed_sec"), default=None)
+        if elapsed is None:
+            return int(self.config.order_ttl_sec)
+        if elapsed >= 240 and self.config.final_ttl_sec is not None:
+            return int(self.config.final_ttl_sec)
+        if elapsed >= 180 and self.config.late_ttl_sec is not None:
+            return int(self.config.late_ttl_sec)
+        if elapsed >= 60 and self.config.mid_ttl_sec is not None:
+            return int(self.config.mid_ttl_sec)
+        if self.config.early_ttl_sec is not None:
+            return int(self.config.early_ttl_sec)
         return int(self.config.order_ttl_sec)
 
     def expire_before(self, ts: int) -> list[PendingMakerOrder]:

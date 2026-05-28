@@ -73,6 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--execution-style", choices=("maker", "taker"))
     parser.add_argument("--maker-fill-rate", type=float, default=0.1)
     parser.add_argument("--maker-order-ttl-sec", type=int, default=5)
+    parser.add_argument("--maker-early-ttl-sec", type=int)
+    parser.add_argument("--maker-mid-ttl-sec", type=int)
+    parser.add_argument("--maker-late-ttl-sec", type=int)
+    parser.add_argument("--maker-final-ttl-sec", type=int)
     parser.add_argument("--maker-expiry-grace-sec", type=float)
     parser.add_argument("--maker-max-open-orders-per-market", type=int, default=20)
     parser.add_argument("--maker-rebalance-fill-multiplier", type=float, default=2.0)
@@ -133,6 +137,10 @@ async def async_main() -> int:
             maker=PendingMakerReplayConfig(
                 fill_rate=args.maker_fill_rate,
                 order_ttl_sec=args.maker_order_ttl_sec,
+                early_ttl_sec=args.maker_early_ttl_sec,
+                mid_ttl_sec=args.maker_mid_ttl_sec,
+                late_ttl_sec=args.maker_late_ttl_sec,
+                final_ttl_sec=args.maker_final_ttl_sec,
                 max_open_orders_per_market=args.maker_max_open_orders_per_market,
                 rebalance_fill_multiplier=args.maker_rebalance_fill_multiplier,
                 rebalance_ttl_multiplier=args.maker_rebalance_ttl_multiplier,

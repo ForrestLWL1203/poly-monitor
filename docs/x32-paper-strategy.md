@@ -276,6 +276,9 @@ Known limitations:
   reconciled every tick. Pending quotes can be cancelled before expiry with
   `maker_cancelled` events for `quote_moved`, `balance_reconciled`, or
   `side_no_longer_needed`.
+- TTL is configurable for fixed or phased replay: `--maker-order-ttl-sec`, or
+  `--maker-early-ttl-sec` / `--maker-mid-ttl-sec` /
+  `--maker-late-ttl-sec` / `--maker-final-ttl-sec`.
 - Partial fills use configurable replay assumptions.
 - The replay may show final pair average above 1 even when active quote entries
   all had `maker_pair_cost <= max_pair_cost`.
