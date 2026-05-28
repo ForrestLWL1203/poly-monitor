@@ -40,6 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-unpaired-price", type=float)
     parser.add_argument("--max-inventory-imbalance-ratio", type=float)
     parser.add_argument("--min-order-usdc", type=float)
+    parser.add_argument("--max-quote-spread", type=float)
+    parser.add_argument("--max-quote-book-age-ms", type=float)
+    parser.add_argument("--min-quote-bid-depth-usdc", type=float)
     parser.add_argument("--execution-style", choices=("maker", "taker"))
     parser.add_argument("--maker-fill-rate", type=float, default=0.1)
     parser.add_argument("--maker-order-ttl-sec", type=int, default=30)
@@ -79,6 +82,9 @@ def main() -> int:
         rebalance_start_sec=args.rebalance_start_sec,
         maker_rebalance_ticks=args.maker_rebalance_ticks,
         min_order_usdc=args.min_order_usdc,
+        max_quote_spread=args.max_quote_spread,
+        max_quote_book_age_ms=args.max_quote_book_age_ms,
+        min_quote_bid_depth_usdc=args.min_quote_bid_depth_usdc,
         execution_style=args.execution_style,
         terminal_bias_start_sec=args.terminal_bias_start_sec,
         terminal_strong_start_sec=args.terminal_strong_start_sec,
@@ -123,6 +129,9 @@ def main() -> int:
             "max_unpaired_price": getattr(strategy.config, "max_unpaired_price", args.max_unpaired_price),
             "max_inventory_imbalance_ratio": getattr(strategy.config, "max_inventory_imbalance_ratio", args.max_inventory_imbalance_ratio),
             "min_order_usdc": getattr(strategy.config, "min_order_usdc", args.min_order_usdc),
+            "max_quote_spread": getattr(strategy.config, "max_quote_spread", args.max_quote_spread),
+            "max_quote_book_age_ms": getattr(strategy.config, "max_quote_book_age_ms", args.max_quote_book_age_ms),
+            "min_quote_bid_depth_usdc": getattr(strategy.config, "min_quote_bid_depth_usdc", args.min_quote_bid_depth_usdc),
             "execution_style": execution_style,
             "maker_fill_rate": args.maker_fill_rate,
             "maker_order_ttl_sec": args.maker_order_ttl_sec,

@@ -40,6 +40,9 @@ class PathStrategyConfig:
     maker_rebalance_ticks: int = 1
     tick_size: float = 0.01
     min_order_usdc: float = 1.0
+    max_quote_spread: float | None = None
+    max_quote_book_age_ms: float | None = None
+    min_quote_bid_depth_usdc: float | None = None
     execution_style: str = "maker"
     one_trade_per_market: bool = True
     terminal_bias_start_sec: int = 180

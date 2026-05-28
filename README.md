@@ -46,10 +46,15 @@ reference prices, and feeds normalized snapshots into a pluggable strategy.
 Registered strategies are named by address tag and behavior so multiple paper
 experiments do not blur together:
 
-- `x32_pair_cost_inventory_v0`: 0x32 / KimchiJuSaeYo-style two-sided pair-cost
-  inventory. Defaults to maker-style small orders, 100 target shares per side,
-  `max_pair_cost=0.995`, rebalance after 180 seconds, and no new inventory after
-  240 seconds.
+- `x32_pair_cost_inventory_v0`: 0x32 / KimchiJuSaeYo-style maker quote policy.
+  It is not a follow-trade strategy. It emits small maker bid quotes from our
+  own per-market notional budget, targets balanced Up+Down inventory only when
+  maker pair cost is at or below `max_pair_cost` (default `0.995`), and treats
+  above-1 pair cost as execution drift to control rather than an intended entry
+  condition. It also filters obviously poor maker quote states by spread,
+  book age, and bid-side depth. See
+  `docs/x32-paper-strategy.md` for the full paper-strategy rulebook and review
+  notes.
 - `d950_terminal_bias_v0`: renamed D950 terminal/path bias strategy. The legacy
   `d950_path_v0` name remains accepted as an alias.
 - `wallet_path_v0` / `wallet_path`: generic pair-cost inventory scaffold.
@@ -59,8 +64,18 @@ experiments do not blur together:
 python3 scripts/run_strategy_paper.py \
   --strategy x32_pair_cost_inventory_v0 \
   --mode paper \
-  --symbols BTC,ETH
+  --symbols BTC,ETH \
+  --data-dir data \
+  --run-id x32-paper-live \
+  --target-pair-notional 25 \
+  --max-pair-cost 0.99
 ```
+
+Live paper writes analysis logs under
+`data/paper_live/<strategy>/<run-id>/`: `decisions.jsonl`,
+`executions.jsonl`, `market_trades.jsonl`, `state.json`, and `summary.json`.
+It is read-only paper execution: maker orders are simulated with TTL/pending
+state and Data API market trades, not submitted to Polymarket.
 
 Deep wallet export backtests use the same strategy interface:
 

@@ -109,6 +109,17 @@ def _x32_config(**kwargs: Any) -> PathStrategyConfig:
         maker_rebalance_ticks=int(kwargs["maker_rebalance_ticks"]) if kwargs.get("maker_rebalance_ticks") is not None else None,
         tick_size=float(kwargs["tick_size"]) if kwargs.get("tick_size") is not None else None,
         min_order_usdc=float(kwargs["min_order_usdc"]) if kwargs.get("min_order_usdc") is not None else None,
+        max_quote_spread=float(kwargs["max_quote_spread"]) if kwargs.get("max_quote_spread") is not None else None,
+        max_quote_book_age_ms=(
+            float(kwargs["max_quote_book_age_ms"])
+            if kwargs.get("max_quote_book_age_ms") is not None
+            else None
+        ),
+        min_quote_bid_depth_usdc=(
+            float(kwargs["min_quote_bid_depth_usdc"])
+            if kwargs.get("min_quote_bid_depth_usdc") is not None
+            else None
+        ),
         execution_style=str(kwargs["execution_style"]) if kwargs.get("execution_style") is not None else None,
         one_trade_per_market=bool(kwargs["one_trade_per_market"]) if kwargs.get("one_trade_per_market") is not None else None,
     )

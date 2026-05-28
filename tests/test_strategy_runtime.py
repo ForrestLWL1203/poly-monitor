@@ -8,7 +8,8 @@ import zipfile
 from pathlib import Path
 
 from poly_monitor.market import MarketWindow
-from poly_monitor.strategy_backtest import DeepExportBacktestEnvironment, PendingMakerReplayConfig, run_strategy_backtest, run_strategy_maker_replay_backtest
+from poly_monitor.maker_paper import PendingMakerReplay, PendingMakerReplayConfig
+from poly_monitor.strategy_backtest import DeepExportBacktestEnvironment, run_strategy_backtest, run_strategy_maker_replay_backtest
 from poly_monitor.strategy_live import LivePaperEnvironment
 from poly_monitor.strategy_runtime import (
     PaperExecutionAdapter,
@@ -19,6 +20,7 @@ from poly_monitor.strategy_runtime import (
     strategy_from_name,
 )
 from poly_monitor.strategy_runner import StrategyRunner, StrategyRunnerConfig
+from poly_monitor.strategy_runner import LivePaperRunConfig, LivePaperStrategyRunner
 from poly_monitor.strategies import X32PairCostInventoryStrategy
 
 
@@ -165,6 +167,62 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "paper_rejected_unsupported_intent")
         self.assertNotIn("realized_pnl", result.detail)
 
+    def test_pending_maker_replay_expires_orders_and_settles_fills(self):
+        replay = PendingMakerReplay(
+            winning_sides={"btc-updown-5m-1": "Up"},
+            config=PendingMakerReplayConfig(fill_rate=1.0, order_ttl_sec=5),
+        )
+        intent = TradeIntent(
+            strategy_name="demo",
+            market_slug="btc-updown-5m-1",
+            sampled_ts=10,
+            intent="BUY",
+            outcome="Up",
+            notional_usdc=5,
+            max_price=0.9,
+            expected_price=0.5,
+            reason="test",
+        )
+
+        pending = replay.submit(intent)
+        expired = replay.expire_before(16)
+
+        self.assertEqual(pending.status, "maker_pending")
+        self.assertEqual(expired[0].order_id, "maker-1")
+        self.assertEqual(replay.expired, 1)
+
+        replay = PendingMakerReplay(
+            winning_sides={"btc-updown-5m-1": "Up"},
+            config=PendingMakerReplayConfig(fill_rate=1.0, order_ttl_sec=5),
+        )
+        replay.submit(intent)
+        fills = replay.process_trade({"market_slug": "btc-updown-5m-1", "exchange_ts": 11, "outcome": "Up", "price": 0.5, "usdc": 5})
+        settlement = replay.settle(fills[0].intent)
+
+        self.assertEqual(fills[0].intent.notional_usdc, 5)
+        self.assertEqual(settlement.status, "paper_settled")
+        self.assertEqual(settlement.detail["realized_pnl"], 5.0)
+
+    def test_x32_trace_explains_pair_cost_skip(self):
+        strategy = strategy_from_name("x32_pair_cost_inventory_v0", wallet="0x32")
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "btc-updown-5m-1770000000",
+                "symbol": "BTC",
+                "sampled_ts": 1770000010,
+                "book_stale": 0,
+                "up_json": {"bid": 0.60, "ask": 0.61, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                "down_json": {"bid": 0.40, "ask": 0.41, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+            }
+        )
+
+        trace = strategy.evaluate_with_trace(snapshot, StrategyHistory())
+
+        self.assertEqual(trace.decision, "skip")
+        self.assertEqual(trace.skip_reason, "pair_cost_above_max")
+        self.assertIsNone(trace.intent)
+        self.assertEqual(trace.features["maker_pair_cost"], 1.0)
+
     def test_deep_export_backtest_replays_strategy_with_standard_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             zip_path = Path(tmp) / "bundle.zip"
@@ -282,12 +340,33 @@ class StrategyFactoryTests(unittest.TestCase):
         self.assertIsInstance(strategy, X32PairCostInventoryStrategy)
         self.assertEqual(strategy.strategy_name, "x32_pair_cost_inventory_v0")
         self.assertEqual(strategy.config.checkpoints, (1,))
-        self.assertEqual(strategy.config.target_pair_shares_per_side, 100)
+        self.assertIsNone(strategy.config.target_pair_shares_per_side)
+        self.assertEqual(strategy.config.target_pair_notional_usdc, 55)
         self.assertEqual(strategy.config.notional_usdc, 5)
         self.assertEqual(strategy.config.max_pair_cost, 0.995)
-        self.assertEqual(strategy.config.rebalance_start_sec, 180)
-        self.assertEqual(strategy.config.mid_inventory_imbalance_ratio, 0.12)
+        self.assertEqual(strategy.config.max_unpaired_price, 0.70)
+        self.assertEqual(strategy.config.max_quote_spread, 0.02)
+        self.assertEqual(strategy.config.max_quote_book_age_ms, 50.0)
+        self.assertEqual(strategy.config.min_quote_bid_depth_usdc, 20.0)
+        self.assertEqual(strategy.config.rebalance_start_sec, 240)
+        self.assertEqual(strategy.config.early_inventory_imbalance_ratio, 1.0)
+        self.assertEqual(strategy.config.mid_inventory_imbalance_ratio, 0.60)
+        self.assertEqual(strategy.config.late_inventory_imbalance_ratio, 0.30)
+        self.assertEqual(strategy.config.final_inventory_imbalance_ratio, 0.12)
         self.assertFalse(strategy.one_trade_per_market)
+
+    def test_x32_pair_cost_strategy_accepts_quote_quality_overrides(self):
+        strategy = strategy_from_name(
+            "x32_pair_cost_inventory_v0",
+            wallet="0x32",
+            max_quote_spread=0.01,
+            max_quote_book_age_ms=25,
+            min_quote_bid_depth_usdc=50,
+        )
+
+        self.assertEqual(strategy.config.max_quote_spread, 0.01)
+        self.assertEqual(strategy.config.max_quote_book_age_ms, 25.0)
+        self.assertEqual(strategy.config.min_quote_bid_depth_usdc, 50.0)
 
     def test_d950_terminal_bias_alias_matches_legacy_name(self):
         legacy = strategy_from_name("d950_path_v0", wallet="strategy")
@@ -436,6 +515,129 @@ class StrategyRunnerTests(unittest.TestCase):
             result = runner.tick([snapshot])
 
             self.assertEqual(result["intents"], 0)
+
+    def test_live_paper_runner_writes_decisions_executions_trades_state_and_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "paper_live" / "x32"
+            strategy = strategy_from_name(
+                "x32_pair_cost_inventory_v0",
+                wallet="0x32",
+                target_pair_notional_usdc=20,
+                max_pair_cost=0.995,
+                max_quote_book_age_ms=100,
+                min_quote_bid_depth_usdc=1,
+            )
+            runner = LivePaperStrategyRunner(
+                LivePaperRunConfig(run_dir=run_dir, run_id="test-run", mode="paper"),
+                strategy=strategy,
+            )
+            snapshot = StrategySnapshot.from_market_state_sample(
+                {
+                    "market_slug": "btc-updown-5m-1770000000",
+                    "condition_id": "cond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000010,
+                    "book_stale": 0,
+                    "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.50, "ask": 0.51, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                }
+            )
+            touch_trade = {
+                "market_slug": snapshot.market_slug,
+                "condition_id": "cond",
+                "symbol": "BTC",
+                "exchange_ts": 1770000011,
+                "outcome": "Up",
+                "side": "BUY",
+                "price": 0.49,
+                "size": 20,
+                "usdc": 9.8,
+                "tx_hash": "0xt",
+                "fill_id": "1",
+                "observed_at": "2026-05-26T00:00:11+00:00",
+            }
+
+            runner.tick([snapshot])
+            runner.process_market_trades([touch_trade, dict(touch_trade)])
+            runner.settle_market(snapshot.market_slug, "Up")
+            runner.write_state(active_windows=[], stream_diagnostics={"subscribed_tokens": 0})
+
+            decisions = [json.loads(line) for line in (run_dir / "decisions.jsonl").read_text().splitlines()]
+            executions = [json.loads(line) for line in (run_dir / "executions.jsonl").read_text().splitlines()]
+            trades = [json.loads(line) for line in (run_dir / "market_trades.jsonl").read_text().splitlines()]
+            state = json.loads((run_dir / "state.json").read_text())
+            summary = json.loads((run_dir / "summary.json").read_text())
+
+        self.assertEqual(decisions[0]["record_type"], "decision")
+        self.assertEqual(decisions[0]["decision"], "intent")
+        self.assertEqual(decisions[0]["maker_pair_cost"], 0.99)
+        self.assertEqual(executions[0]["record_type"], "maker_order_submitted")
+        self.assertEqual(executions[1]["record_type"], "maker_fill")
+        self.assertEqual(executions[2]["record_type"], "settled")
+        self.assertEqual(executions[2]["winning_side"], "Up")
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["tx_hash"], "0xt")
+        self.assertEqual(state["run"]["run_id"], "test-run")
+        self.assertEqual(summary["orders_submitted"], 1)
+        self.assertEqual(summary["fills"], 1)
+        self.assertEqual(summary["partial_fills"], 1)
+
+    def test_live_paper_runner_logs_trade_driven_expiry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "paper_live" / "x32"
+            strategy = strategy_from_name(
+                "x32_pair_cost_inventory_v0",
+                wallet="0x32",
+                target_pair_notional_usdc=20,
+                max_pair_cost=0.995,
+                max_quote_book_age_ms=100,
+                min_quote_bid_depth_usdc=1,
+            )
+            runner = LivePaperStrategyRunner(
+                LivePaperRunConfig(
+                    run_dir=run_dir,
+                    run_id="test-run",
+                    mode="paper",
+                    maker=PendingMakerReplayConfig(order_ttl_sec=1),
+                ),
+                strategy=strategy,
+            )
+            snapshot = StrategySnapshot.from_market_state_sample(
+                {
+                    "market_slug": "btc-updown-5m-1770000000",
+                    "condition_id": "cond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000010,
+                    "book_stale": 0,
+                    "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.50, "ask": 0.51, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                }
+            )
+            stale_touch = {
+                "market_slug": snapshot.market_slug,
+                "condition_id": "cond",
+                "symbol": "BTC",
+                "exchange_ts": 1770000013,
+                "outcome": "Up",
+                "side": "BUY",
+                "price": 0.49,
+                "size": 20,
+                "usdc": 9.8,
+                "tx_hash": "0xt",
+                "fill_id": "late",
+                "observed_at": "2026-05-26T00:00:13+00:00",
+            }
+
+            runner.tick([snapshot])
+            runner.process_market_trades([stale_touch])
+            runner.write_state(active_windows=[])
+
+            executions = [json.loads(line) for line in (run_dir / "executions.jsonl").read_text().splitlines()]
+            summary = json.loads((run_dir / "summary.json").read_text())
+
+        self.assertEqual([row["record_type"] for row in executions], ["maker_order_submitted", "maker_expired"])
+        self.assertEqual(summary["expired"], 1)
+        self.assertEqual(summary["fills"], 0)
 
 
 if __name__ == "__main__":

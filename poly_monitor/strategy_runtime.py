@@ -218,6 +218,22 @@ class TradeIntent:
 
 
 @dataclass(frozen=True)
+class EvaluationTrace:
+    decision: str
+    skip_reason: str | None = None
+    intent: TradeIntent | None = None
+    features: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision": self.decision,
+            "skip_reason": self.skip_reason,
+            "intent": self.intent.to_dict() if self.intent is not None else None,
+            "features": dict(self.features),
+        }
+
+
+@dataclass(frozen=True)
 class ExecutionResult:
     status: str
     intent: TradeIntent

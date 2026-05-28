@@ -93,6 +93,18 @@ def _load_json(bundle: zipfile.ZipFile, name: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _decode_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
 def _load_context_rows(bundle: zipfile.ZipFile) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -108,16 +120,7 @@ def _load_context_rows(bundle: zipfile.ZipFile) -> list[dict[str, Any]]:
 
 def _decode_context(row: dict[str, Any]) -> dict[str, Any]:
     context = row.get("context_json")
-    if isinstance(context, dict):
-        out = dict(context)
-    elif isinstance(context, str):
-        try:
-            payload = json.loads(context)
-        except json.JSONDecodeError:
-            payload = {}
-        out = payload if isinstance(payload, dict) else {}
-    else:
-        out = {}
+    out = _decode_json_object(context)
     out.setdefault("wallet", row.get("wallet"))
     out.setdefault("market_slug", row.get("market_slug"))
     out.setdefault("tx_hash", row.get("tx_hash"))
@@ -426,6 +429,210 @@ def _copyability(activity_rows: list[dict[str, Any]], matched: dict[int, dict[st
     }
 
 
+def _book_from_sample(row: dict[str, Any], outcome: str) -> dict[str, Any]:
+    key = "up_json" if outcome.lower() == "up" else "down_json"
+    return _decode_json_object(row.get(key))
+
+
+def _classify_trade_vs_book(price: float, book: dict[str, Any], tolerance: float) -> dict[str, Any]:
+    bid = book.get("bid")
+    ask = book.get("ask")
+    bid_price = _safe_float(bid, math.nan) if bid is not None else math.nan
+    ask_price = _safe_float(ask, math.nan) if ask is not None else math.nan
+    has_bid = not math.isnan(bid_price)
+    has_ask = not math.isnan(ask_price)
+    if not has_bid and not has_ask:
+        classification = "missing_book"
+    elif has_bid and abs(price - bid_price) <= tolerance and has_ask and abs(price - ask_price) <= tolerance:
+        classification = "both_tick"
+    elif has_bid and abs(price - bid_price) <= tolerance:
+        classification = "bid_match"
+    elif has_ask and abs(price - ask_price) <= tolerance:
+        classification = "ask_match"
+    elif has_bid and has_ask and bid_price + tolerance < price < ask_price - tolerance:
+        classification = "inside_spread"
+    elif has_bid and price < bid_price - tolerance:
+        classification = "below_bid"
+    elif has_ask and price > ask_price + tolerance:
+        classification = "above_ask"
+    else:
+        classification = "outside_book"
+    return {
+        "classification": classification,
+        "bid": _round(bid_price, 6) if has_bid else None,
+        "ask": _round(ask_price, 6) if has_ask else None,
+        "trade_minus_bid": _round(price - bid_price, 6) if has_bid else None,
+        "trade_minus_ask": _round(price - ask_price, 6) if has_ask else None,
+        "spread": _round(_safe_float(book.get("spread")), 6) if book.get("spread") is not None else None,
+        "book_age_ms": _round(_safe_float(book.get("book_age_ms")), 3) if book.get("book_age_ms") is not None else None,
+    }
+
+
+def _trade_book_row(row: dict[str, Any], book: dict[str, Any], source: str, sample_ts: int | None, tolerance: float) -> dict[str, Any]:
+    price = _safe_float(row.get("price"))
+    out = _classify_trade_vs_book(price, book, tolerance)
+    exchange_ts = _safe_int(row.get("exchange_ts"))
+    out.update(
+        {
+            "source": source,
+            "market_slug": str(row.get("market_slug") or ""),
+            "symbol": str(row.get("symbol") or _symbol_from_slug(str(row.get("market_slug") or ""))),
+            "tx_hash": str(row.get("tx_hash") or ""),
+            "exchange_ts": exchange_ts,
+            "sample_ts": sample_ts,
+            "sample_lag_sec": sample_ts - exchange_ts if sample_ts is not None and exchange_ts else None,
+            "side": str(row.get("side") or ""),
+            "outcome": str(row.get("outcome") or ""),
+            "price": _round(price, 6),
+            "size": _round(_safe_float(row.get("size")), 6),
+            "usdc": _round(_safe_float(row.get("usdc")), 6),
+        }
+    )
+    return out
+
+
+def _summarize_trade_book_rows(rows: list[dict[str, Any]], *, total: int | None = None) -> dict[str, Any]:
+    counts = Counter(str(row.get("classification") or "unknown") for row in rows)
+    total_rows = len(rows) if total is None else total
+    bid_deltas = [_safe_float(row.get("trade_minus_bid")) for row in rows if row.get("trade_minus_bid") is not None]
+    ask_deltas = [_safe_float(row.get("trade_minus_ask")) for row in rows if row.get("trade_minus_ask") is not None]
+    ages = [_safe_float(row.get("book_age_ms")) for row in rows if row.get("book_age_ms") is not None]
+    lags = [_safe_float(row.get("sample_lag_sec")) for row in rows if row.get("sample_lag_sec") is not None]
+    return {
+        "total": total_rows,
+        "classification_counts": dict(sorted(counts.items())),
+        "classification_rates_pct": {
+            key: _round((value / total_rows) * 100.0, 3) if total_rows else None for key, value in sorted(counts.items())
+        },
+        "median_trade_minus_bid": _round(_median(bid_deltas), 6) if bid_deltas else None,
+        "median_trade_minus_ask": _round(_median(ask_deltas), 6) if ask_deltas else None,
+        "median_book_age_ms": _round(_median(ages), 3) if ages else None,
+        "median_sample_lag_sec": _round(_median(lags), 3) if lags else None,
+        "examples": rows[:12],
+    }
+
+
+def _sample_candidates(
+    samples: list[dict[str, Any]],
+    exchange_ts: int,
+    mode: str,
+    max_lag_sec: int,
+) -> list[dict[str, Any]]:
+    if mode == "exact":
+        return [row for row in samples if _safe_int(row.get("sampled_ts")) == exchange_ts]
+    if mode == "nearest":
+        return [row for row in samples if abs(_safe_int(row.get("sampled_ts")) - exchange_ts) <= max_lag_sec]
+    if mode == "before":
+        return [row for row in samples if 0 < exchange_ts - _safe_int(row.get("sampled_ts")) <= max_lag_sec]
+    if mode == "after":
+        return [row for row in samples if 0 < _safe_int(row.get("sampled_ts")) - exchange_ts <= max_lag_sec]
+    return []
+
+
+def _choose_sample(candidates: list[dict[str, Any]], exchange_ts: int, mode: str) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    if mode == "before":
+        return max(candidates, key=lambda row: _safe_int(row.get("sampled_ts")))
+    if mode == "after":
+        return min(candidates, key=lambda row: _safe_int(row.get("sampled_ts")))
+    return min(candidates, key=lambda row: abs(_safe_int(row.get("sampled_ts")) - exchange_ts))
+
+
+def _sample_book_comparison(
+    trade_rows: list[dict[str, Any]],
+    samples_by_market: dict[str, list[dict[str, Any]]],
+    *,
+    mode: str,
+    max_lag_sec: int,
+    tolerance: float,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for trade in trade_rows:
+        slug = str(trade.get("market_slug") or "")
+        exchange_ts = _safe_int(trade.get("exchange_ts"))
+        sample = _choose_sample(_sample_candidates(samples_by_market.get(slug, []), exchange_ts, mode, max_lag_sec), exchange_ts, mode)
+        if not sample:
+            rows.append(
+                {
+                    "classification": "no_sample",
+                    "source": f"sample_{mode}",
+                    "market_slug": slug,
+                    "tx_hash": str(trade.get("tx_hash") or ""),
+                    "exchange_ts": exchange_ts,
+                    "sample_ts": None,
+                    "sample_lag_sec": None,
+                    "side": str(trade.get("side") or ""),
+                    "outcome": str(trade.get("outcome") or ""),
+                    "price": _round(_safe_float(trade.get("price")), 6),
+                    "size": _round(_safe_float(trade.get("size")), 6),
+                    "usdc": _round(_safe_float(trade.get("usdc")), 6),
+                }
+            )
+            continue
+        outcome = str(trade.get("outcome") or "").lower()
+        rows.append(_trade_book_row(trade, _book_from_sample(sample, outcome), f"sample_{mode}", _safe_int(sample.get("sampled_ts")), tolerance))
+    return _summarize_trade_book_rows(rows)
+
+
+def _execution_analysis(
+    activity_rows: list[dict[str, Any]],
+    matched: dict[int, dict[str, Any]],
+    deep_samples: list[dict[str, Any]],
+    *,
+    tolerance: float = 0.005,
+    max_lag_sec: int = 2,
+) -> dict[str, Any]:
+    trade_rows = [row for row in activity_rows if str(row.get("activity_type") or "").upper() == "TRADE"]
+    context_rows: list[dict[str, Any]] = []
+    for idx, trade in enumerate(activity_rows):
+        if str(trade.get("activity_type") or "").upper() != "TRADE":
+            continue
+        ctx = matched.get(idx)
+        if not ctx:
+            continue
+        outcome = str(trade.get("outcome") or ctx.get("trade_outcome") or "").lower()
+        book = ctx.get("up" if outcome == "up" else "down")
+        if not isinstance(book, dict):
+            continue
+        context_rows.append(_trade_book_row(trade, book, "context_snapshot", None, tolerance))
+
+    samples_by_market: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for sample in deep_samples:
+        slug = str(sample.get("market_slug") or "")
+        if slug:
+            samples_by_market[slug].append(sample)
+    for rows in samples_by_market.values():
+        rows.sort(key=lambda row: _safe_int(row.get("sampled_ts")))
+
+    exact = _sample_book_comparison(trade_rows, samples_by_market, mode="exact", max_lag_sec=0, tolerance=tolerance)
+    nearest = _sample_book_comparison(trade_rows, samples_by_market, mode="nearest", max_lag_sec=max_lag_sec, tolerance=tolerance)
+    before = _sample_book_comparison(trade_rows, samples_by_market, mode="before", max_lag_sec=max_lag_sec, tolerance=tolerance)
+    after = _sample_book_comparison(trade_rows, samples_by_market, mode="after", max_lag_sec=max_lag_sec, tolerance=tolerance)
+    comparable = nearest["total"] - int(nearest["classification_counts"].get("no_sample", 0))
+    ask_matches = int(nearest["classification_counts"].get("ask_match", 0)) + int(nearest["classification_counts"].get("both_tick", 0))
+    bid_matches = int(nearest["classification_counts"].get("bid_match", 0)) + int(nearest["classification_counts"].get("both_tick", 0))
+    return {
+        "assumptions": {
+            "price_tolerance": tolerance,
+            "near_sample_max_lag_sec": max_lag_sec,
+            "note": "Deep samples are second-level snapshots, not guaranteed pre-trade CLOB frames.",
+        },
+        "summary": {
+            "trade_rows": len(trade_rows),
+            "context_rows": len(context_rows),
+            "simple_taker_ask_match_rate_pct": _round((ask_matches / comparable) * 100.0, 3) if comparable else None,
+            "best_bid_match_rate_pct": _round((bid_matches / comparable) * 100.0, 3) if comparable else None,
+            "comparable_nearest_sample_rows": comparable,
+        },
+        "context_snapshot": _summarize_trade_book_rows(context_rows),
+        "sample_exact": exact,
+        "sample_nearest_2s": nearest,
+        "sample_before_2s": before,
+        "sample_after_2s": after,
+    }
+
+
 def _window_group(pnl: float) -> str:
     if pnl >= LARGE_WIN_PNL:
         return "large_win"
@@ -475,6 +682,10 @@ def _path_analysis(activity_rows: list[dict[str, Any]], pnl_rows: list[dict[str,
             name: {"trades": 0, "usdc": 0.0, "up_usdc": 0.0, "down_usdc": 0.0, "net_up_down_usdc": 0.0}
             for name, _low, _high in PATH_BUCKETS
         }
+        inventory = {
+            "up": {"shares": 0.0, "cost_usdc": 0.0},
+            "down": {"shares": 0.0, "cost_usdc": 0.0},
+        }
         total_usdc = 0.0
         ordered: list[tuple[float, dict[str, Any]]] = []
         for row in rows:
@@ -494,6 +705,12 @@ def _path_analysis(activity_rows: list[dict[str, Any]], pnl_rows: list[dict[str,
                 item["up_usdc"] += directional_usdc
             elif outcome == "down":
                 item["down_usdc"] += directional_usdc
+            if outcome in inventory:
+                size = _safe_float(row.get("size"))
+                signed_size = size if str(row.get("side") or "BUY").upper() != "SELL" else -size
+                signed_usdc = usdc if signed_size >= 0 else -usdc
+                inventory[outcome]["shares"] += signed_size
+                inventory[outcome]["cost_usdc"] += signed_usdc
             item["net_up_down_usdc"] += signed
             total_usdc += usdc
 
@@ -523,6 +740,12 @@ def _path_analysis(activity_rows: list[dict[str, Any]], pnl_rows: list[dict[str,
         pnl_row = pnl_lookup.get(slug, {})
         winning_side = str(pnl_row.get("winning_side") or pnl_row.get("winner") or pnl_row.get("resolved_outcome") or "")
         winning_side = winning_side.capitalize() if winning_side.lower() in {"up", "down"} else ""
+        up_shares = max(0.0, inventory["up"]["shares"])
+        down_shares = max(0.0, inventory["down"]["shares"])
+        up_avg = inventory["up"]["cost_usdc"] / up_shares if up_shares > 0 else None
+        down_avg = inventory["down"]["cost_usdc"] / down_shares if down_shares > 0 else None
+        paired_shares = min(up_shares, down_shares)
+        final_pair_cost = up_avg + down_avg if up_avg is not None and down_avg is not None else None
         final_bias_correct = final_side == winning_side if final_side != "Flat" and winning_side else None
         first_bias_correct = first_bias_side == winning_side if first_bias_side and winning_side else None
         checkpoint_correct: dict[str, bool | None] = {}
@@ -540,6 +763,12 @@ def _path_analysis(activity_rows: list[dict[str, Any]], pnl_rows: list[dict[str,
             "realized_pnl": _round(_safe_float(pnl_row.get("realized_pnl")), 6) if pnl_row else None,
             "trades": len(rows),
             "total_usdc": round(total_usdc, 6),
+            "up_shares": _round(up_shares, 6),
+            "down_shares": _round(down_shares, 6),
+            "up_avg_price": _round(up_avg, 6),
+            "down_avg_price": _round(down_avg, 6),
+            "paired_shares": _round(paired_shares, 6),
+            "final_pair_cost": _round(final_pair_cost, 6),
             "bucket_flow": bucket_flow,
             "final_net_usdc": _round(final_net, 6),
             "final_net_side": final_side,
@@ -622,6 +851,7 @@ def analyze_deep_wallet_export(zip_path: Path) -> dict[str, Any]:
     market = _market_behavior(wallet_activity, wallet_pnl)
     timing = _timing(wallet_activity, matched)
     copyability = _copyability(wallet_activity, matched)
+    execution_analysis = _execution_analysis(wallet_activity, matched, deep_samples)
     path_analysis = _path_analysis(wallet_activity, wallet_pnl)
     return {
         "wallet": str(manifest.get("wallet") or ""),
@@ -632,6 +862,7 @@ def analyze_deep_wallet_export(zip_path: Path) -> dict[str, Any]:
         "market_behavior": market,
         "timing": timing,
         "copyability": copyability,
+        "execution_analysis": execution_analysis,
         "path_analysis": path_analysis,
         "possible_strategy_hypotheses": _hypotheses(activity, market, timing, copyability),
     }
@@ -645,6 +876,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
     timing = report["timing"]
     copyability = report["copyability"]
     path = report.get("path_analysis", {})
+    execution = report.get("execution_analysis", {})
     path_summary = path.get("summary", {})
     groups = path.get("group_comparison", {})
     target25 = copyability["targets"].get("25", {})
@@ -659,12 +891,26 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- Markets: {market['markets']} / dual-side rate: {market['dual_side_rate']}",
         f"- Dominant timing bucket: {timing['dominant_bucket']}",
         f"- 25 USDC copyability: ok_rate={target25.get('ok_rate')} avg_slip_cents={target25.get('avg_slippage_cents')}",
+        f"- Nearest-sample ask match: {execution.get('summary', {}).get('simple_taker_ask_match_rate_pct')}%",
+        f"- Nearest-sample bid match: {execution.get('summary', {}).get('best_bid_match_rate_pct')}%",
         f"- Final path bias accuracy: {path_summary.get('final_bias_accuracy')} ({path_summary.get('final_bias_correct')}/{path_summary.get('final_bias_seen')})",
         "",
         "## Possible Strategy Hypotheses",
         "",
     ]
     lines.extend(f"- {item}" for item in report.get("possible_strategy_hypotheses", []))
+    lines.extend(["", "## Execution Analysis", ""])
+    assumptions = execution.get("assumptions", {})
+    lines.append(f"- Price tolerance: {assumptions.get('price_tolerance')}")
+    for name, label in (
+        ("context_snapshot", "context snapshot"),
+        ("sample_exact", "exact second sample"),
+        ("sample_nearest_2s", "nearest sample within 2s"),
+        ("sample_before_2s", "last sample before trade within 2s"),
+        ("sample_after_2s", "first sample after trade within 2s"),
+    ):
+        item = execution.get(name, {})
+        lines.append(f"- {label}: total={item.get('total')} counts={item.get('classification_counts')}")
     lines.extend(["", "## Window Path Analysis", ""])
     lines.append(f"- First bias threshold: {path_summary.get('first_bias_min_usdc')} USDC net Up-Down")
     lines.append(f"- First bias accuracy: {path_summary.get('first_bias_accuracy')} ({path_summary.get('first_bias_correct')}/{path_summary.get('first_bias_seen')})")
