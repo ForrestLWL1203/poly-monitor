@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import time
 from collections import Counter
@@ -24,6 +25,7 @@ class ClobBookStream:
         self._recv_task: asyncio.Task | None = None
         self._last_message_at = 0.0
         self._event_counts: Counter[str] = Counter()
+        self._trade_events: list[dict[str, Any]] = []
 
     async def connect(self, token_ids: list[str]) -> None:
         if websockets is None:
@@ -69,6 +71,11 @@ class ClobBookStream:
         if reset_counts:
             self._event_counts.clear()
         return row
+
+    def pop_trade_events(self) -> list[dict[str, Any]]:
+        rows = list(self._trade_events)
+        self._trade_events.clear()
+        return rows
 
     async def _connect_once(self) -> None:
         self._ws = await websockets.connect(CLOB_MARKET_WS_URL, ping_interval=10, ping_timeout=15)
@@ -130,6 +137,8 @@ class ClobBookStream:
             self._handle_book(event)
         elif event_type == "price_change":
             self._handle_price_change(event)
+        elif event_type == "last_trade_price":
+            self._handle_last_trade(event)
 
     @staticmethod
     def _parse_side(levels: list[dict[str, Any]], *, reverse: bool) -> dict[float, float]:
@@ -177,6 +186,39 @@ class ClobBookStream:
                 book[side_key].pop(price, None)
             book["received_at"] = time.monotonic()
 
+    def _handle_last_trade(self, event: dict[str, Any]) -> None:
+        token = str(event.get("asset_id") or "")
+        if not token:
+            return
+        try:
+            price = float(event.get("price"))
+        except (TypeError, ValueError):
+            return
+        size = _optional_float(event.get("size"))
+        ts = _exchange_ts_seconds(event.get("timestamp"))
+        usdc = price * size if size is not None else None
+        tx_hash = event.get("hash") or event.get("transaction_hash") or event.get("tx_hash")
+        fill_id = event.get("fill_id") or ":".join(
+            str(item)
+            for item in (tx_hash or "ws", token, ts, price, size if size is not None else "")
+        )
+        self._trade_events.append(
+            {
+                "event": "ws_trade_observed",
+                "source": "clob_ws",
+                "asset_id": token,
+                "market": event.get("market"),
+                "exchange_ts": ts,
+                "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "side": event.get("side"),
+                "price": price,
+                "size": size,
+                "usdc": round(usdc, 6) if usdc is not None else None,
+                "tx_hash": tx_hash,
+                "fill_id": fill_id,
+            }
+        )
+
 
 def _is_sorted_prices(levels: list[tuple[float, float]], *, reverse: bool) -> bool:
     if len(levels) < 2:
@@ -185,3 +227,21 @@ def _is_sorted_prices(levels: list[tuple[float, float]], *, reverse: bool) -> bo
     if reverse:
         return all(left >= right for left, right in zip(prices, prices[1:]))
     return all(left <= right for left, right in zip(prices, prices[1:]))
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _exchange_ts_seconds(value: Any) -> int:
+    try:
+        raw = float(value)
+    except (TypeError, ValueError):
+        return int(time.time())
+    if raw > 10_000_000_000:
+        raw /= 1000.0
+    return int(raw)

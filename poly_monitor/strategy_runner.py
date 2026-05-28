@@ -148,8 +148,9 @@ def _compact_book(book) -> dict[str, Any]:
     }
 
 
-def _trade_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str, str]:
+def _trade_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str, str, str]:
     return (
+        str(row.get("source") or row.get("event") or ""),
         str(row.get("market_slug") or ""),
         str(row.get("tx_hash") or ""),
         str(row.get("fill_id") or ""),
@@ -243,12 +244,13 @@ class LivePaperStrategyRunner:
         self.decisions_path = self.run_dir / "decisions.jsonl"
         self.executions_path = self.run_dir / "executions.jsonl"
         self.market_trades_path = self.run_dir / "market_trades.jsonl"
+        self.ws_trades_path = self.run_dir / "ws_trades.jsonl"
         self.state_path = self.run_dir / "state.json"
         self.summary_path = self.run_dir / "summary.json"
         self.history = StrategyHistory()
         self.maker = PendingMakerReplay(config=config.maker)
         self.started_at = utc_iso()
-        self.trade_keys: set[tuple[str, str, str, str, str, str, str]] = set()
+        self.trade_keys: set[tuple[str, str, str, str, str, str, str, str]] = set()
         self.decision_counts: Counter[str] = Counter()
         self.filled_markets: set[str] = set()
         self.settled_markets: set[str] = set()
@@ -283,8 +285,21 @@ class LivePaperStrategyRunner:
 
     def process_market_trades(self, trades: Iterable[dict[str, Any]]) -> dict[str, int]:
         written = 0
+        with self.market_trades_path.open("a", encoding="utf-8") as trade_handle:
+            for trade in sorted(trades, key=lambda row: int(row.get("exchange_ts") or 0)):
+                key = _trade_key(trade)
+                if key in self.trade_keys:
+                    continue
+                self.trade_keys.add(key)
+                trade_handle.write(_json_dumps(trade) + "\n")
+                written += 1
+        self.write_state(active_windows=[])
+        return {"market_trades": written, "fills": 0}
+
+    def process_ws_trades(self, trades: Iterable[dict[str, Any]]) -> dict[str, int]:
+        written = 0
         fills = 0
-        with self.market_trades_path.open("a", encoding="utf-8") as trade_handle, self.executions_path.open("a", encoding="utf-8") as execution_handle:
+        with self.ws_trades_path.open("a", encoding="utf-8") as trade_handle, self.executions_path.open("a", encoding="utf-8") as execution_handle:
             for trade in sorted(trades, key=lambda row: int(row.get("exchange_ts") or 0)):
                 key = _trade_key(trade)
                 if key in self.trade_keys:
@@ -301,7 +316,7 @@ class LivePaperStrategyRunner:
                     execution_handle.write(_json_dumps(self._fill_row(fill)) + "\n")
                     fills += 1
         self.write_state(active_windows=[])
-        return {"market_trades": written, "fills": fills}
+        return {"ws_trades": written, "fills": fills}
 
     def settle_market(self, market_slug: str, winning_side: str) -> dict[str, Any] | None:
         intents = [intent for intent in self.history.emitted_intents if intent.market_slug == market_slug]

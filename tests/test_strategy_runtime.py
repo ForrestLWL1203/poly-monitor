@@ -19,6 +19,7 @@ from poly_monitor.strategy_runtime import (
     TradeIntent,
     strategy_from_name,
 )
+from poly_monitor.clob_stream import ClobBookStream
 from poly_monitor.strategy_runner import StrategyRunner, StrategyRunnerConfig
 from poly_monitor.strategy_runner import LivePaperRunConfig, LivePaperStrategyRunner
 from poly_monitor.strategies import X32PairCostInventoryStrategy
@@ -47,6 +48,22 @@ class FakeStream:
 
     def get_book(self, token_id, *, max_age_sec=None):
         return self.books.get(token_id, ([], [], None))
+
+    def pop_trade_events(self):
+        return [
+            {
+                "event": "ws_trade_observed",
+                "asset_id": "up-token",
+                "exchange_ts": 1770000011,
+                "observed_at": "2026-05-27T12:00:11+00:00",
+                "price": 0.49,
+                "size": 10,
+                "usdc": 4.9,
+                "side": "SELL",
+                "tx_hash": "0xws",
+                "fill_id": "0xws:up-token:1770000011:0.49:10",
+            }
+        ]
 
 
 class FakeFeed:
@@ -107,6 +124,50 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
         snapshot = env.snapshot(now=start + dt.timedelta(seconds=10))[0]
 
         self.assertTrue(snapshot.book_stale)
+
+    def test_clob_stream_buffers_last_trade_price_events(self):
+        stream = ClobBookStream()
+        stream._handle_event(
+            {
+                "event_type": "last_trade_price",
+                "asset_id": "up-token",
+                "timestamp": "1770000011234",
+                "price": "0.49",
+                "size": "10",
+                "side": "SELL",
+                "hash": "0xtrade",
+            }
+        )
+
+        rows = stream.pop_trade_events()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event"], "ws_trade_observed")
+        self.assertEqual(rows[0]["asset_id"], "up-token")
+        self.assertEqual(rows[0]["exchange_ts"], 1770000011)
+        self.assertEqual(rows[0]["price"], 0.49)
+        self.assertEqual(rows[0]["usdc"], 4.9)
+        self.assertEqual(stream.pop_trade_events(), [])
+
+    async def test_live_environment_maps_ws_trade_events_to_current_window(self):
+        start = dt.datetime(2026, 5, 27, 12, 0, tzinfo=dt.timezone.utc)
+        window = MarketWindow("BTC", "btc-updown-5m-1770000000", "cond-1", "q1", "up-token", "down-token", start, start + dt.timedelta(minutes=5))
+        env = LivePaperEnvironment(
+            symbols=("BTC",),
+            window_finder=lambda symbol, now=None: window,
+            stream=FakeStream(),
+            price_hub=FakeHub(),
+        )
+
+        await env.start()
+        rows = env.pop_trade_events()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["market_slug"], window.slug)
+        self.assertEqual(rows[0]["condition_id"], window.condition_id)
+        self.assertEqual(rows[0]["symbol"], "BTC")
+        self.assertEqual(rows[0]["outcome"], "Up")
+        self.assertEqual(rows[0]["source"], "clob_ws")
 
     def test_deep_export_environment_loads_per_market_trade_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -226,6 +287,25 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale_fills, [])
         self.assertEqual(len(live_fills), 1)
         self.assertEqual(live_fills[0].intent.sampled_ts, 21)
+
+    def test_pending_maker_replay_ignores_trades_after_order_expiry(self):
+        replay = PendingMakerReplay(config=PendingMakerReplayConfig(fill_rate=1.0, order_ttl_sec=5))
+        intent = TradeIntent(
+            strategy_name="demo",
+            market_slug="btc-updown-5m-1",
+            sampled_ts=20,
+            intent="BUY",
+            outcome="Up",
+            notional_usdc=5,
+            max_price=0.9,
+            expected_price=0.5,
+            reason="test",
+        )
+        replay.submit(intent)
+
+        fills = replay.process_trade({"market_slug": "btc-updown-5m-1", "exchange_ts": 26, "outcome": "Up", "price": 0.5, "usdc": 5})
+
+        self.assertEqual(fills, [])
 
     def test_x32_trace_explains_pair_cost_skip(self):
         strategy = strategy_from_name("x32_pair_cost_inventory_v0", wallet="0x32")
@@ -418,6 +498,67 @@ class StrategyFactoryTests(unittest.TestCase):
 
         self.assertEqual(strategy.config.target_pair_shares_per_side, 40)
 
+
+class LivePaperRunnerTests(unittest.TestCase):
+    def test_ws_trades_drive_fills_and_data_api_trades_are_audit_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            strategy = strategy_from_name(
+                "wallet_path_v0",
+                wallet="strategy",
+                target_pair_shares_per_side=10,
+                notional_usdc=5,
+                max_pair_cost=1.0,
+                max_unpaired_price=0.6,
+                min_order_usdc=1,
+                execution_style="maker",
+            )
+            runner = LivePaperStrategyRunner(
+                LivePaperRunConfig(
+                    run_dir=Path(tmp),
+                    run_id="test-run",
+                    maker=PendingMakerReplayConfig(fill_rate=1.0, order_ttl_sec=30),
+                ),
+                strategy=strategy,
+            )
+            snapshot = StrategySnapshot.from_market_state_sample(
+                {
+                    "market_slug": "btc-updown-5m-1770000000",
+                    "condition_id": "cond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000120,
+                    "window_remaining_sec": 180,
+                    "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "book_stale": 0,
+                }
+            )
+            trade = {
+                "event": "ws_trade_observed",
+                "source": "clob_ws",
+                "market_slug": "btc-updown-5m-1770000000",
+                "condition_id": "cond",
+                "symbol": "BTC",
+                "exchange_ts": 1770000121,
+                "outcome": "Up",
+                "side": "SELL",
+                "price": 0.49,
+                "size": 10,
+                "usdc": 4.9,
+                "tx_hash": "0xws",
+                "fill_id": "fill-1",
+            }
+
+            runner.tick([snapshot])
+            audit_result = runner.process_market_trades([{**trade, "event": "trade_observed", "source": "data_api", "tx_hash": "0xapi"}])
+            fill_result = runner.process_ws_trades([trade])
+
+            self.assertEqual(audit_result["fills"], 0)
+            self.assertEqual(fill_result["fills"], 1)
+            execution_rows = [json.loads(line) for line in (Path(tmp) / "executions.jsonl").read_text().splitlines()]
+            self.assertEqual(sum(1 for row in execution_rows if row["record_type"] == "maker_fill"), 1)
+            self.assertTrue((Path(tmp) / "market_trades.jsonl").exists())
+            self.assertTrue((Path(tmp) / "ws_trades.jsonl").exists())
+
     def test_d950_path_keeps_single_trade_checkpoint_defaults(self):
         strategy = strategy_from_name("d950_path_v0", wallet="strategy")
 
@@ -584,16 +725,19 @@ class StrategyRunnerTests(unittest.TestCase):
                 "tx_hash": "0xt",
                 "fill_id": "1",
                 "observed_at": "2026-05-26T00:00:11+00:00",
+                "source": "clob_ws",
             }
 
             runner.tick([snapshot])
-            runner.process_market_trades([touch_trade, dict(touch_trade)])
+            runner.process_ws_trades([touch_trade, dict(touch_trade)])
+            runner.process_market_trades([{**touch_trade, "source": "data_api", "tx_hash": "0xapi"}])
             runner.settle_market(snapshot.market_slug, "Up")
             runner.write_state(active_windows=[], stream_diagnostics={"subscribed_tokens": 0})
 
             decisions = [json.loads(line) for line in (run_dir / "decisions.jsonl").read_text().splitlines()]
             executions = [json.loads(line) for line in (run_dir / "executions.jsonl").read_text().splitlines()]
             trades = [json.loads(line) for line in (run_dir / "market_trades.jsonl").read_text().splitlines()]
+            ws_trades = [json.loads(line) for line in (run_dir / "ws_trades.jsonl").read_text().splitlines()]
             state = json.loads((run_dir / "state.json").read_text())
             summary = json.loads((run_dir / "summary.json").read_text())
 
@@ -612,7 +756,9 @@ class StrategyRunnerTests(unittest.TestCase):
         self.assertEqual(executions[2]["record_type"], "settled")
         self.assertEqual(executions[2]["winning_side"], "Up")
         self.assertEqual(len(trades), 1)
-        self.assertEqual(trades[0]["tx_hash"], "0xt")
+        self.assertEqual(trades[0]["tx_hash"], "0xapi")
+        self.assertEqual(len(ws_trades), 1)
+        self.assertEqual(ws_trades[0]["tx_hash"], "0xt")
         self.assertEqual(state["run"]["run_id"], "test-run")
         self.assertEqual(summary["orders_submitted"], 1)
         self.assertEqual(summary["fills"], 1)
@@ -662,10 +808,11 @@ class StrategyRunnerTests(unittest.TestCase):
                 "tx_hash": "0xt",
                 "fill_id": "late",
                 "observed_at": "2026-05-26T00:00:13+00:00",
+                "source": "clob_ws",
             }
 
             runner.tick([snapshot])
-            runner.process_market_trades([stale_touch])
+            runner.process_ws_trades([stale_touch])
             runner.write_state(active_windows=[])
 
             executions = [json.loads(line) for line in (run_dir / "executions.jsonl").read_text().splitlines()]
@@ -681,13 +828,13 @@ class StrategyRunnerTests(unittest.TestCase):
     def test_archive_paper_live_run_compresses_core_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
-            for name in ("decisions.jsonl", "executions.jsonl", "market_trades.jsonl"):
+            for name in ("decisions.jsonl", "executions.jsonl", "market_trades.jsonl", "ws_trades.jsonl"):
                 (run_dir / name).write_text('{"ok":true}\n', encoding="utf-8")
             (run_dir / "summary.json").write_text("{}\n", encoding="utf-8")
 
             manifest = archive_run(run_dir)
 
-            self.assertEqual(len(manifest["core_logs"]), 3)
+            self.assertEqual(len(manifest["core_logs"]), 4)
             self.assertTrue((run_dir / "decisions.jsonl.gz").exists())
             self.assertTrue((run_dir / "archive_manifest.json").exists())
             self.assertTrue((run_dir / "decisions.jsonl").exists())

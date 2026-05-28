@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 
 
-CORE_LOGS = ("decisions.jsonl", "executions.jsonl", "market_trades.jsonl")
+CORE_LOGS = ("decisions.jsonl", "executions.jsonl", "market_trades.jsonl", "ws_trades.jsonl")
 
 
 def gzip_file(path: Path, *, remove_raw: bool = False) -> dict:

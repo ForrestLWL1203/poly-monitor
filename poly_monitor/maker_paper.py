@@ -187,6 +187,8 @@ class PendingMakerReplay:
             intent = order.intent
             if ts < order.submitted_ts:
                 continue
+            if ts > order.expires_ts:
+                continue
             if intent.market_slug != market_slug or intent.outcome != outcome:
                 continue
             if price > intent.expected_price + 1e-9:

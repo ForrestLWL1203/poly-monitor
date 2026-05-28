@@ -269,6 +269,9 @@ Known limitations:
 
 - Queue position is approximated.
 - Maker order cancellation/reposting is simplified.
+- Live paper maker fills are triggered by CLOB WebSocket trade events. Data API
+  market trades are retained only as delayed audit evidence, because they can
+  arrive after short TTL maker quotes have already expired.
 - Partial fills use configurable replay assumptions.
 - The replay may show final pair average above 1 even when active quote entries
   all had `maker_pair_cost <= max_pair_cost`.

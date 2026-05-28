@@ -73,16 +73,19 @@ python3 scripts/run_strategy_paper.py \
 
 Live paper writes analysis logs under
 `data/paper_live/<strategy>/<run-id>/`: `decisions.jsonl`,
-`executions.jsonl`, `market_trades.jsonl`, `state.json`, and `summary.json`.
-The JSONL files are the rebuildable truth; `state.json` and `summary.json` are
-derived snapshots. For transfer or archival, compress the core logs first:
+`executions.jsonl`, `ws_trades.jsonl`, `market_trades.jsonl`, `state.json`, and
+`summary.json`. The JSONL files are the rebuildable truth; `state.json` and
+`summary.json` are derived snapshots. For transfer or archival, compress the
+core logs first:
 
 ```bash
 python3 scripts/archive_paper_live_run.py data/paper_live/<strategy>/<run-id>
 ```
 
 It is read-only paper execution: maker orders are simulated with TTL/pending
-state and Data API market trades, not submitted to Polymarket.
+state and CLOB WebSocket trade events, not submitted to Polymarket. Data API
+market trades are retained as an audit trail and are not used as the live fill
+trigger.
 The independent live paper runner intentionally runs one symbol/current market
 at a time; start separate runs for BTC and ETH when comparing symbols.
 

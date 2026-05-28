@@ -98,6 +98,47 @@ class LivePaperEnvironment:
         now_dt = now or dt.datetime.now(dt.timezone.utc)
         return [self._snapshot_for_window(window, now=now_dt) for window in self.windows.values()]
 
+    def pop_trade_events(self) -> list[dict[str, Any]]:
+        popper = getattr(self.stream, "pop_trade_events", None)
+        if not callable(popper):
+            return []
+        token_index = self._token_index()
+        rows: list[dict[str, Any]] = []
+        for event in popper():
+            token = str(event.get("asset_id") or "")
+            mapped = token_index.get(token)
+            if mapped is None:
+                continue
+            window, outcome = mapped
+            price = _safe_float(event.get("price"))
+            size = _safe_float(event.get("size"))
+            usdc = _safe_float(event.get("usdc"))
+            if usdc is None and price is not None and size is not None:
+                usdc = price * size
+            rows.append(
+                {
+                    **event,
+                    "market_slug": window.slug,
+                    "condition_id": window.condition_id,
+                    "symbol": window.symbol,
+                    "outcome": outcome,
+                    "price": price,
+                    "size": size,
+                    "usdc": round(usdc, 6) if usdc is not None else None,
+                    "source": event.get("source") or "clob_ws",
+                }
+            )
+        return rows
+
+    def _token_index(self) -> dict[str, tuple[MarketWindow, str]]:
+        index: dict[str, tuple[MarketWindow, str]] = {}
+        for window in self.windows.values():
+            if window.up_token:
+                index[str(window.up_token)] = (window, "Up")
+            if window.down_token:
+                index[str(window.down_token)] = (window, "Down")
+        return index
+
     def _book(self, token_id: str) -> tuple[BookSnapshot, bool]:
         bids, asks, age_ms = self.stream.get_book(token_id, max_age_sec=self.book_max_age_sec)
         summary = token_book_summary(bids=bids, asks=asks, book_age_ms=age_ms, targets=self.sample_targets)
@@ -125,3 +166,11 @@ class LivePaperEnvironment:
             book_stale=up_stale or down_stale,
             sample_reason="live_paper",
         )
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed

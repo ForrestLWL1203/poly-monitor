@@ -163,6 +163,9 @@ async def async_main() -> int:
                     pending_settlements[window.slug] = window
             snapshots = env.snapshot(now=now)
             runner.tick(snapshots)
+            ws_trades = env.pop_trade_events()
+            if ws_trades:
+                runner.process_ws_trades(ws_trades)
             if time.monotonic() - last_trade_poll >= args.market_trade_poll_sec:
                 last_trade_poll = time.monotonic()
                 trades = []
