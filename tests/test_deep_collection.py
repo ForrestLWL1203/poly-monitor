@@ -18,6 +18,7 @@ from poly_monitor.deep_collection import (
     process_cmdline,
     process_matches_wallet,
     read_deep_wallets,
+    remove_multi_collector_wallet,
     stop_collector,
     write_deep_wallets,
     write_status,
@@ -222,6 +223,54 @@ class DeepCollectionTests(unittest.TestCase):
         popen.assert_not_called()
         self.assertTrue(payload["ok"])
         self.assertEqual(wallets, [existing, added])
+
+    def test_remove_multi_collector_wallet_reports_removed_wallet_stopped_even_when_group_runs(self):
+        removed = "0x1111111111111111111111111111111111111111"
+        remaining = "0x2222222222222222222222222222222222222222"
+        now = dt.datetime(2026, 5, 28, 0, 0, 10, tzinfo=dt.timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            write_deep_wallets(data_dir, [removed, remaining])
+            for wallet in (removed, remaining):
+                write_status(
+                    data_dir,
+                    wallet,
+                    {
+                        "wallet": wallet,
+                        "pid": 123,
+                        "collector_mode": "multi_wallet",
+                        "status": "running",
+                        "started_at": "2026-05-28T00:00:00+00:00",
+                        "last_heartbeat_at": "2026-05-28T00:00:05+00:00",
+                    },
+                )
+            write_status(
+                data_dir,
+                "multi_wallet",
+                {
+                    "wallet": "multi_wallet",
+                    "pid": 123,
+                    "collector_mode": "multi_wallet",
+                    "status": "running",
+                    "wallets": [removed, remaining],
+                    "started_at": "2026-05-28T00:00:00+00:00",
+                    "last_heartbeat_at": "2026-05-28T00:00:05+00:00",
+                },
+            )
+
+            with patch("poly_monitor.deep_collection.process_cmdline", return_value="python scripts/run_multi_wallet_deep_collector.py --wallets " + ",".join([removed, remaining])):
+                payload = remove_multi_collector_wallet(data_dir, removed, now=now)
+                removed_status = collector_status(data_dir, removed, now=now)
+                remaining_status = collector_status(data_dir, remaining, now=now)
+            self.assertEqual(read_deep_wallets(data_dir), [remaining])
+            self.assertEqual(payload["wallet"], removed)
+            self.assertFalse(payload["listed"])
+            self.assertFalse(payload["running"])
+            self.assertEqual(payload["state"], "stopped")
+            self.assertFalse(removed_status["running"])
+            self.assertEqual(removed_status["state"], "stopped")
+            self.assertTrue(remaining_status["listed"])
+            self.assertTrue(remaining_status["running"])
 
     def test_sample_row_stores_l3_books_and_reference_price(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -195,14 +195,15 @@ def process_matches_wallet(pid: int, wallet: str) -> bool:
 def collector_status(data_dir: Path, wallet: str, *, now: dt.datetime | None = None) -> dict[str, Any]:
     normalized = normalize_wallet(wallet)
     payload = read_status(data_dir, normalized) or {}
+    listed = normalized in set(read_deep_wallets(data_dir))
     current = now or utc_now()
     pid = int(payload.get("pid") or 0)
     last_heartbeat = _parse_iso(payload.get("last_heartbeat_at"))
     heartbeat_age_sec = None
     if last_heartbeat is not None:
         heartbeat_age_sec = max(0.0, (current - last_heartbeat).total_seconds())
-    pid_matches = process_matches_wallet(pid, normalized)
-    if not pid_matches and payload.get("collector_mode") == "multi_wallet" and normalized in set(read_deep_wallets(data_dir)):
+    pid_matches = False if payload.get("collector_mode") == "multi_wallet" and not listed else process_matches_wallet(pid, normalized)
+    if not pid_matches and payload.get("collector_mode") == "multi_wallet" and listed:
         group = multi_collector_status(data_dir, now=current)
         pid_matches = bool(group.get("running"))
         if group.get("heartbeat_age_sec") is not None:
@@ -220,7 +221,7 @@ def collector_status(data_dir: Path, wallet: str, *, now: dt.datetime | None = N
         "wallet": normalized,
         "state": state,
         "running": healthy,
-        "listed": normalized in set(read_deep_wallets(data_dir)),
+        "listed": listed,
         "pid": pid if pid > 0 else None,
         "started_at": payload.get("started_at"),
         "last_heartbeat_at": payload.get("last_heartbeat_at"),
@@ -352,7 +353,7 @@ def add_multi_collector_wallet(data_dir: Path, wallet: str, *, python: str | Non
     return ensure_multi_collector(data_dir, wallets, python=python)
 
 
-def remove_multi_collector_wallet(data_dir: Path, wallet: str) -> dict[str, Any]:
+def remove_multi_collector_wallet(data_dir: Path, wallet: str, *, now: dt.datetime | None = None) -> dict[str, Any]:
     normalized = normalize_wallet(wallet)
     wallets = [item for item in read_deep_wallets(data_dir) if item != normalized]
     write_deep_wallets(data_dir, wallets)
@@ -361,7 +362,9 @@ def remove_multi_collector_wallet(data_dir: Path, wallet: str) -> dict[str, Any]
     payload["listed"] = False
     payload["stopped_at"] = utc_now().isoformat()
     write_status(data_dir, normalized, payload)
-    return {"ok": True, "wallet": normalized, "listed": False, **multi_collector_status(data_dir)}
+    group_status = multi_collector_status(data_dir, now=now)
+    wallet_status = collector_status(data_dir, normalized, now=now)
+    return {"ok": True, **wallet_status, "group": group_status}
 
 
 def l3_book_summary(
