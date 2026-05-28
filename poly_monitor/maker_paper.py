@@ -34,11 +34,19 @@ class PendingMakerOrder:
 @dataclass
 class PendingMakerReplayConfig:
     fill_rate: float = 0.1
-    order_ttl_sec: int = 30
+    order_ttl_sec: int = 5
     max_open_orders_per_market: int = 20
     rebalance_fill_multiplier: float = 2.0
-    rebalance_ttl_multiplier: float = 1.5
-    excess_ttl_multiplier: float = 0.5
+    rebalance_ttl_multiplier: float = 1.0
+    excess_ttl_multiplier: float = 1.0
+
+
+@dataclass
+class MakerCancel:
+    order: PendingMakerOrder
+    reason: str
+    cancelled_ts: int
+    detail: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -89,6 +97,7 @@ class PendingMakerReplay:
     expired: int = 0
     rejected: int = 0
     partial_fills: int = 0
+    cancelled: int = 0
     _next_order_id: int = 1
 
     def submit(self, intent: TradeIntent) -> ExecutionResult:
@@ -171,6 +180,20 @@ class PendingMakerReplay:
                 )
             )
         return intents
+
+    def cancel_orders(self, order_ids: set[str], *, reason: str, cancelled_ts: int, detail: dict[str, Any] | None = None) -> list[MakerCancel]:
+        if not order_ids:
+            return []
+        cancelled: list[MakerCancel] = []
+        kept: list[PendingMakerOrder] = []
+        for order in self.pending:
+            if order.order_id in order_ids and order.remaining_usdc > 1e-9:
+                cancelled.append(MakerCancel(order=order, reason=reason, cancelled_ts=int(cancelled_ts), detail=dict(detail or {})))
+                self.cancelled += 1
+            else:
+                kept.append(order)
+        self.pending = kept
+        return cancelled
 
     def process_trade(self, trade: dict[str, Any], *, expire_first: bool = True) -> list[MakerFill]:
         ts = int(trade.get("exchange_ts") or 0)

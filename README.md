@@ -86,6 +86,10 @@ It is read-only paper execution: maker orders are simulated with TTL/pending
 state and CLOB WebSocket trade events, not submitted to Polymarket. Data API
 market trades are retained as an audit trail and are not used as the live fill
 trigger.
+The default maker quote TTL is short (`5s`). Each tick reconciles pending
+quotes before submitting new ones: stale prices are cancelled as
+`quote_moved`, balanced inventory cancels as `balance_reconciled`, and surplus
+side quotes cancel as `side_no_longer_needed`.
 The independent live paper runner intentionally runs one symbol/current market
 at a time; start separate runs for BTC and ETH when comparing symbols.
 

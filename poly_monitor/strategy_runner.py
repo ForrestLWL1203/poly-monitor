@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .maker_paper import PendingMakerReplay, PendingMakerReplayConfig
+from .maker_paper import MakerCancel, PendingMakerReplay, PendingMakerReplayConfig
 from .strategy_runtime import EvaluationTrace, ExecutionAdapter, ExecutionResult, StrategyHistory, StrategyPlugin, StrategySnapshot, TradeIntent, utc_iso
 
 
@@ -235,6 +235,28 @@ def _touch_trade_summary(trade: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _current_maker_quote(snapshot: StrategySnapshot, outcome: str) -> float | None:
+    book = snapshot.book_for_outcome(outcome)
+    try:
+        bid = float(book.bid)
+    except (TypeError, ValueError):
+        return None
+    return bid if bid > 0 else None
+
+
+def _dynamic_balance_limit(strategy: StrategyPlugin, elapsed_sec: int) -> float:
+    config = getattr(strategy, "config", None)
+    if config is None:
+        return 0.05
+    if elapsed_sec >= int(getattr(config, "rebalance_start_sec", 240)):
+        return float(getattr(config, "final_inventory_imbalance_ratio", 0.03))
+    if elapsed_sec >= 180:
+        return float(getattr(config, "late_inventory_imbalance_ratio", 0.08))
+    if elapsed_sec >= 60:
+        return float(getattr(config, "mid_inventory_imbalance_ratio", 0.15))
+    return float(getattr(config, "early_inventory_imbalance_ratio", 0.30))
+
+
 class LivePaperStrategyRunner:
     def __init__(self, config: LivePaperRunConfig, *, strategy: StrategyPlugin) -> None:
         self.config = config
@@ -261,13 +283,18 @@ class LivePaperStrategyRunner:
     def tick(self, snapshots: Iterable[StrategySnapshot]) -> dict[str, int]:
         decisions = 0
         orders = 0
-        expired = self._expire(int(time.time() - self.config.expiry_grace_sec))
+        expired: list[Any] = []
         with self.decisions_path.open("a", encoding="utf-8") as decision_handle, self.executions_path.open("a", encoding="utf-8") as execution_handle:
             for snapshot in sorted(snapshots, key=lambda item: (item.sampled_ts, item.market_slug)):
                 if snapshot.sampled_ts < self.config.start_sampled_ts:
                     continue
+                for order in self._expire(int(snapshot.sampled_ts - self.config.expiry_grace_sec)):
+                    execution_handle.write(_json_dumps(self._expired_row(order)) + "\n")
+                    expired.append(order)
                 self.history.snapshots_by_market.setdefault(snapshot.market_slug, []).append(snapshot)
                 self._prune_snapshots(snapshot)
+                for cancel in self._reconcile_pending(snapshot):
+                    execution_handle.write(_json_dumps(self._cancelled_row(cancel)) + "\n")
                 self.history.pending_intents = self.maker.pending_intents()
                 trace = self._evaluate_with_trace(snapshot)
                 decision_handle.write(_json_dumps(self._decision_row(snapshot, trace)) + "\n")
@@ -278,8 +305,6 @@ class LivePaperStrategyRunner:
                 execution = self.maker.submit(trace.intent)
                 execution_handle.write(_json_dumps(self._order_row(execution)) + "\n")
                 orders += 1 if execution.status == "maker_pending" else 0
-        if expired:
-            self._append_execution_rows([self._expired_row(order) for order in expired])
         self.write_state(active_windows=[])
         return {"decisions": decisions, "orders": orders}
 
@@ -450,6 +475,25 @@ class LivePaperStrategyRunner:
             "expires_ts": order.expires_ts,
         }
 
+    def _cancelled_row(self, cancel: MakerCancel) -> dict[str, Any]:
+        order = cancel.order
+        intent = order.intent
+        return {
+            "record_type": "maker_cancelled",
+            "recorded_at": utc_iso(),
+            "run_id": self.config.run_id,
+            "order_id": order.order_id,
+            "market_slug": intent.market_slug,
+            "symbol": intent.symbol,
+            "outcome": intent.outcome,
+            "submitted_ts": order.submitted_ts,
+            "cancelled_ts": cancel.cancelled_ts,
+            "cancel_reason": cancel.reason,
+            "quote_price": intent.expected_price,
+            "unfilled_usdc": round(order.remaining_usdc, 6),
+            "detail": cancel.detail,
+        }
+
     def _fill_row(self, fill) -> dict[str, Any]:
         intent = fill.intent
         fill_shares = intent.notional_usdc / intent.expected_price if intent.expected_price > 0 else 0.0
@@ -474,6 +518,57 @@ class LivePaperStrategyRunner:
 
     def _expire(self, ts: int) -> list[Any]:
         return self.maker.expire_before(ts)
+
+    def _reconcile_pending(self, snapshot: StrategySnapshot) -> list[MakerCancel]:
+        pending = [order for order in self.maker.pending if order.intent.market_slug == snapshot.market_slug and order.remaining_usdc > 1e-9]
+        if not pending:
+            return []
+        cancelled: list[MakerCancel] = []
+        cancelled_ids: set[str] = set()
+
+        quote_moved: set[str] = set()
+        for order in pending:
+            current_quote = _current_maker_quote(snapshot, order.intent.outcome)
+            if current_quote is None or abs(float(order.intent.expected_price) - current_quote) > 1e-9:
+                quote_moved.add(order.order_id)
+        if quote_moved:
+            cancelled.extend(self.maker.cancel_orders(quote_moved, reason="quote_moved", cancelled_ts=snapshot.sampled_ts, detail={"source": "tick_reconcile"}))
+            cancelled_ids.update(quote_moved)
+
+        pending = [order for order in self.maker.pending if order.intent.market_slug == snapshot.market_slug and order.remaining_usdc > 1e-9]
+        if not pending:
+            return cancelled
+
+        up_shares, _up_cost = self._inventory_for_market(snapshot.market_slug, "Up")
+        down_shares, _down_cost = self._inventory_for_market(snapshot.market_slug, "Down")
+        total = up_shares + down_shares
+        if total > 0:
+            imbalance = abs(up_shares - down_shares) / total
+            limit = _dynamic_balance_limit(self.strategy, snapshot.elapsed_sec)
+            if up_shares > 0 and down_shares > 0 and imbalance <= limit:
+                ids = {order.order_id for order in pending if order.order_id not in cancelled_ids}
+                cancelled.extend(
+                    self.maker.cancel_orders(
+                        ids,
+                        reason="balance_reconciled",
+                        cancelled_ts=snapshot.sampled_ts,
+                        detail={"filled_imbalance_ratio": round(imbalance, 6), "limit": round(limit, 6)},
+                    )
+                )
+                return cancelled
+
+        surplus_side = "Up" if up_shares > down_shares else "Down" if down_shares > up_shares else None
+        if surplus_side is not None:
+            ids = {order.order_id for order in pending if order.intent.outcome == surplus_side and order.order_id not in cancelled_ids}
+            cancelled.extend(
+                self.maker.cancel_orders(
+                    ids,
+                    reason="side_no_longer_needed",
+                    cancelled_ts=snapshot.sampled_ts,
+                    detail={"up_shares": round(up_shares, 6), "down_shares": round(down_shares, 6)},
+                )
+            )
+        return cancelled
 
     def _prune_snapshots(self, snapshot: StrategySnapshot) -> None:
         cutoff = int(snapshot.sampled_ts) - max(0, int(self.config.snapshot_retention_sec))
@@ -568,6 +663,7 @@ class LivePaperStrategyRunner:
             "fills": len(self.maker.filled_intents),
             "partial_fill_events": self.maker.partial_fills,
             "expired": self.maker.expired,
+            "cancelled": self.maker.cancelled,
             "rejected": self.maker.rejected,
             "filled_markets": len(self.filled_markets),
             "settled_markets": len(self.settled_markets),

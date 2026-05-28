@@ -272,6 +272,10 @@ Known limitations:
 - Live paper maker fills are triggered by CLOB WebSocket trade events. Data API
   market trades are retained only as delayed audit evidence, because they can
   arrive after short TTL maker quotes have already expired.
+- Live paper maker quotes use a short default TTL (`5s`) and are actively
+  reconciled every tick. Pending quotes can be cancelled before expiry with
+  `maker_cancelled` events for `quote_moved`, `balance_reconciled`, or
+  `side_no_longer_needed`.
 - Partial fills use configurable replay assumptions.
 - The replay may show final pair average above 1 even when active quote entries
   all had `maker_pair_cost <= max_pair_cost`.
