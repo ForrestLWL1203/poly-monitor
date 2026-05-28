@@ -106,16 +106,18 @@ quote_price = outcome best bid
 ```
 
 When one side has less filled inventory than the other, the strategy prioritizes
-the lower-inventory side. It still uses a maker bid quote; it does not
-intentionally cross to the ask just to force a rebalance.
+the lower-inventory side. Before `rebalance_start_sec`, the lower-inventory
+side still quotes at the best bid. From `rebalance_start_sec` onward, it may
+quote up to `maker_rebalance_ticks` above the best bid, capped by the best ask
+and `max_price`, to recover balance faster. This is an aggressive rebalance
+quote and may cross into the spread when the market moves.
 
 Feature flags in emitted intents:
 
 - `book_fill.source = maker_quote_at_best_bid`
 - `book_fill.source = maker_rebalance_quote`
 
-Both are maker-style quotes. The second label means the quote was selected to
-reduce inventory imbalance.
+The second label means the quote was selected to reduce inventory imbalance.
 
 ## Inventory Accounting
 
@@ -170,7 +172,7 @@ The order clip is small and share-based to resemble the observed maker cadence,
 while still being constrained by our budget-derived target:
 
 ```text
-if quote_price > 0.50 or remaining deficit < 10 shares:
+if elapsed_sec >= terminal_stop_sec - 30 or remaining deficit < 10 shares:
     clip_shares = 5
 else:
     clip_shares = 10
@@ -180,7 +182,9 @@ order_notional = order_shares * quote_price
 ```
 
 This does not mean the strategy has a fixed 5 or 10 USDC order size. It uses 5
-or 10 shares, so the USDC amount varies with quote price.
+or 10 shares, so the USDC amount varies with quote price. The rule is time and
+deficit based rather than price based because the 0x32 samples show 10-share
+clips even on high-price legs during the active build phase.
 
 ## Time And Stop Rules
 
@@ -206,15 +210,18 @@ temporary imbalance because maker fills are naturally uneven.
 Defaults:
 
 ```text
-early_inventory_imbalance_ratio = 1.00
-mid_inventory_imbalance_ratio = 0.60
-late_inventory_imbalance_ratio = 0.30
-final_inventory_imbalance_ratio = 0.12
+early_inventory_imbalance_ratio = 0.30
+mid_inventory_imbalance_ratio = 0.12
+late_inventory_imbalance_ratio = 0.06
+final_inventory_imbalance_ratio = 0.05
 rebalance_start_sec = 240
 ```
 
 With these defaults, early applies before 60 seconds, mid from 60 to 179
 seconds, late from 180 to 239 seconds, and final from 240 seconds onward.
+These caps reflect the 0x32 deep-sample habit: the wallet does not wait until
+late in the window to balance inventory. It is deficit-side biased throughout
+the window, while the tolerated imbalance tightens as settlement approaches.
 
 The emitted features include:
 
@@ -274,8 +281,11 @@ Known limitations:
   arrive after short TTL maker quotes have already expired.
 - Live paper maker quotes use a short default TTL (`5s`) and are actively
   reconciled every tick. Pending quotes can be cancelled before expiry with
-  `maker_cancelled` events for `quote_moved`, `balance_reconciled`, or
-  `side_no_longer_needed`.
+  `maker_cancelled` events for `quote_improved_replace`, `quote_unavailable`,
+  `balance_reconciled`, or `side_no_longer_needed`. A worse bid is not treated
+  as a stale quote to cancel: queue ahead may have been consumed, and the
+  resting order still represents fill risk at that price. The pending quote
+  remains part of working inventory while the strategy focuses on the other leg.
 - TTL is configurable for fixed or phased replay: `--maker-order-ttl-sec`, or
   `--maker-early-ttl-sec` / `--maker-mid-ttl-sec` /
   `--maker-late-ttl-sec` / `--maker-final-ttl-sec`.
@@ -283,6 +293,12 @@ Known limitations:
   gift. `--maker-queue-position-ratio 1.0` means a new quote starts behind the
   currently visible bid-level size, and only subsequent WS trade size beyond
   that queue can fill the paper order.
+- Future live execution must replace simulated paper fill state with an
+  authenticated CLOB user WebSocket ledger. User WS should run from process
+  startup, subscribe by current `condition_id`, and update filled inventory from
+  `MATCHED` trade events plus order `UPDATE size_matched`. REST balance or
+  position polling is too slow to drive this strategy. See
+  [CLOB Maker Live Notes](clob-maker-live-notes.md).
 - Partial fills use configurable replay assumptions.
 - The replay may show final pair average above 1 even when active quote entries
   all had `maker_pair_cost <= max_pair_cost`.

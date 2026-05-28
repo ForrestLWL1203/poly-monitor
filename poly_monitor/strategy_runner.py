@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .maker_paper import MakerCancel, PendingMakerReplay, PendingMakerReplayConfig
+from .path_strategy import _dynamic_imbalance_limit
 from .strategy_runtime import EvaluationTrace, ExecutionAdapter, ExecutionResult, StrategyHistory, StrategyPlugin, StrategySnapshot, TradeIntent, utc_iso
 
 
@@ -244,17 +245,15 @@ def _current_maker_quote(snapshot: StrategySnapshot, outcome: str) -> float | No
     return bid if bid > 0 else None
 
 
-def _dynamic_balance_limit(strategy: StrategyPlugin, elapsed_sec: int) -> float:
-    config = getattr(strategy, "config", None)
-    if config is None:
-        return 0.05
-    if elapsed_sec >= int(getattr(config, "rebalance_start_sec", 240)):
-        return float(getattr(config, "final_inventory_imbalance_ratio", 0.03))
-    if elapsed_sec >= 180:
-        return float(getattr(config, "late_inventory_imbalance_ratio", 0.08))
-    if elapsed_sec >= 60:
-        return float(getattr(config, "mid_inventory_imbalance_ratio", 0.15))
-    return float(getattr(config, "early_inventory_imbalance_ratio", 0.30))
+def _maker_pair_cost(snapshot: StrategySnapshot) -> float | None:
+    try:
+        up_bid = float(snapshot.up.bid)
+        down_bid = float(snapshot.down.bid)
+    except (TypeError, ValueError):
+        return None
+    if up_bid <= 0 or down_bid <= 0:
+        return None
+    return up_bid + down_bid
 
 
 class LivePaperStrategyRunner:
@@ -274,6 +273,7 @@ class LivePaperStrategyRunner:
         self.started_at = utc_iso()
         self.trade_keys: set[tuple[str, str, str, str, str, str, str, str]] = set()
         self.decision_counts: Counter[str] = Counter()
+        self.cancel_counts: Counter[str] = Counter()
         self.filled_markets: set[str] = set()
         self.settled_markets: set[str] = set()
         self.paper_total_pnl = 0.0
@@ -294,6 +294,7 @@ class LivePaperStrategyRunner:
                 self.history.snapshots_by_market.setdefault(snapshot.market_slug, []).append(snapshot)
                 self._prune_snapshots(snapshot)
                 for cancel in self._reconcile_pending(snapshot):
+                    self.cancel_counts[cancel.reason] += 1
                     execution_handle.write(_json_dumps(self._cancelled_row(cancel)) + "\n")
                 self.history.pending_intents = self.maker.pending_intents()
                 trace = self._evaluate_with_trace(snapshot)
@@ -319,7 +320,7 @@ class LivePaperStrategyRunner:
                 trade_handle.write(_json_dumps(trade) + "\n")
                 written += 1
         self.write_state(active_windows=[])
-        return {"market_trades": written, "fills": 0}
+        return {"market_trades": written}
 
     def process_ws_trades(self, trades: Iterable[dict[str, Any]]) -> dict[str, int]:
         written = 0
@@ -530,14 +531,36 @@ class LivePaperStrategyRunner:
         cancelled: list[MakerCancel] = []
         cancelled_ids: set[str] = set()
 
-        quote_moved: set[str] = set()
+        quote_improved: set[str] = set()
+        quote_unavailable: set[str] = set()
         for order in pending:
             current_quote = _current_maker_quote(snapshot, order.intent.outcome)
-            if current_quote is None or abs(float(order.intent.expected_price) - current_quote) > 1e-9:
-                quote_moved.add(order.order_id)
-        if quote_moved:
-            cancelled.extend(self.maker.cancel_orders(quote_moved, reason="quote_moved", cancelled_ts=snapshot.sampled_ts, detail={"source": "tick_reconcile"}))
-            cancelled_ids.update(quote_moved)
+            if current_quote is None:
+                quote_unavailable.add(order.order_id)
+                continue
+            expected_price = float(order.intent.expected_price)
+            if current_quote > expected_price + 1e-9:
+                quote_improved.add(order.order_id)
+        if quote_improved:
+            cancelled.extend(
+                self.maker.cancel_orders(
+                    quote_improved,
+                    reason="quote_improved_replace",
+                    cancelled_ts=snapshot.sampled_ts,
+                    detail={"source": "tick_reconcile"},
+                )
+            )
+            cancelled_ids.update(quote_improved)
+        if quote_unavailable:
+            cancelled.extend(
+                self.maker.cancel_orders(
+                    quote_unavailable,
+                    reason="quote_unavailable",
+                    cancelled_ts=snapshot.sampled_ts,
+                    detail={"source": "tick_reconcile"},
+                )
+            )
+            cancelled_ids.update(quote_unavailable)
 
         pending = [order for order in self.maker.pending if order.intent.market_slug == snapshot.market_slug and order.remaining_usdc > 1e-9]
         if not pending:
@@ -548,8 +571,9 @@ class LivePaperStrategyRunner:
         total = up_shares + down_shares
         if total > 0:
             imbalance = abs(up_shares - down_shares) / total
-            limit = _dynamic_balance_limit(self.strategy, snapshot.elapsed_sec)
-            if up_shares > 0 and down_shares > 0 and imbalance <= limit:
+            strategy_config = getattr(self.strategy, "config", None)
+            limit = _dynamic_imbalance_limit(strategy_config, snapshot.elapsed_sec) if strategy_config is not None else 0.05
+            if up_shares > 0 and down_shares > 0 and imbalance <= limit and self._filled_inventory_near_target(snapshot, up_shares, down_shares):
                 ids = {order.order_id for order in pending if order.order_id not in cancelled_ids}
                 cancelled.extend(
                     self.maker.cancel_orders(
@@ -561,7 +585,7 @@ class LivePaperStrategyRunner:
                 )
                 return cancelled
 
-        surplus_side = "Up" if up_shares > down_shares else "Down" if down_shares > up_shares else None
+        surplus_side = "Up" if up_shares > down_shares + 1e-9 else "Down" if down_shares > up_shares + 1e-9 else None
         if surplus_side is not None:
             ids = {order.order_id for order in pending if order.intent.outcome == surplus_side and order.order_id not in cancelled_ids}
             cancelled.extend(
@@ -573,6 +597,38 @@ class LivePaperStrategyRunner:
                 )
             )
         return cancelled
+
+    def _filled_inventory_near_target(self, snapshot: StrategySnapshot, up_shares: float, down_shares: float) -> bool:
+        target = self._target_pair_shares(snapshot)
+        if target is None or target <= 0:
+            return snapshot.elapsed_sec >= int(getattr(getattr(self.strategy, "config", None), "rebalance_start_sec", 240))
+        threshold = target * 0.9
+        return up_shares >= threshold and down_shares >= threshold
+
+    def _target_pair_shares(self, snapshot: StrategySnapshot) -> float | None:
+        maker_pair_cost = _maker_pair_cost(snapshot)
+        if maker_pair_cost is None:
+            return None
+        strategy_target = getattr(self.strategy, "_target_pair_shares", None)
+        if callable(strategy_target):
+            try:
+                return float(strategy_target(maker_pair_cost))
+            except (TypeError, ValueError):
+                return None
+        config = getattr(self.strategy, "config", None)
+        explicit_shares = getattr(config, "target_pair_shares_per_side", None)
+        if explicit_shares is not None:
+            try:
+                return float(explicit_shares)
+            except (TypeError, ValueError):
+                return None
+        notional = getattr(config, "target_pair_notional_usdc", None)
+        if notional is None:
+            return None
+        try:
+            return float(notional) / maker_pair_cost
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
 
     def _prune_snapshots(self, snapshot: StrategySnapshot) -> None:
         cutoff = int(snapshot.sampled_ts) - max(0, int(self.config.snapshot_retention_sec))
@@ -663,6 +719,7 @@ class LivePaperStrategyRunner:
             "run_id": self.config.run_id,
             "updated_at": utc_iso(),
             "decision_counts_by_reason": dict(self.decision_counts),
+            "cancel_counts_by_reason": dict(self.cancel_counts),
             "orders_submitted": self.maker.submitted,
             "fills": len(self.maker.filled_intents),
             "partial_fill_events": self.maker.partial_fills,

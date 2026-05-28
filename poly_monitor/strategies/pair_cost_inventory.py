@@ -76,6 +76,29 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 return "shallow_bid_depth"
         return None
 
+    def _x32_clip_shares(self, *, elapsed_sec: int, deficit_shares: float) -> float:
+        if elapsed_sec >= self.terminal_stop_sec - 30:
+            return 5.0
+        if deficit_shares < 10.0:
+            return 5.0
+        return 10.0
+
+    def _x32_quote(self, *, snapshot: StrategySnapshot, outcome: str, deficit_side: str | None) -> tuple[float, str]:
+        book = snapshot.book_for_outcome(outcome)
+        bid = _safe_float(book.bid)
+        ask = _safe_float(book.ask)
+        quote_price = bid if self.config.execution_style == "maker" else ask
+        quote_source = "maker_quote_at_best_bid"
+        if self.config.execution_style == "maker" and outcome == deficit_side:
+            quote_source = "maker_rebalance_quote"
+            if snapshot.elapsed_sec >= int(self.config.rebalance_start_sec):
+                quote_price = min(
+                    ask,
+                    float(self.config.max_price),
+                    quote_price + float(self.config.tick_size) * max(0, int(self.config.maker_rebalance_ticks)),
+                )
+        return quote_price, quote_source
+
     def evaluate_with_trace(self, snapshot: StrategySnapshot, history: StrategyHistory) -> EvaluationTrace:
         base_features = self._trace_base_features(snapshot, history)
         intent = self.evaluate(snapshot, history)
@@ -160,14 +183,10 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         for outcome in ("Up", "Down"):
             book = snapshot.book_for_outcome(outcome)
             ask = _safe_float(book.ask)
-            bid = _safe_float(book.bid)
             if ask <= 0 or ask > self.config.max_price:
                 last_reason = "invalid_or_expensive_ask"
                 continue
-            quote_source = "maker_quote_at_best_bid"
-            quote_price = bid if self.config.execution_style == "maker" else ask
-            if self.config.execution_style == "maker" and outcome == deficit_side:
-                quote_source = "maker_rebalance_quote"
+            quote_price, quote_source = self._x32_quote(snapshot=snapshot, outcome=outcome, deficit_side=deficit_side)
             if quote_price <= 0 or quote_price > self.config.max_price:
                 last_reason = "invalid_maker_quote"
                 continue
@@ -175,7 +194,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             if deficit_shares <= 1e-9:
                 last_reason = "deficit_satisfied"
                 continue
-            clip_shares = 5.0 if quote_price > 0.50 or deficit_shares < 10.0 else 10.0
+            clip_shares = self._x32_clip_shares(elapsed_sec=snapshot.elapsed_sec, deficit_shares=deficit_shares)
             order_shares = min(clip_shares, deficit_shares)
             order_notional = round(order_shares * quote_price, 6)
             if order_notional + 1e-9 < float(self.config.min_order_usdc):
@@ -244,19 +263,15 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         for outcome in ("Up", "Down"):
             book = snapshot.book_for_outcome(outcome)
             ask = _safe_float(book.ask)
-            bid = _safe_float(book.bid)
             if ask <= 0 or ask > self.config.max_price:
                 continue
-            quote_source = "maker_quote_at_best_bid"
-            quote_price = bid if self.config.execution_style == "maker" else ask
-            if self.config.execution_style == "maker" and outcome == deficit_side:
-                quote_source = "maker_rebalance_quote"
+            quote_price, quote_source = self._x32_quote(snapshot=snapshot, outcome=outcome, deficit_side=deficit_side)
             if quote_price <= 0 or quote_price > self.config.max_price:
                 continue
             deficit_shares = target_pair_shares - current_shares[outcome]
             if deficit_shares <= 1e-9:
                 continue
-            clip_shares = 5.0 if quote_price > 0.50 or deficit_shares < 10.0 else 10.0
+            clip_shares = self._x32_clip_shares(elapsed_sec=snapshot.elapsed_sec, deficit_shares=deficit_shares)
             order_shares = min(clip_shares, deficit_shares)
             order_notional = round(order_shares * quote_price, 6)
             if order_notional + 1e-9 < float(self.config.min_order_usdc):
@@ -360,10 +375,10 @@ def x32_default_config(wallet: str, **overrides) -> PathStrategyConfig:
         "target_pair_shares_per_side": None,
         "max_pair_cost": 0.995,
         "max_unpaired_price": 0.70,
-        "early_inventory_imbalance_ratio": 1.00,
-        "mid_inventory_imbalance_ratio": 0.60,
-        "late_inventory_imbalance_ratio": 0.30,
-        "final_inventory_imbalance_ratio": 0.12,
+        "early_inventory_imbalance_ratio": 0.30,
+        "mid_inventory_imbalance_ratio": 0.12,
+        "late_inventory_imbalance_ratio": 0.06,
+        "final_inventory_imbalance_ratio": 0.05,
         "rebalance_start_sec": 240,
         "min_order_usdc": 1.0,
         "max_quote_spread": 0.02,

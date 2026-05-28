@@ -3,6 +3,28 @@
 Live execution is not implemented in this project yet. These notes capture CLOB
 maker-order details that matter if live maker paper/live support is added later.
 
+## User WebSocket Is Required For Live State
+
+For live execution, do not use REST balance or position polling as the primary
+fill signal. It is too slow for a 5-minute two-leg inventory strategy.
+
+The live runner should start an authenticated CLOB user WebSocket at process
+startup, at the same time as the market WebSocket. On every window rollover it
+should subscribe to the current market `condition_id` and keep the previous
+window subscribed briefly enough to drain late status messages.
+
+The local order/fill ledger should be driven by user-channel events:
+
+- `trade` events with `MATCHED` update optimistic filled inventory immediately.
+- `order` `UPDATE` events and `size_matched` reconcile partial fills.
+- `MINED` / `CONFIRMED` update finality state.
+- `FAILED` rolls back or flags optimistic fills that did not settle.
+- REST `getOrder`, `getOpenOrders`, `getTrades`, balances, and positions are
+  fallback reconciliation only, not the main strategy control loop.
+
+This applies to both maker and taker orders. Public market WS can show that the
+market traded, but only user WS can prove how much of our own order filled.
+
 ## Fixed-Share Maker Buys
 
 For Polymarket CLOB limit orders, fixed share count is controlled by the order

@@ -545,10 +545,10 @@ class StrategyFactoryTests(unittest.TestCase):
         self.assertEqual(strategy.config.max_quote_book_age_ms, 50.0)
         self.assertEqual(strategy.config.min_quote_bid_depth_usdc, 20.0)
         self.assertEqual(strategy.config.rebalance_start_sec, 240)
-        self.assertEqual(strategy.config.early_inventory_imbalance_ratio, 1.0)
-        self.assertEqual(strategy.config.mid_inventory_imbalance_ratio, 0.60)
-        self.assertEqual(strategy.config.late_inventory_imbalance_ratio, 0.30)
-        self.assertEqual(strategy.config.final_inventory_imbalance_ratio, 0.12)
+        self.assertEqual(strategy.config.early_inventory_imbalance_ratio, 0.30)
+        self.assertEqual(strategy.config.mid_inventory_imbalance_ratio, 0.12)
+        self.assertEqual(strategy.config.late_inventory_imbalance_ratio, 0.06)
+        self.assertEqual(strategy.config.final_inventory_imbalance_ratio, 0.05)
         self.assertFalse(strategy.one_trade_per_market)
 
     def test_x32_pair_cost_strategy_accepts_quote_quality_overrides(self):
@@ -639,7 +639,7 @@ class LivePaperRunnerTests(unittest.TestCase):
             audit_result = runner.process_market_trades([{**trade, "event": "trade_observed", "source": "data_api", "tx_hash": "0xapi"}])
             fill_result = runner.process_ws_trades([trade])
 
-            self.assertEqual(audit_result["fills"], 0)
+            self.assertEqual(audit_result, {"market_trades": 1})
             self.assertEqual(fill_result["fills"], 1)
             execution_rows = [json.loads(line) for line in (Path(tmp) / "executions.jsonl").read_text().splitlines()]
             self.assertEqual(sum(1 for row in execution_rows if row["record_type"] == "maker_fill"), 1)
@@ -912,7 +912,54 @@ class StrategyRunnerTests(unittest.TestCase):
         self.assertEqual(summary["expired"], 1)
         self.assertEqual(summary["fills"], 0)
 
-    def test_live_paper_runner_cancels_stale_quote_when_book_moves(self):
+    def test_live_paper_runner_replaces_quote_when_bid_improves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "paper_live" / "x32"
+            strategy = strategy_from_name(
+                "x32_pair_cost_inventory_v0",
+                wallet="0x32",
+                target_pair_notional_usdc=20,
+                max_pair_cost=0.995,
+                max_quote_book_age_ms=100,
+                min_quote_bid_depth_usdc=1,
+            )
+            runner = LivePaperStrategyRunner(
+                LivePaperRunConfig(run_dir=run_dir, run_id="test-run", mode="paper"),
+                strategy=strategy,
+            )
+            first = StrategySnapshot.from_market_state_sample(
+                {
+                    "market_slug": "btc-updown-5m-1770000000",
+                    "condition_id": "cond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000010,
+                    "book_stale": 0,
+                    "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.50, "ask": 0.51, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                }
+            )
+            moved = StrategySnapshot.from_market_state_sample(
+                {
+                    "market_slug": first.market_slug,
+                    "condition_id": "cond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000011,
+                    "book_stale": 0,
+                    "up_json": {"bid": 0.50, "ask": 0.51, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.50, "ask": 0.51, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                }
+            )
+
+            runner.tick([first])
+            runner.tick([moved])
+
+            executions = [json.loads(line) for line in (run_dir / "executions.jsonl").read_text().splitlines()]
+
+        self.assertIn("maker_cancelled", [row["record_type"] for row in executions])
+        cancel = next(row for row in executions if row["record_type"] == "maker_cancelled")
+        self.assertEqual(cancel["cancel_reason"], "quote_improved_replace")
+
+    def test_live_paper_runner_keeps_pending_quote_when_bid_worsens(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "paper_live" / "x32"
             strategy = strategy_from_name(
@@ -955,9 +1002,10 @@ class StrategyRunnerTests(unittest.TestCase):
 
             executions = [json.loads(line) for line in (run_dir / "executions.jsonl").read_text().splitlines()]
 
-        self.assertIn("maker_cancelled", [row["record_type"] for row in executions])
-        cancel = next(row for row in executions if row["record_type"] == "maker_cancelled")
-        self.assertEqual(cancel["cancel_reason"], "quote_moved")
+        self.assertNotIn("maker_cancelled", [row["record_type"] for row in executions])
+        submitted = [row for row in executions if row["record_type"] == "maker_order_submitted"]
+        self.assertEqual(submitted[0]["outcome"], "Up")
+        self.assertEqual(submitted[1]["outcome"], "Down")
 
     def test_live_paper_runner_cancels_side_when_balance_is_reconciled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -984,7 +1032,7 @@ class StrategyRunnerTests(unittest.TestCase):
                         checkpoint_sec=1,
                         intent="BUY",
                         outcome="Up",
-                        notional_usdc=4.9,
+                        notional_usdc=9.31,
                         max_price=0.95,
                         expected_price=0.49,
                         symbol="BTC",
@@ -998,7 +1046,7 @@ class StrategyRunnerTests(unittest.TestCase):
                         checkpoint_sec=1,
                         intent="BUY",
                         outcome="Down",
-                        notional_usdc=5.0,
+                        notional_usdc=9.5,
                         max_price=0.95,
                         expected_price=0.50,
                         symbol="BTC",
@@ -1039,6 +1087,89 @@ class StrategyRunnerTests(unittest.TestCase):
 
         cancel = next(row for row in executions if row["record_type"] == "maker_cancelled")
         self.assertEqual(cancel["cancel_reason"], "balance_reconciled")
+
+    def test_live_paper_runner_keeps_balanced_pending_while_below_pair_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "paper_live" / "x32"
+            strategy = strategy_from_name(
+                "x32_pair_cost_inventory_v0",
+                wallet="0x32",
+                target_pair_notional_usdc=20,
+                max_pair_cost=0.995,
+                max_quote_book_age_ms=100,
+                min_quote_bid_depth_usdc=1,
+            )
+            runner = LivePaperStrategyRunner(
+                LivePaperRunConfig(run_dir=run_dir, run_id="test-run", mode="paper"),
+                strategy=strategy,
+            )
+            market_slug = "btc-updown-5m-1770000000"
+            runner.history.emitted_intents.extend(
+                [
+                    TradeIntent(
+                        strategy_name="x32_pair_cost_inventory_v0",
+                        wallet="0x32",
+                        market_slug=market_slug,
+                        sampled_ts=1770000008,
+                        checkpoint_sec=1,
+                        intent="BUY",
+                        outcome="Up",
+                        notional_usdc=2.45,
+                        max_price=0.95,
+                        expected_price=0.49,
+                        symbol="BTC",
+                        reason="filled",
+                    ),
+                    TradeIntent(
+                        strategy_name="x32_pair_cost_inventory_v0",
+                        wallet="0x32",
+                        market_slug=market_slug,
+                        sampled_ts=1770000009,
+                        checkpoint_sec=1,
+                        intent="BUY",
+                        outcome="Down",
+                        notional_usdc=2.50,
+                        max_price=0.95,
+                        expected_price=0.50,
+                        symbol="BTC",
+                        reason="filled",
+                    ),
+                ]
+            )
+            for outcome, price, notional in (("Up", 0.49, 4.9), ("Down", 0.50, 5.0)):
+                runner.maker.submit(
+                    TradeIntent(
+                        strategy_name="x32_pair_cost_inventory_v0",
+                        wallet="0x32",
+                        market_slug=market_slug,
+                        sampled_ts=1770000010,
+                        checkpoint_sec=1,
+                        intent="BUY",
+                        outcome=outcome,
+                        notional_usdc=notional,
+                        max_price=0.95,
+                        expected_price=price,
+                        symbol="BTC",
+                        reason="pending",
+                    )
+                )
+            snapshot = StrategySnapshot.from_market_state_sample(
+                {
+                    "market_slug": market_slug,
+                    "condition_id": "cond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000011,
+                    "book_stale": 0,
+                    "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.50, "ask": 0.51, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                }
+            )
+
+            runner.tick([snapshot])
+
+            executions = [json.loads(line) for line in (run_dir / "executions.jsonl").read_text().splitlines()]
+
+        self.assertNotIn("maker_cancelled", [row["record_type"] for row in executions])
 
     def test_live_paper_runner_cancels_surplus_side_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1120,6 +1251,54 @@ class StrategyRunnerTests(unittest.TestCase):
 
         cancel = next(row for row in executions if row["record_type"] == "maker_cancelled")
         self.assertEqual(cancel["cancel_reason"], "side_no_longer_needed")
+
+    def test_live_paper_runner_summary_counts_cancel_reasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "paper_live" / "x32"
+            strategy = strategy_from_name(
+                "x32_pair_cost_inventory_v0",
+                wallet="0x32",
+                target_pair_notional_usdc=20,
+                max_pair_cost=0.995,
+                max_quote_book_age_ms=100,
+                min_quote_bid_depth_usdc=1,
+            )
+            runner = LivePaperStrategyRunner(
+                LivePaperRunConfig(run_dir=run_dir, run_id="test-run", mode="paper"),
+                strategy=strategy,
+            )
+            pending = TradeIntent(
+                strategy_name="x32_pair_cost_inventory_v0",
+                wallet="0x32",
+                market_slug="btc-updown-5m-1770000000",
+                sampled_ts=1770000010,
+                checkpoint_sec=1,
+                intent="BUY",
+                outcome="Up",
+                notional_usdc=4.9,
+                max_price=0.95,
+                expected_price=0.49,
+                symbol="BTC",
+                reason="pending",
+            )
+            runner.maker.submit(pending)
+            snapshot = StrategySnapshot.from_market_state_sample(
+                {
+                    "market_slug": pending.market_slug,
+                    "condition_id": "cond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000011,
+                    "book_stale": 0,
+                    "up_json": {"bid": 0.50, "ask": 0.51, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                }
+            )
+
+            runner.tick([snapshot])
+
+            summary = json.loads((run_dir / "summary.json").read_text())
+
+        self.assertEqual(summary["cancel_counts_by_reason"], {"quote_improved_replace": 1})
 
     def test_archive_paper_live_run_compresses_core_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
