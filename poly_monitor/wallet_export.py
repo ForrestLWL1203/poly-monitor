@@ -125,10 +125,23 @@ def _coverage_summary(
     settlement_complete = bool(settlement and settlement.get("completed") and settlement.get("winning_side"))
     has_redeem = any(str(row.get("activity_type") or "").upper() == "REDEEM" for row in wallet_activity)
     deep_samples = [row for row in samples if str(row.get("sample_reason") or "") in DEEP_SAMPLE_REASONS]
+    deep_first_sampled_ts = min((int(row.get("sampled_ts") or 0) for row in deep_samples), default=None)
+    deep_last_sampled_ts = max((int(row.get("sampled_ts") or 0) for row in deep_samples), default=None)
+    deep_first_sample_delay = None
+    if deep_first_sampled_ts and window_start is not None:
+        deep_first_sample_delay = round(
+            deep_first_sampled_ts - window_start.timestamp(),
+            3,
+        )
+    captured_from_window_early = (
+        first_seen_delay is not None
+        and first_seen_delay <= 30.0
+    ) or (
+        deep_first_sample_delay is not None
+        and deep_first_sample_delay <= 30.0
+    )
     insufficient = (
-        not watched
-        or first_seen_delay is None
-        or first_seen_delay > 30.0
+        not captured_from_window_early
         or not market_trades
         or not samples
         or not settlement_complete
@@ -143,15 +156,16 @@ def _coverage_summary(
         "window_end": metadata.get("window_end"),
         "first_seen_at": watched.get("first_seen_at") if watched else None,
         "first_seen_delay_sec": first_seen_delay,
-        "captured_from_window_early": first_seen_delay is not None and first_seen_delay <= 30.0,
+        "deep_first_sample_delay_sec": deep_first_sample_delay,
+        "captured_from_window_early": captured_from_window_early,
         "market_trade_rows": len(market_trades),
         "wallet_trade_rows": len(wallet_trades),
         "wallet_activity_rows": len(wallet_activity),
         "wallet_trade_context_rows": len(contexts),
         "market_state_sample_rows": len(samples),
         "deep_market_state_sample_rows": len(deep_samples),
-        "deep_first_sampled_ts": min((int(row.get("sampled_ts") or 0) for row in deep_samples), default=None),
-        "deep_last_sampled_ts": max((int(row.get("sampled_ts") or 0) for row in deep_samples), default=None),
+        "deep_first_sampled_ts": deep_first_sampled_ts,
+        "deep_last_sampled_ts": deep_last_sampled_ts,
         "max_market_state_sample_gap_sec": _sample_gap_seconds(samples),
         "wallet_pnl_rows": len(wallet_pnl),
         "settlement_complete": settlement_complete,

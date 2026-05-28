@@ -216,6 +216,109 @@ class WalletExportTests(unittest.TestCase):
 
         self.assertEqual(str(exc.exception), "no_deep_collection_data")
 
+    def test_export_watchlist_wallet_accepts_early_deep_sample_without_watched_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            wallet = "0xabcdef1234567890abcdef1234567890abcdef12"
+            slug = "btc-updown-5m-1770000000"
+            store = ObserverStore(data_dir / "state" / "observer.sqlite")
+            try:
+                store.add_watchlist_wallet(wallet)
+                store.insert_wallet_activity_events(
+                    [
+                        {
+                            "tx_hash": "0xtrade",
+                            "wallet": wallet,
+                            "market_slug": slug,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 1770000011,
+                            "activity_type": "TRADE",
+                            "side": "BUY",
+                            "outcome": "Up",
+                            "outcome_index": 0,
+                            "price": 0.6,
+                            "size": 10,
+                            "usdc": 6,
+                            "asset": "up",
+                            "observed_at": dt.datetime.fromtimestamp(1770000012, dt.timezone.utc).isoformat(),
+                        }
+                    ]
+                )
+                store.insert_trades(
+                    [
+                        {
+                            "tx_hash": "0xtrade",
+                            "wallet": wallet,
+                            "market_slug": slug,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 1770000011,
+                            "outcome": "Up",
+                            "side": "BUY",
+                            "price": 0.6,
+                            "size": 10,
+                            "usdc": 6,
+                        },
+                        {
+                            "tx_hash": "0xother",
+                            "wallet": "0xother",
+                            "market_slug": slug,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "exchange_ts": 1770000012,
+                            "outcome": "Down",
+                            "side": "BUY",
+                            "price": 0.4,
+                            "size": 5,
+                            "usdc": 2,
+                        },
+                    ]
+                )
+                store.insert_market_state_samples(
+                    [
+                        {
+                            "market_slug": slug,
+                            "condition_id": "0xcond",
+                            "symbol": "BTC",
+                            "sampled_ts": 1770000008,
+                            "observed_at": dt.datetime.fromtimestamp(1770000008, dt.timezone.utc).isoformat(),
+                            "window_remaining_sec": 292,
+                            "reference_price": 100000,
+                            "reference_price_age_sec": 0.5,
+                            "up_json": {"bid": 0.59, "ask": 0.61},
+                            "down_json": {"bid": 0.39, "ask": 0.41},
+                            "book_stale": False,
+                            "sample_reason": "multi_wallet_deep_collector",
+                        }
+                    ]
+                )
+                store.upsert_market_settlement(
+                    {
+                        "market_slug": slug,
+                        "condition_id": "0xcond",
+                        "symbol": "BTC",
+                        "winning_side": "Up",
+                        "settlement_open_price": 100000,
+                        "settlement_close_price": 100100,
+                        "settled_at": dt.datetime.fromtimestamp(1770000300, dt.timezone.utc).isoformat(),
+                        "completed": True,
+                    }
+                )
+                store.recompute_market_pnl_for_markets({slug})
+            finally:
+                store.close()
+
+            result = export_watchlist_wallet(wallet, data_dir=data_dir)
+            manifest = json.loads(Path(result["manifest_path"]).read_text())
+
+        self.assertFalse(manifest["insufficient_market_capture"])
+        self.assertEqual(manifest["window_count"], 1)
+        self.assertFalse(manifest["windows"][0]["insufficient_market_capture"])
+        self.assertTrue(manifest["windows"][0]["captured_from_window_early"])
+        self.assertIsNone(manifest["windows"][0]["first_seen_delay_sec"])
+        self.assertEqual(manifest["windows"][0]["deep_first_sample_delay_sec"], 8.0)
+
     def test_export_watchlist_wallet_only_includes_rows_since_deep_collector_start(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
