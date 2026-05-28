@@ -16,7 +16,9 @@ Build balanced Up + Down inventory only when the quoted pair cost is below 1.
 - Runtime mode: paper/backtest only in this project.
 - Execution style: maker quote simulation.
 - Target markets: crypto 5-minute Up/Down windows.
-- Current symbols used by the runner: BTC and ETH unless overridden.
+- Live paper convention: one run tracks one symbol/current market. Run BTC and
+  ETH as separate processes so `summary.json`, pending state, and replay logs
+  stay symbol-local and easy to audit.
 - Source file: `poly_monitor/strategies/pair_cost_inventory.py`
 
 This strategy consumes only normalized `StrategySnapshot` and `StrategyHistory`
@@ -117,18 +119,24 @@ reduce inventory imbalance.
 
 ## Inventory Accounting
 
-For `x32_pair_cost_inventory_v0`, inventory is based on filled/emitted paper
-intents only. Pending maker quotes are not counted as filled inventory.
+For `x32_pair_cost_inventory_v0`, there are two inventory views:
+
+- Filled inventory is based on filled/emitted paper intents only. This is the
+  source of truth for average price, pair cost, settlement, and PnL.
+- Working inventory is filled inventory plus pending maker quotes. This is used
+  only for sizing, deficit selection, and imbalance checks.
 
 Reason:
 
-- A resting maker quote may never fill.
-- Counting pending quotes as inventory makes the strategy stop too early.
-- 0x32-like behavior appears to keep refreshing/presenting liquidity until real
-  fills build the paired position.
+- A resting maker quote may never fill, so it cannot be counted as realized
+  inventory or PnL.
+- Ignoring pending quotes for sizing causes the strategy to keep submitting the
+  same side every second until the open-order limit is hit.
+- Working inventory lets the strategy reserve capacity for orders already in the
+  book while still reporting real inventory from fills only.
 
-The execution/replay layer may still limit open pending orders. That limit is an
-execution-control concern, not the inventory target itself.
+The emitted diagnostics therefore distinguish `current_*_shares` (filled only)
+from `working_*_shares` (filled plus pending).
 
 ## Candidate Selection
 
@@ -212,6 +220,8 @@ The emitted features include:
 
 - `current_up_shares`
 - `current_down_shares`
+- `working_up_shares`
+- `working_down_shares`
 - `current_imbalance_ratio`
 - `projected_imbalance_ratio`
 - `deficit_side`
@@ -338,7 +348,8 @@ active quote maker_pair_cost should be <= max_pair_cost
 active quotes above pair cost 1 should be zero
 target_pair_notional_usdc should drive scale
 target_pair_shares_per_side should be derived, not copied from 0x32
-pending quotes should not count as filled inventory
+pending quotes should not count as filled inventory or PnL
+pending quotes should count as working inventory for sizing
 projected_pair_avg may be None while inventory is one-sided
 final pair_avg above 1 is a drift/risk metric, not intended alpha
 ```

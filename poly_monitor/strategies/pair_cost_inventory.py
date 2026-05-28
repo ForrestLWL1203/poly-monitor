@@ -38,6 +38,26 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 cost += intent.notional_usdc
         return shares, cost
 
+    def _pending_inventory(self, history: StrategyHistory, market_slug: str, outcome: str) -> tuple[float, float]:
+        shares = 0.0
+        cost = 0.0
+        for intent in history.pending_intents:
+            if intent.market_slug != market_slug or intent.outcome != outcome or intent.intent != "BUY":
+                continue
+            if intent.expected_price > 0:
+                shares += intent.notional_usdc / intent.expected_price
+                cost += intent.notional_usdc
+        return shares, cost
+
+    def _inventory_sets(self, history: StrategyHistory, market_slug: str) -> tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]:
+        filled = {outcome: self._filled_inventory(history, market_slug, outcome) for outcome in ("Up", "Down")}
+        pending = {outcome: self._pending_inventory(history, market_slug, outcome) for outcome in ("Up", "Down")}
+        working = {
+            outcome: (filled[outcome][0] + pending[outcome][0], filled[outcome][1] + pending[outcome][1])
+            for outcome in ("Up", "Down")
+        }
+        return filled, working
+
     def _book_quality_ok(self, book) -> bool:
         return self._book_quality_reason(book) is None
 
@@ -69,25 +89,27 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         up_bid = _safe_float(snapshot.up.bid)
         down_bid = _safe_float(snapshot.down.bid)
         maker_pair_cost = round(up_bid + down_bid, 6) if up_bid > 0 and down_bid > 0 else None
-        current_inventory = {
-            outcome: self._filled_inventory(history, snapshot.market_slug, outcome)
-            for outcome in ("Up", "Down")
-        }
-        up_avg = _avg_price(current_inventory["Up"][1], current_inventory["Up"][0])
-        down_avg = _avg_price(current_inventory["Down"][1], current_inventory["Down"][0])
+        filled_inventory, working_inventory = self._inventory_sets(history, snapshot.market_slug)
+        up_avg = _avg_price(filled_inventory["Up"][1], filled_inventory["Up"][0])
+        down_avg = _avg_price(filled_inventory["Down"][1], filled_inventory["Down"][0])
+        working_up_avg = _avg_price(working_inventory["Up"][1], working_inventory["Up"][0])
+        working_down_avg = _avg_price(working_inventory["Down"][1], working_inventory["Down"][0])
         return {
             "top_pair_cost": round(up_ask + down_ask, 6) if up_ask > 0 and down_ask > 0 else None,
             "maker_pair_cost": maker_pair_cost,
             "max_pair_cost": float(self.config.max_pair_cost),
             "quote_quality": self._quote_quality(snapshot),
             "inventory": {
-                "up_shares": round(current_inventory["Up"][0], 6),
-                "up_cost": round(current_inventory["Up"][1], 6),
+                "up_shares": round(filled_inventory["Up"][0], 6),
+                "up_cost": round(filled_inventory["Up"][1], 6),
                 "up_avg": round(up_avg, 6) if up_avg is not None else None,
-                "down_shares": round(current_inventory["Down"][0], 6),
-                "down_cost": round(current_inventory["Down"][1], 6),
+                "down_shares": round(filled_inventory["Down"][0], 6),
+                "down_cost": round(filled_inventory["Down"][1], 6),
                 "down_avg": round(down_avg, 6) if down_avg is not None else None,
                 "pair_avg": round(up_avg + down_avg, 6) if up_avg is not None and down_avg is not None else None,
+                "working_up_shares": round(working_inventory["Up"][0], 6),
+                "working_down_shares": round(working_inventory["Down"][0], 6),
+                "working_pair_avg": round(working_up_avg + working_down_avg, 6) if working_up_avg is not None and working_down_avg is not None else None,
             },
             "pending_order_count": len([intent for intent in history.pending_intents if intent.market_slug == snapshot.market_slug]),
         }
@@ -127,10 +149,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
 
     def _candidate_skip_reason(self, snapshot: StrategySnapshot, history: StrategyHistory, maker_pair_cost: float) -> str:
         target_pair_shares = self._target_pair_shares(maker_pair_cost)
-        current_inventory = {
-            outcome: self._filled_inventory(history, snapshot.market_slug, outcome)
-            for outcome in ("Up", "Down")
-        }
+        _filled_inventory, current_inventory = self._inventory_sets(history, snapshot.market_slug)
         current_shares = {outcome: current_inventory[outcome][0] for outcome in ("Up", "Down")}
         current_cost = {outcome: current_inventory[outcome][1] for outcome in ("Up", "Down")}
         current_imbalance = _imbalance_ratio(current_shares["Up"], current_shares["Down"])
@@ -209,14 +228,13 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             return None
         target_pair_shares = self._target_pair_shares(maker_pair_cost)
 
-        current_inventory = {
-            outcome: self._filled_inventory(history, snapshot.market_slug, outcome)
-            for outcome in ("Up", "Down")
-        }
-        current_shares = {outcome: current_inventory[outcome][0] for outcome in ("Up", "Down")}
-        current_cost = {outcome: current_inventory[outcome][1] for outcome in ("Up", "Down")}
-        current_up_avg = _avg_price(current_cost["Up"], current_shares["Up"])
-        current_down_avg = _avg_price(current_cost["Down"], current_shares["Down"])
+        filled_inventory, working_inventory = self._inventory_sets(history, snapshot.market_slug)
+        filled_shares = {outcome: filled_inventory[outcome][0] for outcome in ("Up", "Down")}
+        current_shares = {outcome: working_inventory[outcome][0] for outcome in ("Up", "Down")}
+        current_cost = {outcome: working_inventory[outcome][1] for outcome in ("Up", "Down")}
+        filled_cost = {outcome: filled_inventory[outcome][1] for outcome in ("Up", "Down")}
+        current_up_avg = _avg_price(filled_cost["Up"], filled_shares["Up"])
+        current_down_avg = _avg_price(filled_cost["Down"], filled_shares["Down"])
         current_pair_avg = current_up_avg + current_down_avg if current_up_avg is not None and current_down_avg is not None else None
         current_imbalance = _imbalance_ratio(current_shares["Up"], current_shares["Down"])
         imbalance_limit = _dynamic_imbalance_limit(self.config, snapshot.elapsed_sec)
@@ -319,8 +337,10 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 "order_shares": round(order_shares, 6),
                 "clip_shares": clip_shares,
                 "target_pair_shares_per_side": target_pair_shares,
-                "current_up_shares": round(current_shares["Up"], 6),
-                "current_down_shares": round(current_shares["Down"], 6),
+                "current_up_shares": round(filled_shares["Up"], 6),
+                "current_down_shares": round(filled_shares["Down"], 6),
+                "working_up_shares": round(current_shares["Up"], 6),
+                "working_down_shares": round(current_shares["Down"], 6),
                 "deficit_shares": round(deficit_shares, 6),
                 "book_fill": fill,
                 "strategy_profile": "x32_pair_cost_inventory",

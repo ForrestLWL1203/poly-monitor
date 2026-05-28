@@ -35,11 +35,17 @@ def _parse_symbols(value: str) -> tuple[str, ...]:
     return symbols
 
 
+def require_single_symbol(symbols: tuple[str, ...]) -> str:
+    if len(symbols) != 1:
+        raise SystemExit("run_strategy_paper.py runs one market at a time; pass exactly one symbol, e.g. --symbols BTC")
+    return symbols[0]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run an independent live paper strategy plugin.")
     parser.add_argument("--strategy", choices=STRATEGY_CHOICES, default="d950_terminal_bias_v0")
     parser.add_argument("--wallet", default="strategy")
-    parser.add_argument("--symbols", type=_parse_symbols, default=("BTC",))
+    parser.add_argument("--symbols", type=_parse_symbols, default=("BTC",), help="Single symbol to paper trade; this runner intentionally runs one market at a time.")
     parser.add_argument("--mode", choices=("paper", "live"), default="paper")
     parser.add_argument("--jsonl", type=Path)
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
@@ -87,6 +93,7 @@ async def async_main() -> int:
     args = build_parser().parse_args()
     if args.mode != "paper":
         raise SystemExit("run_strategy_paper.py is read-only paper mode; live order submission is not implemented")
+    active_symbol = require_single_symbol(args.symbols)
     run_id = args.run_id or dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     run_dir = args.jsonl.parent if args.jsonl else args.data_dir / "paper_live" / args.strategy / run_id
     strategy = strategy_from_name(
@@ -134,7 +141,7 @@ async def async_main() -> int:
         ),
         strategy=strategy,
     )
-    env = LivePaperEnvironment(symbols=args.symbols)
+    env = LivePaperEnvironment(symbols=(active_symbol,))
     data_api = AsyncDataApiClient()
     last_trade_poll = 0.0
     known_windows = {}

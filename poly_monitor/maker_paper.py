@@ -18,7 +18,12 @@ class PendingMakerOrder:
     def to_dict(self) -> dict[str, Any]:
         return {
             "order_id": self.order_id,
-            "intent": self.intent.to_dict(),
+            "market_slug": self.intent.market_slug,
+            "symbol": self.intent.symbol,
+            "outcome": self.intent.outcome,
+            "sampled_ts": self.intent.sampled_ts,
+            "quote_price": self.intent.expected_price,
+            "original_usdc": round(self.intent.notional_usdc, 6),
             "remaining_usdc": round(self.remaining_usdc, 6),
             "filled_usdc": round(self.filled_usdc, 6),
             "expires_ts": self.expires_ts,
@@ -48,12 +53,28 @@ class MakerFill:
         return {
             "record_type": "maker_fill",
             "order_id": self.order.order_id,
-            "intent": self.intent.to_dict(),
-            "parent_intent": self.order.intent.to_dict(),
-            "touch_trade": dict(self.touch_trade),
+            "market_slug": self.intent.market_slug,
+            "symbol": self.intent.symbol,
+            "sampled_ts": self.intent.sampled_ts,
+            "parent_sampled_ts": self.order.submitted_ts,
+            "outcome": self.intent.outcome,
+            "quote_price": self.intent.expected_price,
             "fill_usdc": round(self.intent.notional_usdc, 6),
             "fill_shares": round(fill_shares, 6),
             "remaining_usdc": round(self.remaining_usdc, 6),
+            "touch_trade": {
+                "market_slug": self.touch_trade.get("market_slug"),
+                "exchange_ts": self.touch_trade.get("exchange_ts"),
+                "outcome": self.touch_trade.get("outcome"),
+                "side": self.touch_trade.get("side"),
+                "price": self.touch_trade.get("price"),
+                "size": self.touch_trade.get("size"),
+                "usdc": self.touch_trade.get("usdc"),
+                "tx_hash": self.touch_trade.get("tx_hash"),
+                "fill_id": self.touch_trade.get("fill_id"),
+            },
+            "configured_fill_rate": self.intent.features.get("maker_fill_rate"),
+            "realized_touch_fill_rate": round(self.intent.notional_usdc / float(self.touch_trade.get("usdc") or 0.0), 6) if float(self.touch_trade.get("usdc") or 0.0) > 0 else None,
         }
 
 
@@ -164,6 +185,8 @@ class PendingMakerReplay:
         fills: list[MakerFill] = []
         for order in list(self.pending):
             intent = order.intent
+            if ts < order.submitted_ts:
+                continue
             if intent.market_slug != market_slug or intent.outcome != outcome:
                 continue
             if price > intent.expected_price + 1e-9:

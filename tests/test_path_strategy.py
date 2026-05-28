@@ -282,7 +282,7 @@ class PathStrategyTests(unittest.TestCase):
         self.assertEqual(intent.features["deficit_side"], "Down")
         self.assertEqual(intent.features["book_fill"]["source"], "maker_rebalance_quote")
 
-    def test_x32_strategy_does_not_treat_pending_quotes_as_filled_inventory(self):
+    def test_x32_strategy_treats_pending_quotes_as_working_inventory_for_sizing(self):
         strategy = X32PairCostInventoryStrategy(
             PathStrategyConfig(
                 wallet="0x32",
@@ -316,7 +316,7 @@ class PathStrategyTests(unittest.TestCase):
             outcome="Down",
             notional_usdc=55.0,
             max_price=0.95,
-            expected_price=0.51,
+            expected_price=0.49,
             symbol="BTC",
             reason="pending_quote",
         )
@@ -329,7 +329,9 @@ class PathStrategyTests(unittest.TestCase):
 
         self.assertIsNotNone(intent)
         assert intent is not None
+        self.assertEqual(intent.outcome, "Up")
         self.assertEqual(intent.features["current_down_shares"], 0.0)
+        self.assertGreater(intent.features["working_down_shares"], 0.0)
 
     def test_wallet_path_builds_scaled_pair_inventory_without_wallet_activity(self):
         strategy = WalletPathStrategy(

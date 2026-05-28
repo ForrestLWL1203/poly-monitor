@@ -22,6 +22,8 @@ from poly_monitor.strategy_runtime import (
 from poly_monitor.strategy_runner import StrategyRunner, StrategyRunnerConfig
 from poly_monitor.strategy_runner import LivePaperRunConfig, LivePaperStrategyRunner
 from poly_monitor.strategies import X32PairCostInventoryStrategy
+from scripts.archive_paper_live_run import archive_run
+from scripts.run_strategy_paper import require_single_symbol
 
 
 class FakeStream:
@@ -203,6 +205,28 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settlement.status, "paper_settled")
         self.assertEqual(settlement.detail["realized_pnl"], 5.0)
 
+    def test_pending_maker_replay_ignores_trades_before_order_submission(self):
+        replay = PendingMakerReplay(config=PendingMakerReplayConfig(fill_rate=1.0, order_ttl_sec=30))
+        intent = TradeIntent(
+            strategy_name="demo",
+            market_slug="btc-updown-5m-1",
+            sampled_ts=20,
+            intent="BUY",
+            outcome="Up",
+            notional_usdc=5,
+            max_price=0.9,
+            expected_price=0.5,
+            reason="test",
+        )
+        replay.submit(intent)
+
+        stale_fills = replay.process_trade({"market_slug": "btc-updown-5m-1", "exchange_ts": 19, "outcome": "Up", "price": 0.5, "usdc": 5})
+        live_fills = replay.process_trade({"market_slug": "btc-updown-5m-1", "exchange_ts": 21, "outcome": "Up", "price": 0.5, "usdc": 5})
+
+        self.assertEqual(stale_fills, [])
+        self.assertEqual(len(live_fills), 1)
+        self.assertEqual(live_fills[0].intent.sampled_ts, 21)
+
     def test_x32_trace_explains_pair_cost_skip(self):
         strategy = strategy_from_name("x32_pair_cost_inventory_v0", wallet="0x32")
         snapshot = StrategySnapshot.from_market_state_sample(
@@ -334,6 +358,11 @@ class StrategyHistoryTests(unittest.TestCase):
 
 
 class StrategyFactoryTests(unittest.TestCase):
+    def test_live_paper_requires_one_symbol(self):
+        self.assertEqual(require_single_symbol(("BTC",)), "BTC")
+        with self.assertRaises(SystemExit):
+            require_single_symbol(("BTC", "ETH"))
+
     def test_x32_pair_cost_strategy_uses_address_specific_defaults(self):
         strategy = strategy_from_name("x32_pair_cost_inventory_v0", wallet="0x32")
 
@@ -571,8 +600,15 @@ class StrategyRunnerTests(unittest.TestCase):
         self.assertEqual(decisions[0]["record_type"], "decision")
         self.assertEqual(decisions[0]["decision"], "intent")
         self.assertEqual(decisions[0]["maker_pair_cost"], 0.99)
+        self.assertIn("book_fill", decisions[0]["intent"]["features"])
         self.assertEqual(executions[0]["record_type"], "maker_order_submitted")
+        self.assertEqual(executions[0]["market_slug"], snapshot.market_slug)
+        self.assertNotIn("execution", executions[0])
         self.assertEqual(executions[1]["record_type"], "maker_fill")
+        self.assertEqual(executions[1]["parent_sampled_ts"], snapshot.sampled_ts)
+        self.assertNotIn("parent_intent", executions[1])
+        self.assertEqual(executions[1]["configured_fill_rate"], 0.1)
+        self.assertEqual(executions[1]["realized_touch_fill_rate"], 0.1)
         self.assertEqual(executions[2]["record_type"], "settled")
         self.assertEqual(executions[2]["winning_side"], "Up")
         self.assertEqual(len(trades), 1)
@@ -580,7 +616,7 @@ class StrategyRunnerTests(unittest.TestCase):
         self.assertEqual(state["run"]["run_id"], "test-run")
         self.assertEqual(summary["orders_submitted"], 1)
         self.assertEqual(summary["fills"], 1)
-        self.assertEqual(summary["partial_fills"], 1)
+        self.assertEqual(summary["partial_fill_events"], 1)
 
     def test_live_paper_runner_logs_trade_driven_expiry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -636,8 +672,26 @@ class StrategyRunnerTests(unittest.TestCase):
             summary = json.loads((run_dir / "summary.json").read_text())
 
         self.assertEqual([row["record_type"] for row in executions], ["maker_order_submitted", "maker_expired"])
+        self.assertIn("lifetime_sec", executions[1])
+        self.assertIn("wallclock_at_log_sec", executions[1])
+        self.assertNotIn("age_sec", executions[1])
         self.assertEqual(summary["expired"], 1)
         self.assertEqual(summary["fills"], 0)
+
+    def test_archive_paper_live_run_compresses_core_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            for name in ("decisions.jsonl", "executions.jsonl", "market_trades.jsonl"):
+                (run_dir / name).write_text('{"ok":true}\n', encoding="utf-8")
+            (run_dir / "summary.json").write_text("{}\n", encoding="utf-8")
+
+            manifest = archive_run(run_dir)
+
+            self.assertEqual(len(manifest["core_logs"]), 3)
+            self.assertTrue((run_dir / "decisions.jsonl.gz").exists())
+            self.assertTrue((run_dir / "archive_manifest.json").exists())
+            self.assertTrue((run_dir / "decisions.jsonl").exists())
+            self.assertIn("gzip_sha256", manifest["core_logs"][0])
 
 
 if __name__ == "__main__":

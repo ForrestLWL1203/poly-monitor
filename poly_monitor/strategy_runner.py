@@ -133,6 +133,7 @@ class LivePaperRunConfig:
     mode: str = "paper"
     start_sampled_ts: int = 0
     expiry_grace_sec: float = 0.0
+    snapshot_retention_sec: int = 600
     maker: PendingMakerReplayConfig = field(default_factory=PendingMakerReplayConfig)
 
 
@@ -157,6 +158,80 @@ def _trade_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str, str]:
         str(row.get("price") or ""),
         str(row.get("size") or ""),
     )
+
+
+def _feature_subset(features: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "elapsed_sec",
+        "top_pair_cost",
+        "maker_pair_cost",
+        "execution_style",
+        "target_pair_notional_usdc",
+        "max_pair_cost",
+        "max_unpaired_price",
+        "dynamic_inventory_imbalance_limit",
+        "deficit_side",
+        "current_pair_avg",
+        "projected_pair_avg",
+        "current_imbalance_ratio",
+        "projected_imbalance_ratio",
+        "order_shares",
+        "clip_shares",
+        "target_pair_shares_per_side",
+        "current_up_shares",
+        "current_down_shares",
+        "working_up_shares",
+        "working_down_shares",
+        "deficit_shares",
+        "book_fill",
+        "maker_parent_sampled_ts",
+        "maker_order_id",
+        "maker_touch_trade_price",
+        "maker_touch_trade_usdc",
+        "maker_fill_rate",
+    )
+    return {key: features[key] for key in keys if key in features}
+
+
+def _intent_summary(intent: TradeIntent | None, *, include_features: bool = False) -> dict[str, Any] | None:
+    if intent is None:
+        return None
+    # Keep this list aligned with TradeIntent while intentionally omitting the
+    # large features payload unless a caller opts in.
+    row = {
+        "strategy_name": intent.strategy_name,
+        "wallet": intent.wallet,
+        "market_slug": intent.market_slug,
+        "sampled_ts": intent.sampled_ts,
+        "checkpoint_sec": intent.checkpoint_sec,
+        "intent": intent.intent,
+        "outcome": intent.outcome,
+        "notional_usdc": intent.notional_usdc,
+        "max_price": intent.max_price,
+        "expected_price": intent.expected_price,
+        "symbol": intent.symbol,
+        "reason": intent.reason,
+    }
+    if include_features:
+        row["features"] = _feature_subset(dict(intent.features))
+    return row
+
+
+def _touch_trade_summary(trade: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "market_slug": trade.get("market_slug"),
+        "condition_id": trade.get("condition_id"),
+        "exchange_ts": trade.get("exchange_ts"),
+        "observed_at": trade.get("observed_at"),
+        "symbol": trade.get("symbol"),
+        "outcome": trade.get("outcome"),
+        "side": trade.get("side"),
+        "price": trade.get("price"),
+        "size": trade.get("size"),
+        "usdc": trade.get("usdc"),
+        "tx_hash": trade.get("tx_hash"),
+        "fill_id": trade.get("fill_id"),
+    }
 
 
 class LivePaperStrategyRunner:
@@ -223,7 +298,7 @@ class LivePaperStrategyRunner:
                 for fill in self.maker.process_trade(trade, expire_first=False):
                     self.history.emitted_intents.append(fill.intent)
                     self.filled_markets.add(fill.intent.market_slug)
-                    execution_handle.write(_json_dumps(fill.to_execution_row()) + "\n")
+                    execution_handle.write(_json_dumps(self._fill_row(fill)) + "\n")
                     fills += 1
         self.write_state(active_windows=[])
         return {"market_trades": written, "fills": fills}
@@ -313,7 +388,7 @@ class LivePaperStrategyRunner:
             "quote_quality": features.get("quote_quality"),
             "decision": trace.decision,
             "skip_reason": trace.skip_reason,
-            "intent": trace.intent.to_dict() if trace.intent is not None else None,
+            "intent": _intent_summary(trace.intent, include_features=True),
             "inventory": features.get("inventory") or self._inventory_for_decision(snapshot.market_slug),
             "pending": self._pending_summary(snapshot.market_slug),
             "open_order_limit": self._open_order_limit(snapshot.market_slug),
@@ -321,35 +396,72 @@ class LivePaperStrategyRunner:
 
     def _order_row(self, execution: ExecutionResult) -> dict[str, Any]:
         detail = dict(execution.detail)
+        intent = execution.intent
         return {
             "record_type": "maker_order_submitted" if execution.status == "maker_pending" else "maker_rejected",
             "recorded_at": utc_iso(),
             "run_id": self.config.run_id,
-            "execution": execution.to_dict(),
+            "status": execution.status,
             "order_id": detail.get("order_id"),
+            "intent": _intent_summary(intent),
+            "market_slug": intent.market_slug,
+            "symbol": intent.symbol,
+            "sampled_ts": intent.sampled_ts,
+            "outcome": intent.outcome,
+            "notional_usdc": intent.notional_usdc,
             "ttl_sec": detail.get("ttl_sec"),
             "expires_ts": detail.get("expires_ts"),
             "quote_price": detail.get("quote_price"),
             "remaining_usdc": detail.get("remaining_usdc"),
+            "reject_detail": detail if execution.status != "maker_pending" else None,
         }
 
     def _expired_row(self, order) -> dict[str, Any]:
+        intent = order.intent
         return {
             "record_type": "maker_expired",
             "recorded_at": utc_iso(),
             "run_id": self.config.run_id,
             "order_id": order.order_id,
-            "parent_intent": order.intent.to_dict(),
+            "market_slug": intent.market_slug,
+            "symbol": intent.symbol,
+            "outcome": intent.outcome,
+            "submitted_ts": order.submitted_ts,
+            "quote_price": intent.expected_price,
+            "original_usdc": round(intent.notional_usdc, 6),
             "unfilled_usdc": round(order.remaining_usdc, 6),
-            "age_sec": max(0, int(time.time()) - int(order.submitted_ts)),
+            "lifetime_sec": max(0, int(order.expires_ts) - int(order.submitted_ts)),
+            "wallclock_at_log_sec": max(0, int(time.time()) - int(order.submitted_ts)),
             "expires_ts": order.expires_ts,
+        }
+
+    def _fill_row(self, fill) -> dict[str, Any]:
+        intent = fill.intent
+        fill_shares = intent.notional_usdc / intent.expected_price if intent.expected_price > 0 else 0.0
+        return {
+            "record_type": "maker_fill",
+            "recorded_at": utc_iso(),
+            "run_id": self.config.run_id,
+            "order_id": fill.order.order_id,
+            "market_slug": intent.market_slug,
+            "symbol": intent.symbol,
+            "sampled_ts": intent.sampled_ts,
+            "parent_sampled_ts": fill.order.submitted_ts,
+            "outcome": intent.outcome,
+            "quote_price": intent.expected_price,
+            "fill_usdc": round(intent.notional_usdc, 6),
+            "fill_shares": round(fill_shares, 6),
+            "remaining_usdc": round(fill.remaining_usdc, 6),
+            "touch_trade": _touch_trade_summary(fill.touch_trade),
+            "configured_fill_rate": intent.features.get("maker_fill_rate"),
+            "realized_touch_fill_rate": round(intent.notional_usdc / float(fill.touch_trade.get("usdc") or 0.0), 6) if float(fill.touch_trade.get("usdc") or 0.0) > 0 else None,
         }
 
     def _expire(self, ts: int) -> list[Any]:
         return self.maker.expire_before(ts)
 
     def _prune_snapshots(self, snapshot: StrategySnapshot) -> None:
-        cutoff = int(snapshot.sampled_ts) - 600
+        cutoff = int(snapshot.sampled_ts) - max(0, int(self.config.snapshot_retention_sec))
         for market_slug, rows in list(self.history.snapshots_by_market.items()):
             kept = [row for row in rows if int(row.sampled_ts) >= cutoff]
             if kept:
@@ -439,7 +551,7 @@ class LivePaperStrategyRunner:
             "decision_counts_by_reason": dict(self.decision_counts),
             "orders_submitted": self.maker.submitted,
             "fills": len(self.maker.filled_intents),
-            "partial_fills": self.maker.partial_fills,
+            "partial_fill_events": self.maker.partial_fills,
             "expired": self.maker.expired,
             "rejected": self.maker.rejected,
             "filled_markets": len(self.filled_markets),

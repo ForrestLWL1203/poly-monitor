@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.run_strategy_paper import build_parser
+from scripts.run_strategy_paper import build_parser, require_single_symbol
 from poly_monitor.strategy_live import LivePaperEnvironment
 from poly_monitor.strategy_runner import StrategyRunner, StrategyRunnerConfig
 from poly_monitor.strategy_runtime import PaperExecutionAdapter, RejectingLiveExecutionAdapter, strategy_from_name
@@ -19,6 +19,7 @@ async def async_main() -> int:
     parser = build_parser()
     parser.description = "Compatibility wrapper for run_strategy_paper.py; no observer.sqlite is read."
     args = parser.parse_args()
+    active_symbol = require_single_symbol(args.symbols)
     strategy = strategy_from_name(
         args.strategy,
         wallet=args.wallet,
@@ -49,7 +50,7 @@ async def async_main() -> int:
         strategy=strategy,
         execution_adapter=adapter,
     )
-    return await runner.run_live(LivePaperEnvironment(symbols=args.symbols), seconds=args.seconds, poll_sec=args.poll_sec)
+    return await runner.run_live(LivePaperEnvironment(symbols=(active_symbol,)), seconds=args.seconds, poll_sec=args.poll_sec)
 
 
 def main() -> int:

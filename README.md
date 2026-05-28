@@ -64,7 +64,7 @@ experiments do not blur together:
 python3 scripts/run_strategy_paper.py \
   --strategy x32_pair_cost_inventory_v0 \
   --mode paper \
-  --symbols BTC,ETH \
+  --symbols BTC \
   --data-dir data \
   --run-id x32-paper-live \
   --target-pair-notional 25 \
@@ -74,8 +74,17 @@ python3 scripts/run_strategy_paper.py \
 Live paper writes analysis logs under
 `data/paper_live/<strategy>/<run-id>/`: `decisions.jsonl`,
 `executions.jsonl`, `market_trades.jsonl`, `state.json`, and `summary.json`.
+The JSONL files are the rebuildable truth; `state.json` and `summary.json` are
+derived snapshots. For transfer or archival, compress the core logs first:
+
+```bash
+python3 scripts/archive_paper_live_run.py data/paper_live/<strategy>/<run-id>
+```
+
 It is read-only paper execution: maker orders are simulated with TTL/pending
 state and Data API market trades, not submitted to Polymarket.
+The independent live paper runner intentionally runs one symbol/current market
+at a time; start separate runs for BTC and ETH when comparing symbols.
 
 Deep wallet export backtests use the same strategy interface:
 
