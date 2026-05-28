@@ -347,6 +347,53 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.ttl_for_intent(intent_at(180)), 2)
         self.assertEqual(replay.ttl_for_intent(intent_at(240)), 1)
 
+    def test_pending_maker_replay_consumes_queue_ahead_before_fill(self):
+        replay = PendingMakerReplay(config=PendingMakerReplayConfig(fill_rate=1.0, order_ttl_sec=30, queue_position_ratio=1.0))
+        intent = TradeIntent(
+            strategy_name="demo",
+            market_slug="btc-updown-5m-1",
+            sampled_ts=20,
+            intent="BUY",
+            outcome="Up",
+            notional_usdc=5,
+            max_price=0.9,
+            expected_price=0.5,
+            reason="test",
+            features={"quote_level_size_shares": 10},
+        )
+        replay.submit(intent)
+
+        first = replay.process_trade({"market_slug": "btc-updown-5m-1", "exchange_ts": 21, "outcome": "Up", "price": 0.5, "size": 6, "usdc": 3})
+        second = replay.process_trade({"market_slug": "btc-updown-5m-1", "exchange_ts": 22, "outcome": "Up", "price": 0.5, "size": 6, "usdc": 3})
+
+        self.assertEqual(first, [])
+        self.assertEqual(len(second), 1)
+        self.assertEqual(second[0].intent.notional_usdc, 1.0)
+
+    def test_pending_maker_replay_does_not_reuse_one_trade_across_orders(self):
+        replay = PendingMakerReplay(config=PendingMakerReplayConfig(fill_rate=1.0, order_ttl_sec=30, queue_position_ratio=0.0))
+        for idx in range(2):
+            replay.submit(
+                TradeIntent(
+                    strategy_name="demo",
+                    market_slug="btc-updown-5m-1",
+                    sampled_ts=20 + idx,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=5,
+                    max_price=0.9,
+                    expected_price=0.5,
+                    reason="test",
+                    features={"quote_level_size_shares": 0},
+                )
+            )
+
+        fills = replay.process_trade({"market_slug": "btc-updown-5m-1", "exchange_ts": 23, "outcome": "Up", "price": 0.5, "size": 6, "usdc": 3})
+
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].intent.notional_usdc, 3.0)
+        self.assertEqual(len(replay.filled_intents), 1)
+
     def test_x32_trace_explains_pair_cost_skip(self):
         strategy = strategy_from_name("x32_pair_cost_inventory_v0", wallet="0x32")
         snapshot = StrategySnapshot.from_market_state_sample(

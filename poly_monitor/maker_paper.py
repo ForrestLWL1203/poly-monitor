@@ -13,6 +13,13 @@ def _safe_int(value: Any, *, default: int | None = 0) -> int | None:
         return default
 
 
+def _safe_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class PendingMakerOrder:
     order_id: str
@@ -21,6 +28,8 @@ class PendingMakerOrder:
     expires_ts: int
     submitted_ts: int
     filled_usdc: float = 0.0
+    queue_ahead_shares: float = 0.0
+    original_queue_ahead_shares: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -33,6 +42,8 @@ class PendingMakerOrder:
             "original_usdc": round(self.intent.notional_usdc, 6),
             "remaining_usdc": round(self.remaining_usdc, 6),
             "filled_usdc": round(self.filled_usdc, 6),
+            "queue_ahead_shares": round(self.queue_ahead_shares, 6),
+            "original_queue_ahead_shares": round(self.original_queue_ahead_shares, 6),
             "expires_ts": self.expires_ts,
             "submitted_ts": self.submitted_ts,
         }
@@ -50,6 +61,7 @@ class PendingMakerReplayConfig:
     rebalance_fill_multiplier: float = 2.0
     rebalance_ttl_multiplier: float = 1.0
     excess_ttl_multiplier: float = 1.0
+    queue_position_ratio: float = 1.0
 
 
 @dataclass
@@ -125,12 +137,15 @@ class PendingMakerReplay:
             return ExecutionResult(status="maker_rejected_open_order_limit", intent=intent, detail={"open_orders": len(same_market)})
         ttl = self.ttl_for_intent(intent)
         expires_ts = int(intent.sampled_ts) + ttl
+        queue_ahead_shares = self.queue_ahead_for_intent(intent)
         order = PendingMakerOrder(
             order_id=f"maker-{self._next_order_id}",
             intent=intent,
             remaining_usdc=float(intent.notional_usdc),
             expires_ts=expires_ts,
             submitted_ts=int(intent.sampled_ts),
+            queue_ahead_shares=queue_ahead_shares,
+            original_queue_ahead_shares=queue_ahead_shares,
         )
         self._next_order_id += 1
         self.pending.append(order)
@@ -144,8 +159,13 @@ class PendingMakerReplay:
                 "remaining_usdc": intent.notional_usdc,
                 "ttl_sec": ttl,
                 "expires_ts": expires_ts,
+                "queue_ahead_shares": round(queue_ahead_shares, 6),
             },
         )
+
+    def queue_ahead_for_intent(self, intent: TradeIntent) -> float:
+        level_size = _safe_float(intent.features.get("quote_level_size_shares"), default=0.0)
+        return max(0.0, level_size * max(0.0, float(self.config.queue_position_ratio)))
 
     def ttl_for_intent(self, intent: TradeIntent) -> int:
         base_ttl = self._base_ttl_for_intent(intent)
@@ -229,10 +249,16 @@ class PendingMakerReplay:
         outcome = str(trade.get("outcome") or "").capitalize()
         price = float(trade.get("price") or 0.0)
         trade_usdc = float(trade.get("usdc") or 0.0)
-        if not market_slug or outcome not in {"Up", "Down"} or price <= 0 or trade_usdc <= 0:
+        trade_shares = _safe_float(trade.get("size"), default=0.0)
+        if trade_shares <= 0 and price > 0:
+            trade_shares = trade_usdc / price
+        if not market_slug or outcome not in {"Up", "Down"} or price <= 0 or trade_usdc <= 0 or trade_shares <= 0:
             return []
         fills: list[MakerFill] = []
+        available_shares = trade_shares
         for order in list(self.pending):
+            if available_shares <= 1e-9:
+                break
             intent = order.intent
             if ts < order.submitted_ts:
                 continue
@@ -242,12 +268,21 @@ class PendingMakerReplay:
                 continue
             if price > intent.expected_price + 1e-9:
                 continue
+            if order.queue_ahead_shares > 1e-9:
+                consumed_ahead = min(order.queue_ahead_shares, available_shares)
+                order.queue_ahead_shares -= consumed_ahead
+                available_shares -= consumed_ahead
+                if available_shares <= 1e-9:
+                    continue
             fill_rate = max(0.0, self.config.fill_rate)
             if book_fill_source(intent.features) == "maker_rebalance_quote":
                 fill_rate *= max(0.0, self.config.rebalance_fill_multiplier)
-            fill_usdc = min(order.remaining_usdc, trade_usdc * fill_rate)
-            if fill_usdc <= 1e-9:
+            fill_shares = min(order.remaining_usdc / intent.expected_price, available_shares * fill_rate)
+            if fill_shares <= 1e-9:
                 continue
+            fill_usdc = min(order.remaining_usdc, fill_shares * intent.expected_price)
+            filled_shares = fill_usdc / intent.expected_price if intent.expected_price > 0 else 0.0
+            available_shares -= filled_shares
             was_partial = fill_usdc + 1e-9 < order.remaining_usdc
             order.remaining_usdc -= fill_usdc
             order.filled_usdc += fill_usdc
@@ -272,7 +307,11 @@ class PendingMakerReplay:
                     "maker_parent_sampled_ts": intent.sampled_ts,
                     "maker_touch_trade_price": price,
                     "maker_touch_trade_usdc": trade_usdc,
+                    "maker_touch_trade_shares": trade_shares,
                     "maker_fill_rate": self.config.fill_rate,
+                    "maker_queue_position_ratio": self.config.queue_position_ratio,
+                    "maker_original_queue_ahead_shares": order.original_queue_ahead_shares,
+                    "maker_remaining_queue_ahead_shares": order.queue_ahead_shares,
                 },
             )
             maker_fill = MakerFill(order=order, intent=fill_intent, touch_trade=dict(trade), remaining_usdc=order.remaining_usdc)

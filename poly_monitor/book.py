@@ -51,11 +51,15 @@ def token_book_summary(
 ) -> dict[str, Any]:
     best_bid = bids[0][0] if bids else None
     best_ask = asks[0][0] if asks else None
+    best_bid_size = bids[0][1] if bids else None
+    best_ask_size = asks[0][1] if asks else None
     depth_bids = bids[:depth_levels]
     depth_asks = asks[:depth_levels]
     return {
         "bid": compact_float(best_bid),
         "ask": compact_float(best_ask),
+        "bid_size": compact_float(best_bid_size),
+        "ask_size": compact_float(best_ask_size),
         "spread": compact_float(best_ask - best_bid if best_bid is not None and best_ask is not None else None),
         "book_age_ms": book_age_ms,
         "bid_levels": len(bids),

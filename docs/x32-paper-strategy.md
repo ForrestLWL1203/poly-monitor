@@ -279,6 +279,10 @@ Known limitations:
 - TTL is configurable for fixed or phased replay: `--maker-order-ttl-sec`, or
   `--maker-early-ttl-sec` / `--maker-mid-ttl-sec` /
   `--maker-late-ttl-sec` / `--maker-final-ttl-sec`.
+- Maker fills use an estimated visible-queue model, not a fixed per-trade fill
+  gift. `--maker-queue-position-ratio 1.0` means a new quote starts behind the
+  currently visible bid-level size, and only subsequent WS trade size beyond
+  that queue can fill the paper order.
 - Partial fills use configurable replay assumptions.
 - The replay may show final pair average above 1 even when active quote entries
   all had `maker_pair_cost <= max_pair_cost`.

@@ -453,6 +453,7 @@ class LivePaperStrategyRunner:
             "expires_ts": detail.get("expires_ts"),
             "quote_price": detail.get("quote_price"),
             "remaining_usdc": detail.get("remaining_usdc"),
+            "queue_ahead_shares": detail.get("queue_ahead_shares"),
             "reject_detail": detail if execution.status != "maker_pending" else None,
         }
 
@@ -513,6 +514,9 @@ class LivePaperStrategyRunner:
             "remaining_usdc": round(fill.remaining_usdc, 6),
             "touch_trade": _touch_trade_summary(fill.touch_trade),
             "configured_fill_rate": intent.features.get("maker_fill_rate"),
+            "queue_position_ratio": intent.features.get("maker_queue_position_ratio"),
+            "original_queue_ahead_shares": intent.features.get("maker_original_queue_ahead_shares"),
+            "remaining_queue_ahead_shares": intent.features.get("maker_remaining_queue_ahead_shares"),
             "realized_touch_fill_rate": round(intent.notional_usdc / float(fill.touch_trade.get("usdc") or 0.0), 6) if float(fill.touch_trade.get("usdc") or 0.0) > 0 else None,
         }
 

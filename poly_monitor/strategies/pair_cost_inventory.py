@@ -343,6 +343,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 "working_down_shares": round(current_shares["Down"], 6),
                 "deficit_shares": round(deficit_shares, 6),
                 "book_fill": fill,
+                "quote_level_size_shares": _safe_float(snapshot.book_for_outcome(outcome).bid_size),
                 "strategy_profile": "x32_pair_cost_inventory",
                 "terminal_stop_sec": self.terminal_stop_sec,
             },

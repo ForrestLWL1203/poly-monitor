@@ -80,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--maker-expiry-grace-sec", type=float)
     parser.add_argument("--maker-max-open-orders-per-market", type=int, default=20)
     parser.add_argument("--maker-rebalance-fill-multiplier", type=float, default=2.0)
+    parser.add_argument("--maker-queue-position-ratio", type=float, default=1.0)
     parser.add_argument("--maker-rebalance-ttl-multiplier", type=float, default=1.0)
     parser.add_argument("--maker-excess-ttl-multiplier", type=float, default=1.0)
     parser.add_argument("--terminal-bias-start-sec", type=int)
@@ -143,6 +144,7 @@ async def async_main() -> int:
                 final_ttl_sec=args.maker_final_ttl_sec,
                 max_open_orders_per_market=args.maker_max_open_orders_per_market,
                 rebalance_fill_multiplier=args.maker_rebalance_fill_multiplier,
+                queue_position_ratio=args.maker_queue_position_ratio,
                 rebalance_ttl_multiplier=args.maker_rebalance_ttl_multiplier,
                 excess_ttl_multiplier=args.maker_excess_ttl_multiplier,
             ),

@@ -80,6 +80,8 @@ def _window_start_from_slug(slug: str) -> int | None:
 class BookSnapshot:
     bid: float | None = None
     ask: float | None = None
+    bid_size: float | None = None
+    ask_size: float | None = None
     spread: float | None = None
     book_age_ms: float | None = None
     ask_depth_usdc: float | None = None
@@ -94,6 +96,8 @@ class BookSnapshot:
         return cls(
             bid=data.get("bid"),
             ask=data.get("ask"),
+            bid_size=data.get("bid_size"),
+            ask_size=data.get("ask_size"),
             spread=data.get("spread"),
             book_age_ms=data.get("book_age_ms"),
             ask_depth_usdc=data.get("ask_depth_usdc") or data.get("stable_depth_usd"),
@@ -107,6 +111,8 @@ class BookSnapshot:
         return {
             "bid": self.bid,
             "ask": self.ask,
+            "bid_size": self.bid_size,
+            "ask_size": self.ask_size,
             "spread": self.spread,
             "book_age_ms": self.book_age_ms,
             "ask_depth_usdc": self.ask_depth_usdc,

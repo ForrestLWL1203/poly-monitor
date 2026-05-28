@@ -93,6 +93,9 @@ side quotes cancel as `side_no_longer_needed`.
 TTL can be swept as a fixed value with `--maker-order-ttl-sec`, or by phase with
 `--maker-early-ttl-sec`, `--maker-mid-ttl-sec`, `--maker-late-ttl-sec`, and
 `--maker-final-ttl-sec` for offline replay comparisons.
+Maker fills use a conservative queue model by default: `--maker-queue-position-ratio 1.0`
+assumes our new quote sits behind the visible size at that bid level, and later
+WS trade volume must consume that queue before paper fills start.
 The independent live paper runner intentionally runs one symbol/current market
 at a time; start separate runs for BTC and ETH when comparing symbols.
 
