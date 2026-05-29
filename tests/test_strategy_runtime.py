@@ -482,7 +482,7 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
                 "sampled_ts": 1770000010,
                 "book_stale": 0,
                 "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
-                "down_json": {"bid": 0.50, "ask": 0.51, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                "down_json": {"bid": 0.48, "ask": 0.49, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
             }
         )
 
@@ -535,6 +535,49 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace.intent.outcome, "Up")
         self.assertEqual(trace.intent.features["quote_source"], "maker_rebalance_quote")
         self.assertLessEqual(trace.intent.features["projected_pair_avg"], 0.995)
+
+    def test_x32_only_quotes_missing_side_after_one_side_fills(self):
+        strategy = strategy_from_name(
+            "x32_pair_cost_inventory_v0",
+            wallet="0x32",
+            target_pair_notional_usdc=40,
+            max_quote_book_age_ms=100,
+            min_quote_bid_depth_usdc=1,
+        )
+        history = StrategyHistory(
+            emitted_intents=[
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug="btc-updown-5m-1770000000",
+                    sampled_ts=1770000005,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=5.0,
+                    max_price=0.95,
+                    expected_price=0.50,
+                    symbol="BTC",
+                    reason="seed",
+                )
+            ]
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "btc-updown-5m-1770000000",
+                "symbol": "BTC",
+                "sampled_ts": 1770000010,
+                "book_stale": 0,
+                "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                "down_json": {"bid": 0.48, "ask": 0.49, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+            }
+        )
+
+        trace = strategy.evaluate_many_with_trace(snapshot, history)
+
+        self.assertEqual(trace.decision, "intent")
+        self.assertEqual(len(trace.intents), 1)
+        self.assertEqual(trace.intent.outcome, "Down")
 
     def test_x32_rejects_extreme_gap_unprotected_entry(self):
         strategy = strategy_from_name(

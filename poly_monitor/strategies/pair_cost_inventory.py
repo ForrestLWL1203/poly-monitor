@@ -221,17 +221,22 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
     def _candidate_skip_reason(self, snapshot: StrategySnapshot, history: StrategyHistory, maker_pair_cost: float) -> str:
         target_pair_shares = self._target_pair_shares(maker_pair_cost)
         _filled_inventory, current_inventory = self._inventory_sets(history, snapshot.market_slug)
+        filled_shares = {outcome: _filled_inventory[outcome][0] for outcome in ("Up", "Down")}
         current_shares = {outcome: current_inventory[outcome][0] for outcome in ("Up", "Down")}
         current_cost = {outcome: current_inventory[outcome][1] for outcome in ("Up", "Down")}
         current_imbalance = _imbalance_ratio(current_shares["Up"], current_shares["Down"])
         imbalance_limit = _dynamic_imbalance_limit(self.config, snapshot.elapsed_sec)
         deficit_side = "Up" if current_shares["Up"] < current_shares["Down"] else "Down" if current_shares["Down"] < current_shares["Up"] else None
+        missing_filled_side = self._missing_filled_side(filled_shares)
         dual_gate = self._dual_build_gate(snapshot=snapshot, target_pair_shares=target_pair_shares, current_shares=current_shares, current_imbalance=current_imbalance, deficit_side=deficit_side)
         if dual_gate["blocked_by_gap"]:
             return "dual_build_gap_above_cap"
         last_reason = "no_candidate"
 
         for outcome in ("Up", "Down"):
+            if missing_filled_side is not None and outcome != missing_filled_side:
+                last_reason = "awaiting_opposite_side_fill"
+                continue
             book = snapshot.book_for_outcome(outcome)
             ask = _safe_float(book.ask)
             if ask <= 0 or ask > self.config.max_price:
@@ -353,6 +358,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         current_imbalance = _imbalance_ratio(current_shares["Up"], current_shares["Down"])
         imbalance_limit = _dynamic_imbalance_limit(self.config, snapshot.elapsed_sec)
         deficit_side = "Up" if current_shares["Up"] < current_shares["Down"] else "Down" if current_shares["Down"] < current_shares["Up"] else None
+        missing_filled_side = self._missing_filled_side(filled_shares)
         dual_gate = self._dual_build_gate(snapshot=snapshot, target_pair_shares=target_pair_shares, current_shares=current_shares, current_imbalance=current_imbalance, deficit_side=deficit_side)
         abs_bid_diff = dual_gate["abs_bid_diff"]
         max_dual_gap = dual_gate["max_dual_gap"]
@@ -380,6 +386,8 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
 
         candidates = []
         for outcome in ("Up", "Down"):
+            if missing_filled_side is not None and outcome != missing_filled_side:
+                continue
             book = snapshot.book_for_outcome(outcome)
             ask = _safe_float(book.ask)
             if ask <= 0 or ask > self.config.max_price:
@@ -602,6 +610,15 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
     def evaluate(self, snapshot: StrategySnapshot, history: StrategyHistory) -> TradeIntent | None:
         intents = self.evaluate_many(snapshot, history)
         return intents[0] if intents else None
+
+    def _missing_filled_side(self, filled_shares: dict[str, float]) -> str | None:
+        has_up = filled_shares["Up"] > 1e-9
+        has_down = filled_shares["Down"] > 1e-9
+        if has_up and not has_down:
+            return "Down"
+        if has_down and not has_up:
+            return "Up"
+        return None
 
 
 def x32_default_config(wallet: str, **overrides) -> PathStrategyConfig:
