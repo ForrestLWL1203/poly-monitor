@@ -1148,7 +1148,14 @@ class StrategyRunnerTests(unittest.TestCase):
             }
 
             runner.tick([snapshot])
-            runner.process_ws_trades([touch_trade, down_touch_trade, dict(touch_trade)])
+            ignored_touch_trade = {
+                **touch_trade,
+                "outcome": "Up",
+                "price": 0.70,
+                "tx_hash": "0xignored",
+                "fill_id": "ignored",
+            }
+            runner.process_ws_trades([touch_trade, down_touch_trade, ignored_touch_trade, dict(touch_trade)])
             runner.process_market_trades([{**touch_trade, "source": "data_api", "tx_hash": "0xapi"}])
             runner.settle_market(snapshot.market_slug, "Up")
             runner.write_state(active_windows=[], stream_diagnostics={"subscribed_tokens": 0})
@@ -1182,6 +1189,9 @@ class StrategyRunnerTests(unittest.TestCase):
         self.assertEqual(trades[0]["tx_hash"], "0xapi")
         self.assertEqual(len(ws_trades), 2)
         self.assertEqual(ws_trades[0]["tx_hash"], "0xt")
+        self.assertEqual(summary["ws_trades_seen"], 3)
+        self.assertEqual(summary["ws_trades_written"], 2)
+        self.assertEqual(summary["ws_trades_suppressed"], 1)
         self.assertEqual(state["run"]["run_id"], "test-run")
         self.assertEqual(summary["orders_submitted"], 2)
         self.assertEqual(summary["fills"], 2)

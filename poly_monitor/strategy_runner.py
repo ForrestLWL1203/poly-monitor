@@ -300,6 +300,9 @@ class LivePaperStrategyRunner:
         self.paper_total_pnl = 0.0
         self.paper_wins = 0
         self.paper_losses = 0
+        self.ws_trades_seen = 0
+        self.ws_trades_written = 0
+        self.ws_trades_suppressed = 0
 
     def tick(self, snapshots: Iterable[StrategySnapshot]) -> dict[str, int]:
         decisions = 0
@@ -352,8 +355,7 @@ class LivePaperStrategyRunner:
                 if key in self.trade_keys:
                     continue
                 self.trade_keys.add(key)
-                trade_handle.write(_json_dumps(trade) + "\n")
-                written += 1
+                self.ws_trades_seen += 1
                 expired = self.maker.expire_before(int(trade.get("exchange_ts") or 0))
                 for order in expired:
                     execution_handle.write(_json_dumps(self._expired_row(order)) + "\n")
@@ -366,6 +368,12 @@ class LivePaperStrategyRunner:
                     trade_fills += 1
                 if trade_fills:
                     recovery_trades_by_market[str(trade.get("market_slug") or "")] = trade
+                if trade_fills or expired:
+                    trade_handle.write(_json_dumps(trade) + "\n")
+                    written += 1
+                    self.ws_trades_written += 1
+                else:
+                    self.ws_trades_suppressed += 1
             for trade in recovery_trades_by_market.values():
                 recovery_orders += self._recover_after_ws_fill(trade, decision_handle=decision_handle, execution_handle=execution_handle)
         self.write_state(active_windows=[])
@@ -1025,6 +1033,9 @@ class LivePaperStrategyRunner:
             "expired": self.maker.expired,
             "cancelled": self.maker.cancelled,
             "rejected": self.maker.rejected,
+            "ws_trades_seen": self.ws_trades_seen,
+            "ws_trades_written": self.ws_trades_written,
+            "ws_trades_suppressed": self.ws_trades_suppressed,
             "filled_markets": len(self.filled_markets),
             "settled_markets": len(self.settled_markets),
             "paper_total_pnl": round(self.paper_total_pnl, 6),
