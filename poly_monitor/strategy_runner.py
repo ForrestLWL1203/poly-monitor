@@ -203,6 +203,9 @@ def _feature_subset(features: dict[str, Any]) -> dict[str, Any]:
         "deficit_shares",
         "book_fill",
         "quote_source",
+        "quote_forced_to_ask",
+        "original_quote_price",
+        "forced_ask_price",
         "maker_parent_sampled_ts",
         "maker_order_id",
         "maker_touch_trade_price",
@@ -637,6 +640,8 @@ class LivePaperStrategyRunner:
             return None
         if ask_price <= 0 or float(intent.expected_price) + 1e-9 < ask_price:
             return None
+        if ask_price > float(intent.max_price) + 1e-9:
+            return None
         order_id = str(execution.detail.get("order_id") or "")
         fill = self.maker.force_fill_order(
             order_id,
@@ -664,10 +669,16 @@ class LivePaperStrategyRunner:
             execution_handle.write(_json_dumps(self._cancelled_row(cancel)) + "\n")
         self.history.pending_intents = self.maker.pending_intents()
         trace = self._evaluate_with_trace(snapshot)
+        recovery_intents = self._force_recovery_quotes_to_ask(snapshot, trace.all_intents(), missing_side)
+        if recovery_intents != trace.all_intents():
+            trace = replace(
+                trace,
+                intent=recovery_intents[0] if recovery_intents else None,
+                intents=recovery_intents,
+            )
         decision_handle.write(_json_dumps(self._decision_row(snapshot, trace)) + "\n")
         self.decision_counts[trace.skip_reason or trace.decision] += 1
         submitted = 0
-        recovery_intents = self._force_recovery_quotes_to_ask(snapshot, trace.all_intents(), missing_side)
         for event in self._submit_intents(snapshot, recovery_intents):
             execution_handle.write(_json_dumps(self._event_row(event)) + "\n")
             submitted += 1 if isinstance(event, ExecutionResult) and event.status == "maker_pending" else 0
@@ -687,14 +698,52 @@ class LivePaperStrategyRunner:
             if ask <= 0 or ask <= float(intent.expected_price) + 1e-9:
                 adjusted.append(intent)
                 continue
+            if ask > float(intent.max_price) + 1e-9:
+                adjusted.append(intent)
+                continue
+            if not self._forced_ask_pair_cost_ok(intent, ask):
+                adjusted.append(intent)
+                continue
             shares = float(intent.features.get("order_shares") or 0.0)
             notional = round(shares * ask, 6) if shares > 0 else intent.notional_usdc
             features = dict(intent.features)
             fill = dict(features.get("book_fill") or {})
             fill.update({"avg": ask, "filled_usdc": notional, "source": "maker_rebalance_quote"})
-            features.update({"book_fill": fill, "quote_price": ask, "quote_forced_to_ask": True})
+            features.update(
+                {
+                    "book_fill": fill,
+                    "quote_price": ask,
+                    "quote_forced_to_ask": True,
+                    "original_quote_price": intent.expected_price,
+                    "forced_ask_price": ask,
+                    "clip_shares": shares or intent.features.get("clip_shares"),
+                }
+            )
             adjusted.append(replace(intent, expected_price=round(ask, 6), notional_usdc=notional, features=features))
         return tuple(adjusted)
+
+    def _forced_ask_pair_cost_ok(self, intent: TradeIntent, ask: float) -> bool:
+        try:
+            max_pair_cost = float(intent.features.get("max_pair_cost"))
+        except (TypeError, ValueError):
+            return True
+        outcome = intent.outcome
+        other = "Down" if outcome == "Up" else "Up"
+        current_shares, current_cost = self._inventory_for_market(intent.market_slug, outcome)
+        other_shares, other_cost = self._inventory_for_market(intent.market_slug, other)
+        try:
+            order_shares = float(intent.features.get("order_shares") or 0.0)
+        except (TypeError, ValueError):
+            order_shares = 0.0
+        if order_shares <= 0:
+            order_shares = float(intent.notional_usdc) / ask if ask > 0 else 0.0
+        projected_shares = current_shares + order_shares
+        projected_cost = current_cost + order_shares * ask
+        projected_avg = projected_cost / projected_shares if projected_shares > 0 else None
+        other_avg = other_cost / other_shares if other_shares > 0 else None
+        if projected_avg is None or other_avg is None:
+            return ask <= float(intent.features.get("max_unpaired_price", intent.max_price)) + 1e-9
+        return projected_avg + other_avg <= max_pair_cost + 1e-9
 
     def _snapshot_for_trade(self, trade: dict[str, Any]) -> StrategySnapshot | None:
         market_slug = str(trade.get("market_slug") or "")

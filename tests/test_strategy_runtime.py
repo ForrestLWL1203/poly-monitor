@@ -1366,7 +1366,7 @@ class StrategyRunnerTests(unittest.TestCase):
                     "sampled_ts": 1770000010,
                     "book_stale": 0,
                     "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
-                    "down_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.48, "ask": 0.50, "spread": 0.02, "book_age_ms": 5, "bid_depth_usdc": 100},
                 }
             )
             touch_trade = {
@@ -1401,6 +1401,9 @@ class StrategyRunnerTests(unittest.TestCase):
         self.assertEqual(decisions[-1]["sample_reason"], "ws_fill_recovery")
         self.assertEqual(decisions[-1]["intent_count"], 1)
         self.assertEqual(decisions[-1]["intents"][0]["outcome"], "Down")
+        self.assertEqual(decisions[-1]["intents"][0]["expected_price"], 0.5)
+        self.assertTrue(decisions[-1]["intents"][0]["features"]["quote_forced_to_ask"])
+        self.assertEqual(decisions[-1]["intents"][0]["features"]["original_quote_price"], 0.49)
 
     def test_live_paper_runner_immediately_fills_missing_leg_quote_at_ask(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1455,6 +1458,101 @@ class StrategyRunnerTests(unittest.TestCase):
         self.assertEqual(executions[1]["outcome"], "Down")
         self.assertEqual(len(runner.maker.pending), 0)
         self.assertEqual(summary["fills"], 1)
+
+    def test_live_paper_runner_does_not_force_recovery_above_max_price(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = LivePaperStrategyRunner(
+                LivePaperRunConfig(run_dir=Path(tmp), run_id="test-run", mode="paper"),
+                strategy=strategy_from_name("x32_pair_cost_inventory_v0", wallet="0x32"),
+            )
+            snapshot = StrategySnapshot.from_market_state_sample(
+                {
+                    "market_slug": "btc-updown-5m-1770000000",
+                    "condition_id": "cond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000011,
+                    "book_stale": 0,
+                    "up_json": {"bid": 0.02, "ask": 0.03, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.94, "ask": 0.96, "spread": 0.02, "book_age_ms": 5, "bid_depth_usdc": 100},
+                }
+            )
+            intent = TradeIntent(
+                strategy_name="x32_pair_cost_inventory_v0",
+                wallet="0x32",
+                market_slug=snapshot.market_slug,
+                sampled_ts=snapshot.sampled_ts,
+                checkpoint_sec=1,
+                intent="BUY",
+                outcome="Down",
+                notional_usdc=4.7,
+                max_price=0.95,
+                expected_price=0.94,
+                symbol="BTC",
+                reason="x32_pair_cost_inventory",
+                features={"quote_source": "maker_rebalance_quote", "order_shares": 5, "max_pair_cost": 0.995},
+            )
+            execution = type("_Execution", (), {"status": "maker_pending", "intent": intent, "detail": {"order_id": "missing"}})()
+
+            adjusted = runner._force_recovery_quotes_to_ask(snapshot, (intent,), "Down")
+            fill = runner._immediate_fill_if_crosses_ask(snapshot, execution)
+
+        self.assertEqual(adjusted[0].expected_price, 0.94)
+        self.assertNotIn("quote_forced_to_ask", adjusted[0].features)
+        self.assertIsNone(fill)
+
+    def test_live_paper_runner_does_not_force_recovery_over_pair_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = LivePaperStrategyRunner(
+                LivePaperRunConfig(run_dir=Path(tmp), run_id="test-run", mode="paper"),
+                strategy=strategy_from_name("x32_pair_cost_inventory_v0", wallet="0x32"),
+            )
+            runner.history.emitted_intents.append(
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug="btc-updown-5m-1770000000",
+                    sampled_ts=1770000010,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=24.5,
+                    max_price=0.95,
+                    expected_price=0.49,
+                    symbol="BTC",
+                    reason="maker_replay_fill",
+                )
+            )
+            snapshot = StrategySnapshot.from_market_state_sample(
+                {
+                    "market_slug": "btc-updown-5m-1770000000",
+                    "condition_id": "cond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000011,
+                    "book_stale": 0,
+                    "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.40, "ask": 0.55, "spread": 0.15, "book_age_ms": 5, "bid_depth_usdc": 100},
+                }
+            )
+            intent = TradeIntent(
+                strategy_name="x32_pair_cost_inventory_v0",
+                wallet="0x32",
+                market_slug=snapshot.market_slug,
+                sampled_ts=snapshot.sampled_ts,
+                checkpoint_sec=1,
+                intent="BUY",
+                outcome="Down",
+                notional_usdc=4.1,
+                max_price=0.95,
+                expected_price=0.41,
+                symbol="BTC",
+                reason="x32_pair_cost_inventory",
+                features={"quote_source": "maker_rebalance_quote", "order_shares": 10, "max_pair_cost": 0.995},
+            )
+
+            adjusted = runner._force_recovery_quotes_to_ask(snapshot, (intent,), "Down")
+
+        self.assertEqual(adjusted[0].expected_price, 0.41)
+        self.assertNotIn("quote_forced_to_ask", adjusted[0].features)
 
     def test_missing_leg_rebalance_uses_longer_ttl(self):
         replay = PendingMakerReplay(PendingMakerReplayConfig(order_ttl_sec=5, missing_leg_ttl_multiplier=8.0))
