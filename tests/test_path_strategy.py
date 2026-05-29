@@ -188,7 +188,7 @@ class PathStrategyTests(unittest.TestCase):
                 "sampled_ts": 1770000011,
                 "book_stale": 0,
                 "up_json": {"bid": 0.40, "ask": 0.41},
-                "down_json": {"bid": 0.59, "ask": 0.60},
+                "down_json": {"bid": 0.58, "ask": 0.59},
             }
         )
 
@@ -250,7 +250,7 @@ class PathStrategyTests(unittest.TestCase):
                 "sampled_ts": 1770000065,
                 "book_stale": 0,
                 "up_json": {"bid": 0.40, "ask": 0.41},
-                "down_json": {"bid": 0.59, "ask": 0.60},
+                "down_json": {"bid": 0.58, "ask": 0.59},
             }
         )
         history = StrategyHistory(

@@ -27,6 +27,8 @@ _DUAL_TRACE_FEATURE_KEYS = {
     "dynamic_inventory_imbalance_limit",
     "current_pair_avg",
     "projected_pair_avg",
+    "working_deficit_side",
+    "missing_filled_side",
     "current_pair_avg_basis",
     "projected_pair_avg_basis",
     "current_imbalance_ratio",
@@ -114,7 +116,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             return 5.0
         return 10.0
 
-    def _x32_quote(self, *, snapshot: StrategySnapshot, outcome: str, deficit_side: str | None) -> tuple[float, str]:
+    def _x32_quote(self, *, snapshot: StrategySnapshot, outcome: str, deficit_side: str | None, force_rebalance: bool = False) -> tuple[float, str]:
         book = snapshot.book_for_outcome(outcome)
         bid = _safe_float(book.bid)
         ask = _safe_float(book.ask)
@@ -122,7 +124,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         quote_source = "maker_quote_at_best_bid"
         if self.config.execution_style == "maker" and outcome == deficit_side:
             quote_source = "maker_rebalance_quote"
-            if snapshot.elapsed_sec >= int(self.config.rebalance_start_sec):
+            if force_rebalance or snapshot.elapsed_sec >= int(self.config.rebalance_start_sec):
                 quote_price = min(
                     ask,
                     float(self.config.max_price),
@@ -228,7 +230,14 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         imbalance_limit = _dynamic_imbalance_limit(self.config, snapshot.elapsed_sec)
         deficit_side = "Up" if current_shares["Up"] < current_shares["Down"] else "Down" if current_shares["Down"] < current_shares["Up"] else None
         missing_filled_side = self._missing_filled_side(filled_shares)
-        dual_gate = self._dual_build_gate(snapshot=snapshot, target_pair_shares=target_pair_shares, current_shares=current_shares, current_imbalance=current_imbalance, deficit_side=deficit_side)
+        dual_gate = self._dual_build_gate(
+            snapshot=snapshot,
+            target_pair_shares=target_pair_shares,
+            current_shares=current_shares,
+            current_imbalance=current_imbalance,
+            deficit_side=deficit_side,
+            missing_filled_side=missing_filled_side,
+        )
         if dual_gate["blocked_by_gap"]:
             return "dual_build_gap_above_cap"
         last_reason = "no_candidate"
@@ -242,7 +251,13 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             if ask <= 0 or ask > self.config.max_price:
                 last_reason = "invalid_or_expensive_ask"
                 continue
-            quote_price, quote_source = self._x32_quote(snapshot=snapshot, outcome=outcome, deficit_side=deficit_side)
+            effective_deficit_side = missing_filled_side or deficit_side
+            quote_price, quote_source = self._x32_quote(
+                snapshot=snapshot,
+                outcome=outcome,
+                deficit_side=effective_deficit_side,
+                force_rebalance=missing_filled_side == outcome,
+            )
             if quote_price <= 0 or quote_price > self.config.max_price:
                 last_reason = "invalid_maker_quote"
                 continue
@@ -277,7 +292,12 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 last_reason = "unpaired_price_above_cap"
                 continue
             projected_imbalance = _imbalance_ratio(projected_shares["Up"], projected_shares["Down"])
-            if projected_pair_avg is not None and projected_imbalance > imbalance_limit and projected_imbalance >= current_imbalance:
+            if (
+                missing_filled_side is None
+                and projected_pair_avg is not None
+                and projected_imbalance > imbalance_limit
+                and projected_imbalance >= current_imbalance
+            ):
                 last_reason = "imbalance_limit"
                 continue
             return "candidate_available"
@@ -292,6 +312,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         current_shares: dict[str, float],
         current_imbalance: float,
         deficit_side: str | None,
+        missing_filled_side: str | None = None,
     ) -> dict[str, bool | float | None]:
         abs_bid_diff = self._dual_build_gap(snapshot)
         max_dual_gap = getattr(self.config, "dual_build_max_abs_bid_diff", None)
@@ -314,6 +335,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             in_build_phase
             and both_need_inventory
             and near_flat_working
+            and missing_filled_side is None
             and gap_configured
             and abs_bid_diff is not None
             and abs_bid_diff <= float(max_dual_gap)
@@ -359,7 +381,14 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         imbalance_limit = _dynamic_imbalance_limit(self.config, snapshot.elapsed_sec)
         deficit_side = "Up" if current_shares["Up"] < current_shares["Down"] else "Down" if current_shares["Down"] < current_shares["Up"] else None
         missing_filled_side = self._missing_filled_side(filled_shares)
-        dual_gate = self._dual_build_gate(snapshot=snapshot, target_pair_shares=target_pair_shares, current_shares=current_shares, current_imbalance=current_imbalance, deficit_side=deficit_side)
+        dual_gate = self._dual_build_gate(
+            snapshot=snapshot,
+            target_pair_shares=target_pair_shares,
+            current_shares=current_shares,
+            current_imbalance=current_imbalance,
+            deficit_side=deficit_side,
+            missing_filled_side=missing_filled_side,
+        )
         abs_bid_diff = dual_gate["abs_bid_diff"]
         max_dual_gap = dual_gate["max_dual_gap"]
 
@@ -392,7 +421,13 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             ask = _safe_float(book.ask)
             if ask <= 0 or ask > self.config.max_price:
                 continue
-            quote_price, quote_source = self._x32_quote(snapshot=snapshot, outcome=outcome, deficit_side=deficit_side)
+            effective_deficit_side = missing_filled_side or deficit_side
+            quote_price, quote_source = self._x32_quote(
+                snapshot=snapshot,
+                outcome=outcome,
+                deficit_side=effective_deficit_side,
+                force_rebalance=missing_filled_side == outcome,
+            )
             if quote_price <= 0 or quote_price > self.config.max_price:
                 continue
             deficit_shares = target_pair_shares - current_shares[outcome]
@@ -421,7 +456,12 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             elif expected_price > float(self.config.max_unpaired_price):
                 continue
             projected_imbalance = _imbalance_ratio(projected_shares["Up"], projected_shares["Down"])
-            if projected_pair_avg is not None and projected_imbalance > imbalance_limit and projected_imbalance >= current_imbalance:
+            if (
+                missing_filled_side is None
+                and projected_pair_avg is not None
+                and projected_imbalance > imbalance_limit
+                and projected_imbalance >= current_imbalance
+            ):
                 continue
             candidates.append(
                 (
@@ -470,7 +510,9 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 "max_quote_book_age_ms": self.config.max_quote_book_age_ms,
                 "min_quote_bid_depth_usdc": self.config.min_quote_bid_depth_usdc,
                 "dynamic_inventory_imbalance_limit": round(imbalance_limit, 6),
-                "deficit_side": deficit_side,
+                "deficit_side": effective_deficit_side,
+                "working_deficit_side": deficit_side,
+                "missing_filled_side": missing_filled_side,
                 "current_pair_avg": round(current_pair_avg, 6) if current_pair_avg is not None else None,
                 "projected_pair_avg": round(projected_pair_avg, 6) if projected_pair_avg is not None else None,
                 "current_pair_avg_basis": "filled_inventory",
