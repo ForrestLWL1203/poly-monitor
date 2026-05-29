@@ -92,6 +92,13 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         }
         return filled, working
 
+    def _pending_outcomes(self, history: StrategyHistory, market_slug: str) -> set[str]:
+        return {
+            intent.outcome
+            for intent in history.pending_intents
+            if intent.market_slug == market_slug and intent.intent == "BUY"
+        }
+
     def _book_quality_ok(self, book) -> bool:
         return self._book_quality_reason(book) is None
 
@@ -224,6 +231,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
     def _candidate_skip_reason(self, snapshot: StrategySnapshot, history: StrategyHistory, maker_pair_cost: float) -> str:
         target_pair_shares = self._target_pair_shares(maker_pair_cost)
         _filled_inventory, current_inventory = self._inventory_sets(history, snapshot.market_slug)
+        pending_outcomes = self._pending_outcomes(history, snapshot.market_slug)
         filled_shares = {outcome: _filled_inventory[outcome][0] for outcome in ("Up", "Down")}
         current_shares = {outcome: current_inventory[outcome][0] for outcome in ("Up", "Down")}
         current_cost = {outcome: current_inventory[outcome][1] for outcome in ("Up", "Down")}
@@ -244,8 +252,12 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         last_reason = "no_candidate"
 
         for outcome in ("Up", "Down"):
+            if outcome in pending_outcomes:
+                last_reason = "pending_outcome_blocked"
+                continue
             if missing_filled_side is not None and outcome != missing_filled_side:
-                last_reason = "awaiting_opposite_side_fill"
+                if last_reason != "pending_outcome_blocked":
+                    last_reason = "awaiting_opposite_side_fill"
                 continue
             book = snapshot.book_for_outcome(outcome)
             ask = _safe_float(book.ask)
@@ -369,6 +381,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         if not self._book_quality_ok(snapshot.up) or not self._book_quality_ok(snapshot.down):
             return []
         target_pair_shares = self._target_pair_shares(maker_pair_cost)
+        pending_outcomes = self._pending_outcomes(history, snapshot.market_slug)
 
         filled_inventory, working_inventory = self._inventory_sets(history, snapshot.market_slug)
         filled_shares = {outcome: filled_inventory[outcome][0] for outcome in ("Up", "Down")}
@@ -393,7 +406,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         abs_bid_diff = dual_gate["abs_bid_diff"]
         max_dual_gap = dual_gate["max_dual_gap"]
 
-        if dual_gate["eligible"] and abs_bid_diff is not None:
+        if dual_gate["eligible"] and abs_bid_diff is not None and not pending_outcomes:
             dual_intents = self._dual_build_intents(
                 snapshot=snapshot,
                 checkpoint=checkpoint,
@@ -416,6 +429,8 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
 
         candidates = []
         for outcome in ("Up", "Down"):
+            if outcome in pending_outcomes:
+                continue
             if missing_filled_side is not None and outcome != missing_filled_side:
                 continue
             book = snapshot.book_for_outcome(outcome)

@@ -637,12 +637,11 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         trace = strategy.evaluate_many_with_trace(snapshot, history)
 
-        self.assertEqual(trace.decision, "intent")
-        self.assertEqual(len(trace.intents), 1)
-        self.assertEqual(trace.intent.outcome, "Down")
-        self.assertEqual(trace.intent.features["working_up_shares"], 10.0)
-        self.assertEqual(trace.intent.features["working_down_shares"], 10.0)
-        self.assertEqual(trace.intent.features["quote_source"], "maker_rebalance_quote")
+        self.assertEqual(trace.decision, "skip")
+        self.assertEqual(trace.skip_reason, "pending_outcome_blocked")
+        self.assertEqual(len(trace.intents), 0)
+        self.assertEqual(trace.features["inventory"]["working_up_shares"], 10.0)
+        self.assertEqual(trace.features["inventory"]["working_down_shares"], 10.0)
 
     def test_x32_rejects_extreme_gap_unprotected_entry(self):
         strategy = strategy_from_name(
@@ -1275,7 +1274,7 @@ class StrategyRunnerTests(unittest.TestCase):
         self.assertEqual(decisions[1]["intent_count"], 0)
         self.assertEqual([row["record_type"] for row in executions], ["maker_order_submitted", "maker_order_submitted"])
 
-    def test_live_paper_runner_rejects_duplicate_pending_outcome(self):
+    def test_live_paper_runner_skips_duplicate_pending_outcome_in_strategy(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "paper_live" / "x32"
             strategy = strategy_from_name(
@@ -1335,10 +1334,13 @@ class StrategyRunnerTests(unittest.TestCase):
 
             runner.tick([snapshot])
 
+            decisions = [json.loads(line) for line in (run_dir / "decisions.jsonl").read_text().splitlines()]
             executions = [json.loads(line) for line in (run_dir / "executions.jsonl").read_text().splitlines()]
 
-        self.assertEqual([row["record_type"] for row in executions], ["maker_rejected"])
-        self.assertEqual(executions[0]["status"], "maker_rejected_duplicate_pending_outcome")
+        self.assertEqual(decisions[0]["decision"], "skip")
+        self.assertEqual(decisions[0]["skip_reason"], "pending_outcome_blocked")
+        self.assertEqual(decisions[0]["intent_count"], 0)
+        self.assertEqual(executions, [])
         self.assertEqual(len([order for order in runner.maker.pending if order.intent.outcome == "Up"]), 1)
 
     def test_live_paper_runner_recovers_missing_side_immediately_after_ws_fill(self):
