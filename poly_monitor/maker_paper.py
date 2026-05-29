@@ -60,6 +60,7 @@ class PendingMakerReplayConfig:
     max_open_orders_per_market: int = 20
     rebalance_fill_multiplier: float = 2.0
     rebalance_ttl_multiplier: float = 1.0
+    missing_leg_ttl_multiplier: float = 8.0
     excess_ttl_multiplier: float = 1.0
     queue_position_ratio: float = 1.0
 
@@ -170,6 +171,8 @@ class PendingMakerReplay:
     def ttl_for_intent(self, intent: TradeIntent) -> int:
         base_ttl = self._base_ttl_for_intent(intent)
         source = book_fill_source(intent.features)
+        if intent.features.get("missing_filled_side") == intent.outcome:
+            return max(1, int(round(base_ttl * self.config.missing_leg_ttl_multiplier)))
         if source == "maker_rebalance_quote":
             return max(1, int(round(base_ttl * self.config.rebalance_ttl_multiplier)))
         if intent.features.get("deficit_side") not in {None, intent.outcome}:
@@ -240,6 +243,62 @@ class PendingMakerReplay:
                 kept.append(order)
         self.pending = kept
         return cancelled
+
+    def force_fill_order(self, order_id: str, *, fill_ts: int, fill_price: float, source: str, observed_at: str = "") -> MakerFill | None:
+        for order in list(self.pending):
+            if order.order_id != order_id or order.remaining_usdc <= 1e-9:
+                continue
+            intent = order.intent
+            fill_usdc = order.remaining_usdc
+            fill_shares = fill_usdc / intent.expected_price if intent.expected_price > 0 else 0.0
+            order.remaining_usdc = 0.0
+            order.filled_usdc += fill_usdc
+            fill_intent = TradeIntent(
+                strategy_name=intent.strategy_name,
+                wallet=intent.wallet,
+                market_slug=intent.market_slug,
+                sampled_ts=fill_ts,
+                checkpoint_sec=intent.checkpoint_sec,
+                intent=intent.intent,
+                outcome=intent.outcome,
+                notional_usdc=round(fill_usdc, 6),
+                max_price=intent.max_price,
+                expected_price=intent.expected_price,
+                symbol=intent.symbol,
+                reason="maker_replay_fill",
+                features={
+                    **intent.features,
+                    "maker_order_id": order.order_id,
+                    "maker_parent_sampled_ts": intent.sampled_ts,
+                    "maker_touch_trade_price": fill_price,
+                    "maker_touch_trade_usdc": fill_usdc,
+                    "maker_touch_trade_shares": fill_shares,
+                    "maker_fill_rate": 1.0,
+                    "maker_queue_position_ratio": self.config.queue_position_ratio,
+                    "maker_original_queue_ahead_shares": order.original_queue_ahead_shares,
+                    "maker_remaining_queue_ahead_shares": 0.0,
+                    "maker_immediate_fill": True,
+                },
+            )
+            touch_trade = {
+                "market_slug": intent.market_slug,
+                "exchange_ts": fill_ts,
+                "observed_at": observed_at,
+                "outcome": intent.outcome,
+                "side": "BUY",
+                "price": fill_price,
+                "size": fill_shares,
+                "usdc": fill_usdc,
+                "tx_hash": f"paper-ioc:{order.order_id}",
+                "fill_id": f"paper-ioc:{order.order_id}",
+                "source": source,
+            }
+            maker_fill = MakerFill(order=order, intent=fill_intent, touch_trade=touch_trade, remaining_usdc=0.0)
+            self.filled_intents.append(fill_intent)
+            self.fill_rows.append(maker_fill.to_execution_row())
+            self.pending.remove(order)
+            return maker_fill
+        return None
 
     def process_trade(self, trade: dict[str, Any], *, expire_first: bool = True) -> list[MakerFill]:
         ts = int(trade.get("exchange_ts") or 0)

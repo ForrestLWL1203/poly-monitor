@@ -5,11 +5,11 @@ import asyncio
 import time
 import math
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
-from .maker_paper import MakerCancel, PendingMakerReplay, PendingMakerReplayConfig
+from .maker_paper import MakerCancel, MakerFill, PendingMakerReplay, PendingMakerReplayConfig
 from .path_strategy import _dynamic_imbalance_limit
 from .strategy_runtime import EvaluationTrace, ExecutionAdapter, ExecutionResult, StrategyHistory, StrategyPlugin, StrategySnapshot, TradeIntent, evaluate_strategy_intents, utc_iso
 
@@ -184,6 +184,9 @@ def _feature_subset(features: dict[str, Any]) -> dict[str, Any]:
         "dual_build_max_abs_bid_diff",
         "dynamic_inventory_imbalance_limit",
         "deficit_side",
+        "effective_deficit_side",
+        "working_deficit_side",
+        "missing_filled_side",
         "current_pair_avg",
         "projected_pair_avg",
         "current_pair_avg_basis",
@@ -239,6 +242,7 @@ def _touch_trade_summary(trade: dict[str, Any]) -> dict[str, Any]:
         "condition_id": trade.get("condition_id"),
         "exchange_ts": trade.get("exchange_ts"),
         "observed_at": trade.get("observed_at"),
+        "source": trade.get("source"),
         "symbol": trade.get("symbol"),
         "outcome": trade.get("outcome"),
         "side": trade.get("side"),
@@ -315,17 +319,9 @@ class LivePaperStrategyRunner:
                 decision_handle.write(_json_dumps(self._decision_row(snapshot, trace)) + "\n")
                 decisions += 1
                 self.decision_counts[trace.skip_reason or trace.decision] += 1
-                intents = trace.all_intents()
-                if not intents:
-                    continue
-                if len(intents) > 1 and not self._can_submit_intent_batch(snapshot.market_slug, intents):
-                    for execution in self._reject_intent_batch(snapshot.market_slug, intents):
-                        execution_handle.write(_json_dumps(self._order_row(execution)) + "\n")
-                    continue
-                for intent in intents:
-                    execution = self.maker.submit(intent)
-                    execution_handle.write(_json_dumps(self._order_row(execution)) + "\n")
-                    orders += 1 if execution.status == "maker_pending" else 0
+                for event in self._submit_intents(snapshot, trace.all_intents()):
+                    execution_handle.write(_json_dumps(self._event_row(event)) + "\n")
+                    orders += 1 if isinstance(event, ExecutionResult) and event.status == "maker_pending" else 0
         self.write_state(active_windows=[])
         return {"decisions": decisions, "orders": orders}
 
@@ -345,7 +341,9 @@ class LivePaperStrategyRunner:
     def process_ws_trades(self, trades: Iterable[dict[str, Any]]) -> dict[str, int]:
         written = 0
         fills = 0
-        with self.ws_trades_path.open("a", encoding="utf-8") as trade_handle, self.executions_path.open("a", encoding="utf-8") as execution_handle:
+        recovery_orders = 0
+        with self.ws_trades_path.open("a", encoding="utf-8") as trade_handle, self.executions_path.open("a", encoding="utf-8") as execution_handle, self.decisions_path.open("a", encoding="utf-8") as decision_handle:
+            recovery_trades_by_market: dict[str, dict[str, Any]] = {}
             for trade in sorted(trades, key=lambda row: int(row.get("exchange_ts") or 0)):
                 key = _trade_key(trade)
                 if key in self.trade_keys:
@@ -356,13 +354,19 @@ class LivePaperStrategyRunner:
                 expired = self.maker.expire_before(int(trade.get("exchange_ts") or 0))
                 for order in expired:
                     execution_handle.write(_json_dumps(self._expired_row(order)) + "\n")
+                trade_fills = 0
                 for fill in self.maker.process_trade(trade, expire_first=False):
                     self.history.emitted_intents.append(fill.intent)
                     self.filled_markets.add(fill.intent.market_slug)
                     execution_handle.write(_json_dumps(self._fill_row(fill)) + "\n")
                     fills += 1
+                    trade_fills += 1
+                if trade_fills:
+                    recovery_trades_by_market[str(trade.get("market_slug") or "")] = trade
+            for trade in recovery_trades_by_market.values():
+                recovery_orders += self._recover_after_ws_fill(trade, decision_handle=decision_handle, execution_handle=execution_handle)
         self.write_state(active_windows=[])
-        return {"ws_trades": written, "fills": fills}
+        return {"ws_trades": written, "fills": fills, "recovery_orders": recovery_orders}
 
     def settle_market(self, market_slug: str, winning_side: str) -> dict[str, Any] | None:
         intents = [intent for intent in self.history.emitted_intents if intent.market_slug == market_slug]
@@ -434,6 +438,45 @@ class LivePaperStrategyRunner:
         open_orders = len([order for order in self.maker.pending if order.intent.market_slug == market_slug])
         return open_orders + len(intents) <= int(self.maker.config.max_open_orders_per_market)
 
+    def _submit_intents(self, snapshot: StrategySnapshot, intents: tuple[TradeIntent, ...]) -> list[ExecutionResult | MakerFill]:
+        if not intents:
+            return []
+        if len(intents) > 1 and not self._can_submit_intent_batch(snapshot.market_slug, intents):
+            return self._reject_intent_batch(snapshot.market_slug, intents)
+        results: list[ExecutionResult | MakerFill] = []
+        pending_outcomes = {
+            (order.intent.market_slug, order.intent.outcome)
+            for order in self.maker.pending
+            if order.remaining_usdc > 1e-9
+        }
+        requested_outcomes: set[tuple[str, str]] = set()
+        for intent in intents:
+            key = (intent.market_slug, intent.outcome)
+            if key in pending_outcomes or key in requested_outcomes:
+                results.append(self._reject_duplicate_pending_outcome(intent, key))
+                continue
+            execution = self.maker.submit(intent)
+            results.append(execution)
+            if execution.status == "maker_pending":
+                pending_outcomes.add(key)
+                requested_outcomes.add(key)
+                fill = self._immediate_fill_if_crosses_ask(snapshot, execution)
+                if fill is not None:
+                    results.append(fill)
+        return results
+
+    def _reject_duplicate_pending_outcome(self, intent: TradeIntent, key: tuple[str, str]) -> ExecutionResult:
+        self.maker.rejected += 1
+        return ExecutionResult(
+            status="maker_rejected_duplicate_pending_outcome",
+            intent=intent,
+            detail={
+                "error": "pending order already exists for market/outcome",
+                "market_slug": key[0],
+                "outcome": key[1],
+            },
+        )
+
     def _reject_intent_batch(self, market_slug: str, intents: tuple[TradeIntent, ...]) -> list[ExecutionResult]:
         open_orders = len([order for order in self.maker.pending if order.intent.market_slug == market_slug])
         detail = {
@@ -467,6 +510,7 @@ class LivePaperStrategyRunner:
             "remaining_sec": snapshot.remaining_sec,
             "window_start_ts": snapshot.window_start_ts,
             "window_end_ts": snapshot.window_end_ts,
+            "sample_reason": snapshot.sample_reason,
             "reference_price": snapshot.reference_price,
             "reference_price_age_sec": snapshot.reference_price_age_sec,
             "up": _compact_book(snapshot.up),
@@ -508,6 +552,11 @@ class LivePaperStrategyRunner:
             "queue_ahead_shares": detail.get("queue_ahead_shares"),
             "reject_detail": detail if execution.status != "maker_pending" else None,
         }
+
+    def _event_row(self, event: ExecutionResult | MakerFill) -> dict[str, Any]:
+        if isinstance(event, MakerFill):
+            return self._fill_row(event)
+        return self._order_row(event)
 
     def _expired_row(self, order) -> dict[str, Any]:
         intent = order.intent
@@ -574,6 +623,156 @@ class LivePaperStrategyRunner:
 
     def _expire(self, ts: int) -> list[Any]:
         return self.maker.expire_before(ts)
+
+    def _immediate_fill_if_crosses_ask(self, snapshot: StrategySnapshot, execution: ExecutionResult) -> MakerFill | None:
+        if execution.status != "maker_pending":
+            return None
+        intent = execution.intent
+        if intent.features.get("quote_source") != "maker_rebalance_quote":
+            return None
+        ask = snapshot.book_for_outcome(intent.outcome).ask
+        try:
+            ask_price = float(ask)
+        except (TypeError, ValueError):
+            return None
+        if ask_price <= 0 or float(intent.expected_price) + 1e-9 < ask_price:
+            return None
+        order_id = str(execution.detail.get("order_id") or "")
+        fill = self.maker.force_fill_order(
+            order_id,
+            fill_ts=int(snapshot.sampled_ts),
+            fill_price=ask_price,
+            source="paper_ioc_at_ask",
+            observed_at=snapshot.observed_at,
+        )
+        if fill is None:
+            return None
+        self.history.emitted_intents.append(fill.intent)
+        self.filled_markets.add(fill.intent.market_slug)
+        return fill
+
+    def _recover_after_ws_fill(self, trade: dict[str, Any], *, decision_handle, execution_handle) -> int:
+        market_slug = str(trade.get("market_slug") or "")
+        snapshot = self._snapshot_for_trade(trade)
+        if snapshot is None:
+            return 0
+        missing_side = self._missing_filled_side_for_market(market_slug, snapshot)
+        if missing_side is None:
+            return 0
+        for cancel in self._cancel_missing_side_for_reprice(snapshot, missing_side):
+            self.cancel_counts[cancel.reason] += 1
+            execution_handle.write(_json_dumps(self._cancelled_row(cancel)) + "\n")
+        self.history.pending_intents = self.maker.pending_intents()
+        trace = self._evaluate_with_trace(snapshot)
+        decision_handle.write(_json_dumps(self._decision_row(snapshot, trace)) + "\n")
+        self.decision_counts[trace.skip_reason or trace.decision] += 1
+        submitted = 0
+        recovery_intents = self._force_recovery_quotes_to_ask(snapshot, trace.all_intents(), missing_side)
+        for event in self._submit_intents(snapshot, recovery_intents):
+            execution_handle.write(_json_dumps(self._event_row(event)) + "\n")
+            submitted += 1 if isinstance(event, ExecutionResult) and event.status == "maker_pending" else 0
+        return submitted
+
+    def _force_recovery_quotes_to_ask(self, snapshot: StrategySnapshot, intents: tuple[TradeIntent, ...], recovery_side: str) -> tuple[TradeIntent, ...]:
+        adjusted: list[TradeIntent] = []
+        for intent in intents:
+            if intent.outcome != recovery_side or intent.features.get("quote_source") != "maker_rebalance_quote":
+                adjusted.append(intent)
+                continue
+            try:
+                ask = float(snapshot.book_for_outcome(intent.outcome).ask)
+            except (TypeError, ValueError):
+                adjusted.append(intent)
+                continue
+            if ask <= 0 or ask <= float(intent.expected_price) + 1e-9:
+                adjusted.append(intent)
+                continue
+            shares = float(intent.features.get("order_shares") or 0.0)
+            notional = round(shares * ask, 6) if shares > 0 else intent.notional_usdc
+            features = dict(intent.features)
+            fill = dict(features.get("book_fill") or {})
+            fill.update({"avg": ask, "filled_usdc": notional, "source": "maker_rebalance_quote"})
+            features.update({"book_fill": fill, "quote_price": ask, "quote_forced_to_ask": True})
+            adjusted.append(replace(intent, expected_price=round(ask, 6), notional_usdc=notional, features=features))
+        return tuple(adjusted)
+
+    def _snapshot_for_trade(self, trade: dict[str, Any]) -> StrategySnapshot | None:
+        market_slug = str(trade.get("market_slug") or "")
+        snapshots = self.history.snapshots_by_market.get(market_slug) or []
+        if not snapshots:
+            return None
+        latest = snapshots[-1]
+        trade_ts = int(trade.get("exchange_ts") or latest.sampled_ts)
+        elapsed = latest.elapsed_sec
+        remaining = latest.remaining_sec
+        if latest.window_start_ts is not None:
+            elapsed = max(0, trade_ts - int(latest.window_start_ts))
+        if latest.window_end_ts is not None:
+            remaining = max(0, int(latest.window_end_ts) - trade_ts)
+        age_delta_ms = max(0, trade_ts - int(latest.sampled_ts)) * 1000
+        up = self._age_book(latest.up, age_delta_ms)
+        down = self._age_book(latest.down, age_delta_ms)
+        max_age = getattr(getattr(self.strategy, "config", None), "max_quote_book_age_ms", None)
+        if max_age is not None:
+            for book in (up, down):
+                try:
+                    age = float(book.book_age_ms)
+                except (TypeError, ValueError):
+                    return None
+                if age > float(max_age):
+                    return None
+        return replace(
+            latest,
+            sampled_ts=trade_ts,
+            elapsed_sec=elapsed,
+            remaining_sec=remaining,
+            observed_at=str(trade.get("observed_at") or latest.observed_at),
+            up=up,
+            down=down,
+            sample_reason="ws_fill_recovery",
+        )
+
+    def _age_book(self, book, age_delta_ms: int):
+        if book.book_age_ms is None:
+            return book
+        try:
+            age = float(book.book_age_ms) + age_delta_ms
+        except (TypeError, ValueError):
+            return book
+        return replace(book, book_age_ms=age)
+
+    def _missing_filled_side_for_market(self, market_slug: str, snapshot: StrategySnapshot) -> str | None:
+        up_shares, _up_cost = self._inventory_for_market(market_slug, "Up")
+        down_shares, _down_cost = self._inventory_for_market(market_slug, "Down")
+        if up_shares > 1e-9 and down_shares <= 1e-9:
+            return "Down"
+        if down_shares > 1e-9 and up_shares <= 1e-9:
+            return "Up"
+        total = up_shares + down_shares
+        if total <= 1e-9:
+            return None
+        strategy_config = getattr(self.strategy, "config", None)
+        limit = _dynamic_imbalance_limit(strategy_config, snapshot.elapsed_sec) if strategy_config is not None else 0.05
+        if abs(up_shares - down_shares) / total > limit:
+            return "Up" if up_shares < down_shares else "Down"
+        return None
+
+    def _cancel_missing_side_for_reprice(self, snapshot: StrategySnapshot, missing_side: str) -> list[MakerCancel]:
+        ids = {
+            order.order_id
+            for order in self.maker.pending
+            if order.intent.market_slug == snapshot.market_slug
+            and order.intent.outcome == missing_side
+            and order.remaining_usdc > 1e-9
+        }
+        if not ids:
+            return []
+        return self.maker.cancel_orders(
+            ids,
+            reason="missing_leg_reprice",
+            cancelled_ts=snapshot.sampled_ts,
+            detail={"source": "ws_fill_recovery", "missing_side": missing_side},
+        )
 
     def _reconcile_pending(self, snapshot: StrategySnapshot) -> list[MakerCancel]:
         pending = [order for order in self.maker.pending if order.intent.market_slug == snapshot.market_slug and order.remaining_usdc > 1e-9]
