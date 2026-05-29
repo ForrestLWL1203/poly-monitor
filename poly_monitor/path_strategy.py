@@ -43,6 +43,8 @@ class PathStrategyConfig:
     max_quote_spread: float | None = None
     max_quote_book_age_ms: float | None = None
     min_quote_bid_depth_usdc: float | None = None
+    dual_build_max_abs_bid_diff: float | None = None
+    build_phase_until_sec: int = 240
     execution_style: str = "maker"
     one_trade_per_market: bool = True
     terminal_bias_start_sec: int = 180

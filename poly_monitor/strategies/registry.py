@@ -120,6 +120,12 @@ def _x32_config(**kwargs: Any) -> PathStrategyConfig:
             if kwargs.get("min_quote_bid_depth_usdc") is not None
             else None
         ),
+        dual_build_max_abs_bid_diff=(
+            float(kwargs["dual_build_max_abs_bid_diff"])
+            if kwargs.get("dual_build_max_abs_bid_diff") is not None
+            else None
+        ) if "dual_build_max_abs_bid_diff" in kwargs else "__use_default__",
+        build_phase_until_sec=int(kwargs["build_phase_until_sec"]) if kwargs.get("build_phase_until_sec") is not None else None,
         execution_style=str(kwargs["execution_style"]) if kwargs.get("execution_style") is not None else None,
         one_trade_per_market=bool(kwargs["one_trade_per_market"]) if kwargs.get("one_trade_per_market") is not None else None,
     )

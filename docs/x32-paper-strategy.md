@@ -144,6 +144,30 @@ from `working_*_shares` (filled plus pending).
 
 For each snapshot, the strategy evaluates Up and Down as candidates.
 
+During the build phase, the strategy can emit two intents from one snapshot.
+This is the preferred early behavior when both sides still need inventory:
+
+```text
+build_phase_until_sec = 240
+dual_build_max_abs_bid_diff = 0.60
+abs(up_bid - down_bid) <= dual_build_max_abs_bid_diff
+```
+
+When those checks pass, the strategy submits equal-share Up and Down maker
+quotes at the same tick. The batch is accepted only if the combined projected
+pair average stays at or below `max_pair_cost`. This models the useful 0x32
+pattern: build balanced paired inventory, not one leg at a time.
+Set `dual_build_max_abs_bid_diff = None` to disable dual-build and fall back to
+single-leg candidate selection.
+
+Extreme gaps are handled differently. A `0.90 / 0.10` book has an absolute bid
+gap of `0.80`, so it is not eligible for dual-build batch entry. The high-price
+leg can still be bought later if it is the inventory deficit side and the
+projected pair average remains valid. Without existing opposite-side protection,
+high unpaired entries are still capped by `max_unpaired_price`. This cap applies
+only while the opposite side has zero filled shares; once the opposite side
+exists, `max_pair_cost` becomes the binding pair-level constraint.
+
 It skips an outcome if:
 
 - the book is stale;
@@ -258,6 +282,8 @@ min_order_usdc = 1.0
 max_quote_spread = 0.02
 max_quote_book_age_ms = 50.0
 min_quote_bid_depth_usdc = 20.0
+dual_build_max_abs_bid_diff = 0.60
+build_phase_until_sec = 240
 execution_style = maker
 one_trade_per_market = False
 rebalance_start_sec = 240
@@ -306,6 +332,19 @@ Known limitations:
   PnL.
 
 ## Execution Diagnostics
+
+Live paper decision rows keep the legacy single `intent` field for compatibility
+and also include:
+
+- `intent_count`
+- `intents`
+
+`intent_count = 2` means the strategy emitted a same-tick Up/Down dual-build
+batch. Reviewers should use `intents` when reconstructing the full decision,
+because `intent` is only the first intent for older tooling compatibility.
+For per-leg diagnostics such as `book_fill`, `deficit_shares`, and
+`quote_level_size_shares`, use `intents[].features`; top-level decision
+features intentionally keep only shared batch-level fields.
 
 Use `scripts/analyze_deep_wallet_export.py` to compare observed wallet trade
 prices with captured books:

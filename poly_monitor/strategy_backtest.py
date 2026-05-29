@@ -12,6 +12,7 @@ from .strategy_runtime import (
     StrategyPlugin,
     StrategySnapshot,
     _load_jsonl_from_zip,
+    evaluate_strategy_intents,
     winning_side_from_row,
 )
 from .maker_paper import PendingMakerReplay, PendingMakerReplayConfig
@@ -121,20 +122,21 @@ def run_strategy_backtest(
         history.snapshots_by_market.setdefault(snapshot.market_slug, []).append(snapshot)
         if one_trade_per_market and snapshot.market_slug in emitted_markets:
             continue
-        intent = strategy.evaluate(snapshot, history)
-        if intent is None:
+        intents = evaluate_strategy_intents(strategy, snapshot, history)
+        if not intents:
             continue
         emitted_markets.add(snapshot.market_slug)
-        history.emitted_intents.append(intent)
-        execution = execution_adapter.submit(intent)
-        row = {"intent": intent.to_dict(), "execution": execution.to_dict(), "snapshot": snapshot.to_dict()}
-        trades.append(row)
-        if execution.status == "paper_settled":
-            settled += 1
-            pnl = float(execution.detail.get("realized_pnl") or 0.0)
-            total_pnl += pnl
-            wins += 1 if pnl > 0 else 0
-            losses += 1 if pnl < 0 else 0
+        for intent in intents:
+            history.emitted_intents.append(intent)
+            execution = execution_adapter.submit(intent)
+            row = {"intent": intent.to_dict(), "execution": execution.to_dict(), "snapshot": snapshot.to_dict()}
+            trades.append(row)
+            if execution.status == "paper_settled":
+                settled += 1
+                pnl = float(execution.detail.get("realized_pnl") or 0.0)
+                total_pnl += pnl
+                wins += 1 if pnl > 0 else 0
+                losses += 1 if pnl < 0 else 0
     return BacktestResult(
         summary={
             "source_zip": str(env.zip_path),
@@ -195,12 +197,13 @@ def run_strategy_maker_replay_backtest(
         history.pending_intents = replay.pending_intents()
         if one_trade_per_market and snapshot.market_slug in emitted_markets:
             continue
-        intent = strategy.evaluate(snapshot, history)
-        if intent is None:
+        intents = evaluate_strategy_intents(strategy, snapshot, history)
+        if not intents:
             continue
         emitted_markets.add(snapshot.market_slug)
-        pending_execution = replay.submit(intent)
-        rows.append({"record_type": "maker_order", "intent": intent.to_dict(), "execution": pending_execution.to_dict(), "snapshot": snapshot.to_dict()})
+        for intent in intents:
+            pending_execution = replay.submit(intent)
+            rows.append({"record_type": "maker_order", "intent": intent.to_dict(), "execution": pending_execution.to_dict(), "snapshot": snapshot.to_dict()})
     process_trades_until(10**18)
     replay.expire_before(10**18)
     return BacktestResult(

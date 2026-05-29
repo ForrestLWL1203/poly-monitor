@@ -228,13 +228,22 @@ class EvaluationTrace:
     decision: str
     skip_reason: str | None = None
     intent: TradeIntent | None = None
+    intents: tuple[TradeIntent, ...] = ()
     features: dict[str, Any] = field(default_factory=dict)
+
+    def all_intents(self) -> tuple[TradeIntent, ...]:
+        if self.intents:
+            return self.intents
+        if self.intent is not None:
+            return (self.intent,)
+        return ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "decision": self.decision,
             "skip_reason": self.skip_reason,
             "intent": self.intent.to_dict() if self.intent is not None else None,
+            "intents": [intent.to_dict() for intent in self.all_intents()],
             "features": dict(self.features),
         }
 
@@ -259,6 +268,15 @@ class StrategyPlugin(Protocol):
 class ExecutionAdapter(Protocol):
     def submit(self, intent: TradeIntent) -> ExecutionResult:
         ...
+
+
+def evaluate_strategy_intents(strategy: StrategyPlugin, snapshot: StrategySnapshot, history: StrategyHistory) -> tuple[TradeIntent, ...]:
+    method = getattr(strategy, "evaluate_many", None)
+    if callable(method):
+        intents = method(snapshot, history)
+        return tuple(intents or ())
+    intent = strategy.evaluate(snapshot, history)
+    return (intent,) if intent is not None else ()
 
 
 class RecordingExecutionAdapter:

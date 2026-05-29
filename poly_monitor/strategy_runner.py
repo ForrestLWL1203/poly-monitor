@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 from .maker_paper import MakerCancel, PendingMakerReplay, PendingMakerReplayConfig
 from .path_strategy import _dynamic_imbalance_limit
-from .strategy_runtime import EvaluationTrace, ExecutionAdapter, ExecutionResult, StrategyHistory, StrategyPlugin, StrategySnapshot, TradeIntent, utc_iso
+from .strategy_runtime import EvaluationTrace, ExecutionAdapter, ExecutionResult, StrategyHistory, StrategyPlugin, StrategySnapshot, TradeIntent, evaluate_strategy_intents, utc_iso
 
 
 def _json_dumps(row: dict) -> str:
@@ -87,31 +87,40 @@ class StrategyRunner:
             for snapshot in sorted(snapshots, key=lambda item: (item.sampled_ts, item.market_slug)):
                 if snapshot.sampled_ts < self.config.start_sampled_ts:
                     continue
+                market_key = (snapshot.market_slug, "")
+                if self.one_trade_per_market and market_key in self._emitted_keys:
+                    continue
                 self.history.snapshots_by_market.setdefault(snapshot.market_slug, []).append(snapshot)
-                intent = self.strategy.evaluate(snapshot, self.history)
-                if intent is None:
+                intents = evaluate_strategy_intents(self.strategy, snapshot, self.history)
+                if not intents:
                     continue
-                key = self._key(intent)
-                if key in self._emitted_keys:
-                    continue
-                self._emitted_keys.add(key)
-                self.history.emitted_intents.append(intent)
-                execution = self.execution_adapter.submit(intent)
-                handle.write(
-                    _json_dumps(
-                        {
-                            "recorded_at": utc_iso(),
-                            "record_type": "execution",
-                            "mode": self.config.mode,
-                            "strategy_name": getattr(self.strategy, "strategy_name", self.strategy.__class__.__name__),
-                            "intent": intent.to_dict(),
-                            "execution": execution.to_dict(),
-                            "snapshot": snapshot.to_dict(),
-                        }
+                snapshot_written = 0
+                for intent in intents:
+                    key = self._key(intent) if not self.one_trade_per_market else (intent.market_slug, intent.intent, intent.outcome, str(intent.sampled_ts))
+                    if not self.one_trade_per_market and key in self._emitted_keys:
+                        continue
+                    if not self.one_trade_per_market:
+                        self._emitted_keys.add(key)
+                    self.history.emitted_intents.append(intent)
+                    execution = self.execution_adapter.submit(intent)
+                    handle.write(
+                        _json_dumps(
+                            {
+                                "recorded_at": utc_iso(),
+                                "record_type": "execution",
+                                "mode": self.config.mode,
+                                "strategy_name": getattr(self.strategy, "strategy_name", self.strategy.__class__.__name__),
+                                "intent": intent.to_dict(),
+                                "execution": execution.to_dict(),
+                                "snapshot": snapshot.to_dict(),
+                            }
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
-                written += 1
+                    written += 1
+                    snapshot_written += 1
+                if self.one_trade_per_market and snapshot_written:
+                    self._emitted_keys.add(market_key)
         return {"intents": written, "output_path": str(self.output_path)}
 
     async def run_live(self, environment, *, seconds: float | None = None, poll_sec: float = 1.0) -> int:
@@ -171,10 +180,14 @@ def _feature_subset(features: dict[str, Any]) -> dict[str, Any]:
         "target_pair_notional_usdc",
         "max_pair_cost",
         "max_unpaired_price",
+        "dual_build_abs_bid_diff",
+        "dual_build_max_abs_bid_diff",
         "dynamic_inventory_imbalance_limit",
         "deficit_side",
         "current_pair_avg",
         "projected_pair_avg",
+        "current_pair_avg_basis",
+        "projected_pair_avg_basis",
         "current_imbalance_ratio",
         "projected_imbalance_ratio",
         "order_shares",
@@ -186,6 +199,7 @@ def _feature_subset(features: dict[str, Any]) -> dict[str, Any]:
         "working_down_shares",
         "deficit_shares",
         "book_fill",
+        "quote_source",
         "maker_parent_sampled_ts",
         "maker_order_id",
         "maker_touch_trade_price",
@@ -301,11 +315,17 @@ class LivePaperStrategyRunner:
                 decision_handle.write(_json_dumps(self._decision_row(snapshot, trace)) + "\n")
                 decisions += 1
                 self.decision_counts[trace.skip_reason or trace.decision] += 1
-                if trace.intent is None:
+                intents = trace.all_intents()
+                if not intents:
                     continue
-                execution = self.maker.submit(trace.intent)
-                execution_handle.write(_json_dumps(self._order_row(execution)) + "\n")
-                orders += 1 if execution.status == "maker_pending" else 0
+                if len(intents) > 1 and not self._can_submit_intent_batch(snapshot.market_slug, intents):
+                    for execution in self._reject_intent_batch(snapshot.market_slug, intents):
+                        execution_handle.write(_json_dumps(self._order_row(execution)) + "\n")
+                    continue
+                for intent in intents:
+                    execution = self.maker.submit(intent)
+                    execution_handle.write(_json_dumps(self._order_row(execution)) + "\n")
+                    orders += 1 if execution.status == "maker_pending" else 0
         self.write_state(active_windows=[])
         return {"decisions": decisions, "orders": orders}
 
@@ -395,14 +415,43 @@ class LivePaperStrategyRunner:
         self.summary_path.write_text(json.dumps(self._summary(), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     def _evaluate_with_trace(self, snapshot: StrategySnapshot) -> EvaluationTrace:
+        many_method = getattr(self.strategy, "evaluate_many_with_trace", None)
+        if callable(many_method):
+            return many_method(snapshot, self.history)
         method = getattr(self.strategy, "evaluate_with_trace", None)
         if callable(method):
             return method(snapshot, self.history)
-        intent = self.strategy.evaluate(snapshot, self.history)
-        return EvaluationTrace(decision="intent" if intent else "skip", skip_reason=None if intent else "no_intent", intent=intent, features={})
+        intents = evaluate_strategy_intents(self.strategy, snapshot, self.history)
+        return EvaluationTrace(
+            decision="intent" if intents else "skip",
+            skip_reason=None if intents else "no_intent",
+            intent=intents[0] if intents else None,
+            intents=intents,
+            features={},
+        )
+
+    def _can_submit_intent_batch(self, market_slug: str, intents: tuple[TradeIntent, ...]) -> bool:
+        open_orders = len([order for order in self.maker.pending if order.intent.market_slug == market_slug])
+        return open_orders + len(intents) <= int(self.maker.config.max_open_orders_per_market)
+
+    def _reject_intent_batch(self, market_slug: str, intents: tuple[TradeIntent, ...]) -> list[ExecutionResult]:
+        open_orders = len([order for order in self.maker.pending if order.intent.market_slug == market_slug])
+        detail = {
+            "error": "batch would exceed max_open_orders_per_market",
+            "open_orders": open_orders,
+            "requested_orders": len(intents),
+            "limit": int(self.maker.config.max_open_orders_per_market),
+            "batch_rejected": True,
+        }
+        results: list[ExecutionResult] = []
+        for intent in intents:
+            self.maker.rejected += 1
+            results.append(ExecutionResult(status="maker_rejected_open_order_limit", intent=intent, detail=dict(detail)))
+        return results
 
     def _decision_row(self, snapshot: StrategySnapshot, trace: EvaluationTrace) -> dict[str, Any]:
         features = dict(trace.features)
+        intents = trace.all_intents()
         return {
             "record_type": "decision",
             "recorded_at": utc_iso(),
@@ -430,6 +479,8 @@ class LivePaperStrategyRunner:
             "decision": trace.decision,
             "skip_reason": trace.skip_reason,
             "intent": _intent_summary(trace.intent, include_features=True),
+            "intent_count": len(intents),
+            "intents": [_intent_summary(intent, include_features=True) for intent in intents],
             "inventory": features.get("inventory") or self._inventory_for_decision(snapshot.market_slug),
             "pending": self._pending_summary(snapshot.market_slug),
             "open_order_limit": self._open_order_limit(snapshot.market_slug),

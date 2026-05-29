@@ -13,6 +13,37 @@ from poly_monitor.path_strategy import (
 from poly_monitor.strategy_runtime import EvaluationTrace, StrategyHistory, StrategySnapshot, TradeIntent
 
 
+_DUAL_TRACE_FEATURE_KEYS = {
+    "elapsed_sec",
+    "top_pair_cost",
+    "maker_pair_cost",
+    "execution_style",
+    "target_pair_notional_usdc",
+    "max_pair_cost",
+    "max_unpaired_price",
+    "max_quote_spread",
+    "max_quote_book_age_ms",
+    "min_quote_bid_depth_usdc",
+    "dynamic_inventory_imbalance_limit",
+    "current_pair_avg",
+    "projected_pair_avg",
+    "current_pair_avg_basis",
+    "projected_pair_avg_basis",
+    "current_imbalance_ratio",
+    "projected_imbalance_ratio",
+    "sizing_mode",
+    "target_pair_shares_per_side",
+    "current_up_shares",
+    "current_down_shares",
+    "working_up_shares",
+    "working_down_shares",
+    "dual_build_abs_bid_diff",
+    "dual_build_max_abs_bid_diff",
+    "strategy_profile",
+    "terminal_stop_sec",
+}
+
+
 class X32PairCostInventoryStrategy(WalletPathStrategy):
     strategy_name = "x32_pair_cost_inventory_v0"
     one_trade_per_market = False
@@ -100,10 +131,18 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         return quote_price, quote_source
 
     def evaluate_with_trace(self, snapshot: StrategySnapshot, history: StrategyHistory) -> EvaluationTrace:
+        return self.evaluate_many_with_trace(snapshot, history)
+
+    def evaluate_many_with_trace(self, snapshot: StrategySnapshot, history: StrategyHistory) -> EvaluationTrace:
         base_features = self._trace_base_features(snapshot, history)
-        intent = self.evaluate(snapshot, history)
-        if intent is not None:
-            return EvaluationTrace(decision="intent", intent=intent, features={**base_features, **intent.features})
+        intents = self.evaluate_many(snapshot, history)
+        if intents:
+            merged_features = dict(base_features)
+            if len(intents) == 1:
+                merged_features.update(intents[0].features)
+            else:
+                merged_features.update({key: value for key, value in intents[0].features.items() if key in _DUAL_TRACE_FEATURE_KEYS})
+            return EvaluationTrace(decision="intent", intent=intents[0], intents=tuple(intents), features=merged_features)
         return EvaluationTrace(decision="skip", skip_reason=self._skip_reason(snapshot, history), features=base_features)
 
     def _trace_base_features(self, snapshot: StrategySnapshot, history: StrategyHistory) -> dict:
@@ -121,6 +160,8 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             "top_pair_cost": round(up_ask + down_ask, 6) if up_ask > 0 and down_ask > 0 else None,
             "maker_pair_cost": maker_pair_cost,
             "max_pair_cost": float(self.config.max_pair_cost),
+            "dual_build_abs_bid_diff": self._dual_build_gap(snapshot),
+            "dual_build_max_abs_bid_diff": self.config.dual_build_max_abs_bid_diff,
             "quote_quality": self._quote_quality(snapshot),
             "inventory": {
                 "up_shares": round(filled_inventory["Up"][0], 6),
@@ -170,6 +211,13 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             return quality_reason
         return self._candidate_skip_reason(snapshot, history, maker_pair_cost)
 
+    def _dual_build_gap(self, snapshot: StrategySnapshot) -> float | None:
+        up_bid = _safe_float(snapshot.up.bid)
+        down_bid = _safe_float(snapshot.down.bid)
+        if up_bid <= 0 or down_bid <= 0:
+            return None
+        return round(abs(up_bid - down_bid), 6)
+
     def _candidate_skip_reason(self, snapshot: StrategySnapshot, history: StrategyHistory, maker_pair_cost: float) -> str:
         target_pair_shares = self._target_pair_shares(maker_pair_cost)
         _filled_inventory, current_inventory = self._inventory_sets(history, snapshot.market_slug)
@@ -178,6 +226,9 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         current_imbalance = _imbalance_ratio(current_shares["Up"], current_shares["Down"])
         imbalance_limit = _dynamic_imbalance_limit(self.config, snapshot.elapsed_sec)
         deficit_side = "Up" if current_shares["Up"] < current_shares["Down"] else "Down" if current_shares["Down"] < current_shares["Up"] else None
+        dual_gate = self._dual_build_gate(snapshot=snapshot, target_pair_shares=target_pair_shares, current_shares=current_shares, current_imbalance=current_imbalance, deficit_side=deficit_side)
+        if dual_gate["blocked_by_gap"]:
+            return "dual_build_gap_above_cap"
         last_reason = "no_candidate"
 
         for outcome in ("Up", "Down"):
@@ -228,23 +279,67 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
 
         return last_reason
 
-    def evaluate(self, snapshot: StrategySnapshot, history: StrategyHistory) -> TradeIntent | None:
+    def _dual_build_gate(
+        self,
+        *,
+        snapshot: StrategySnapshot,
+        target_pair_shares: float,
+        current_shares: dict[str, float],
+        current_imbalance: float,
+        deficit_side: str | None,
+    ) -> dict[str, bool | float | None]:
+        abs_bid_diff = self._dual_build_gap(snapshot)
+        max_dual_gap = getattr(self.config, "dual_build_max_abs_bid_diff", None)
+        in_build_phase = snapshot.elapsed_sec < int(getattr(self.config, "build_phase_until_sec", self.config.rebalance_start_sec))
+        both_need_inventory = current_shares["Up"] < target_pair_shares and current_shares["Down"] < target_pair_shares
+        # This guard intentionally avoids starting a fresh two-leg batch after
+        # working inventory has already drifted; equal-size batches then wait
+        # until single-leg rebalancing restores the shape.
+        near_flat_working = deficit_side is None or current_imbalance <= float(self.config.early_inventory_imbalance_ratio)
+        gap_configured = max_dual_gap is not None
+        blocked_by_gap = bool(
+            in_build_phase
+            and both_need_inventory
+            and near_flat_working
+            and gap_configured
+            and abs_bid_diff is not None
+            and abs_bid_diff > float(max_dual_gap)
+        )
+        eligible = bool(
+            in_build_phase
+            and both_need_inventory
+            and near_flat_working
+            and gap_configured
+            and abs_bid_diff is not None
+            and abs_bid_diff <= float(max_dual_gap)
+        )
+        return {
+            "abs_bid_diff": abs_bid_diff,
+            "max_dual_gap": max_dual_gap,
+            "in_build_phase": in_build_phase,
+            "both_need_inventory": both_need_inventory,
+            "near_flat_working": near_flat_working,
+            "blocked_by_gap": blocked_by_gap,
+            "eligible": eligible,
+        }
+
+    def evaluate_many(self, snapshot: StrategySnapshot, history: StrategyHistory) -> list[TradeIntent]:
         if snapshot.book_stale or snapshot.elapsed_sec >= self.terminal_stop_sec:
-            return None
+            return []
         checkpoint = _checkpoint_for_elapsed(snapshot.elapsed_sec, self.config.checkpoints)
         if checkpoint is None:
-            return None
+            return []
         up_ask = _safe_float(snapshot.up.ask)
         down_ask = _safe_float(snapshot.down.ask)
         up_bid = _safe_float(snapshot.up.bid)
         down_bid = _safe_float(snapshot.down.bid)
         if up_ask <= 0 or down_ask <= 0 or up_ask > self.config.max_price or down_ask > self.config.max_price:
-            return None
+            return []
         maker_pair_cost = round(up_bid + down_bid, 6) if up_bid > 0 and down_bid > 0 else None
         if maker_pair_cost is None or maker_pair_cost > float(self.config.max_pair_cost):
-            return None
+            return []
         if not self._book_quality_ok(snapshot.up) or not self._book_quality_ok(snapshot.down):
-            return None
+            return []
         target_pair_shares = self._target_pair_shares(maker_pair_cost)
 
         filled_inventory, working_inventory = self._inventory_sets(history, snapshot.market_slug)
@@ -258,6 +353,30 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         current_imbalance = _imbalance_ratio(current_shares["Up"], current_shares["Down"])
         imbalance_limit = _dynamic_imbalance_limit(self.config, snapshot.elapsed_sec)
         deficit_side = "Up" if current_shares["Up"] < current_shares["Down"] else "Down" if current_shares["Down"] < current_shares["Up"] else None
+        dual_gate = self._dual_build_gate(snapshot=snapshot, target_pair_shares=target_pair_shares, current_shares=current_shares, current_imbalance=current_imbalance, deficit_side=deficit_side)
+        abs_bid_diff = dual_gate["abs_bid_diff"]
+        max_dual_gap = dual_gate["max_dual_gap"]
+
+        if dual_gate["eligible"] and abs_bid_diff is not None:
+            dual_intents = self._dual_build_intents(
+                snapshot=snapshot,
+                checkpoint=checkpoint,
+                maker_pair_cost=maker_pair_cost,
+                target_pair_shares=target_pair_shares,
+                filled_shares=filled_shares,
+                filled_cost=filled_cost,
+                current_shares=current_shares,
+                current_cost=current_cost,
+                current_pair_avg=current_pair_avg,
+                current_imbalance=current_imbalance,
+                imbalance_limit=imbalance_limit,
+                abs_bid_diff=abs_bid_diff,
+            )
+            if dual_intents:
+                return dual_intents
+        if dual_gate["blocked_by_gap"]:
+            if deficit_side is None:
+                return []
 
         candidates = []
         for outcome in ("Up", "Down"):
@@ -313,12 +432,12 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 )
             )
         if not candidates:
-            return None
+            return []
         _imbalance_improvement, _cheapness, deficit_shares, outcome, fill, expected_price, order_notional, order_shares, clip_shares, projected_pair_avg, projected_imbalance, _outcome_tiebreaker = max(
             candidates,
             key=lambda item: (item[0], item[1], item[2], item[11]),
         )
-        return TradeIntent(
+        return [TradeIntent(
             strategy_name=self.strategy_name,
             wallet=self.config.wallet.lower(),
             market_slug=snapshot.market_slug,
@@ -346,6 +465,8 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 "deficit_side": deficit_side,
                 "current_pair_avg": round(current_pair_avg, 6) if current_pair_avg is not None else None,
                 "projected_pair_avg": round(projected_pair_avg, 6) if projected_pair_avg is not None else None,
+                "current_pair_avg_basis": "filled_inventory",
+                "projected_pair_avg_basis": "working_inventory_plus_order",
                 "current_imbalance_ratio": round(current_imbalance, 6),
                 "projected_imbalance_ratio": round(projected_imbalance, 6),
                 "sizing_mode": "fixed_share_clip",
@@ -358,11 +479,129 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 "working_down_shares": round(current_shares["Down"], 6),
                 "deficit_shares": round(deficit_shares, 6),
                 "book_fill": fill,
+                "quote_source": fill.get("source"),
+                "dual_build_abs_bid_diff": abs_bid_diff,
+                "dual_build_max_abs_bid_diff": max_dual_gap,
                 "quote_level_size_shares": _safe_float(snapshot.book_for_outcome(outcome).bid_size),
                 "strategy_profile": "x32_pair_cost_inventory",
                 "terminal_stop_sec": self.terminal_stop_sec,
             },
+        )]
+
+    def _dual_build_intents(
+        self,
+        *,
+        snapshot: StrategySnapshot,
+        checkpoint: int,
+        maker_pair_cost: float,
+        target_pair_shares: float,
+        filled_shares: dict[str, float],
+        filled_cost: dict[str, float],
+        current_shares: dict[str, float],
+        current_cost: dict[str, float],
+        current_pair_avg: float | None,
+        current_imbalance: float,
+        imbalance_limit: float,
+        abs_bid_diff: float,
+    ) -> list[TradeIntent]:
+        quotes: dict[str, tuple[float, dict, float, float, float]] = {}
+        deficits = {outcome: target_pair_shares - current_shares[outcome] for outcome in ("Up", "Down")}
+        batch_shares = min(
+            self._x32_clip_shares(elapsed_sec=snapshot.elapsed_sec, deficit_shares=deficits["Up"]),
+            self._x32_clip_shares(elapsed_sec=snapshot.elapsed_sec, deficit_shares=deficits["Down"]),
+            deficits["Up"],
+            deficits["Down"],
         )
+        if batch_shares <= 1e-9:
+            return []
+        projected_shares = dict(current_shares)
+        projected_cost = dict(current_cost)
+        for outcome in ("Up", "Down"):
+            quote_price, quote_source = self._x32_quote(snapshot=snapshot, outcome=outcome, deficit_side=None)
+            if quote_price <= 0 or quote_price > float(self.config.max_price):
+                return []
+            order_notional = round(batch_shares * quote_price, 6)
+            if order_notional + 1e-9 < float(self.config.min_order_usdc):
+                return []
+            fill, expected_price = _maker_quote_at_price(order_notional, quote_price, source=quote_source)
+            if fill is None or expected_price <= 0 or expected_price > float(self.config.max_price):
+                return []
+            quotes[outcome] = (expected_price, fill, order_notional, batch_shares, quote_price)
+            projected_shares[outcome] += batch_shares
+            projected_cost[outcome] += order_notional
+        projected_up_avg = _avg_price(projected_cost["Up"], projected_shares["Up"])
+        projected_down_avg = _avg_price(projected_cost["Down"], projected_shares["Down"])
+        if projected_up_avg is None or projected_down_avg is None:
+            return []
+        projected_pair_avg = projected_up_avg + projected_down_avg
+        if projected_pair_avg > float(self.config.max_pair_cost):
+            return []
+        projected_imbalance = _imbalance_ratio(projected_shares["Up"], projected_shares["Down"])
+        if projected_imbalance > imbalance_limit and projected_imbalance >= current_imbalance:
+            return []
+
+        intents: list[TradeIntent] = []
+        up_ask = _safe_float(snapshot.up.ask)
+        down_ask = _safe_float(snapshot.down.ask)
+        for outcome in ("Up", "Down"):
+            expected_price, fill, order_notional, order_shares, _quote_price = quotes[outcome]
+            intents.append(
+                TradeIntent(
+                    strategy_name=self.strategy_name,
+                    wallet=self.config.wallet.lower(),
+                    market_slug=snapshot.market_slug,
+                    sampled_ts=snapshot.sampled_ts,
+                    checkpoint_sec=checkpoint,
+                    intent="BUY",
+                    outcome=outcome,
+                    notional_usdc=round(float(order_notional), 6),
+                    max_price=float(self.config.max_price),
+                    expected_price=round(expected_price, 6),
+                    symbol=snapshot.symbol,
+                    reason="x32_pair_cost_inventory",
+                    features={
+                        "elapsed_sec": snapshot.elapsed_sec,
+                        "top_pair_cost": round(up_ask + down_ask, 6),
+                        "maker_pair_cost": maker_pair_cost,
+                        "execution_style": self.config.execution_style,
+                        "target_pair_notional_usdc": float(self.config.target_pair_notional_usdc),
+                        "max_pair_cost": float(self.config.max_pair_cost),
+                        "max_unpaired_price": float(self.config.max_unpaired_price),
+                        "max_quote_spread": self.config.max_quote_spread,
+                        "max_quote_book_age_ms": self.config.max_quote_book_age_ms,
+                        "min_quote_bid_depth_usdc": self.config.min_quote_bid_depth_usdc,
+                        "dynamic_inventory_imbalance_limit": round(imbalance_limit, 6),
+                        "deficit_side": None,
+                        "current_pair_avg": round(current_pair_avg, 6) if current_pair_avg is not None else None,
+                        "projected_pair_avg": round(projected_pair_avg, 6),
+                        "current_pair_avg_basis": "filled_inventory",
+                        "projected_pair_avg_basis": "working_inventory_plus_batch",
+                        "current_imbalance_ratio": round(current_imbalance, 6),
+                        "projected_imbalance_ratio": round(projected_imbalance, 6),
+                        "sizing_mode": "dual_build_equal_clip",
+                        "order_shares": round(order_shares, 6),
+                        "clip_shares": order_shares,
+                        "target_pair_shares_per_side": target_pair_shares,
+                        "current_up_shares": round(filled_shares["Up"], 6),
+                        "current_down_shares": round(filled_shares["Down"], 6),
+                        "working_up_shares": round(current_shares["Up"], 6),
+                        "working_down_shares": round(current_shares["Down"], 6),
+                        "deficit_shares": round(deficits[outcome], 6),
+                        "book_fill": fill,
+                        "quote_source": fill.get("source"),
+                        "dual_build_abs_bid_diff": abs_bid_diff,
+                        "dual_build_max_abs_bid_diff": self.config.dual_build_max_abs_bid_diff,
+                        "quote_level_size_shares": _safe_float(snapshot.book_for_outcome(outcome).bid_size),
+                        "strategy_profile": "x32_pair_cost_inventory",
+                        "terminal_stop_sec": self.terminal_stop_sec,
+                    },
+                )
+            )
+        return intents
+
+    def evaluate(self, snapshot: StrategySnapshot, history: StrategyHistory) -> TradeIntent | None:
+        intents = self.evaluate_many(snapshot, history)
+        return intents[0] if intents else None
 
 
 def x32_default_config(wallet: str, **overrides) -> PathStrategyConfig:
@@ -384,8 +623,12 @@ def x32_default_config(wallet: str, **overrides) -> PathStrategyConfig:
         "max_quote_spread": 0.02,
         "max_quote_book_age_ms": 50.0,
         "min_quote_bid_depth_usdc": 20.0,
+        "dual_build_max_abs_bid_diff": 0.60,
+        "build_phase_until_sec": 240,
         "execution_style": "maker",
         "one_trade_per_market": False,
     }
-    defaults.update({key: value for key, value in overrides.items() if value is not None})
+    defaults.update({key: value for key, value in overrides.items() if value is not None and value != "__use_default__"})
+    if "dual_build_max_abs_bid_diff" in overrides and overrides["dual_build_max_abs_bid_diff"] != "__use_default__":
+        defaults["dual_build_max_abs_bid_diff"] = overrides["dual_build_max_abs_bid_diff"]
     return PathStrategyConfig(**defaults)

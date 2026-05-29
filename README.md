@@ -75,8 +75,9 @@ Live paper writes analysis logs under
 `data/paper_live/<strategy>/<run-id>/`: `decisions.jsonl`,
 `executions.jsonl`, `ws_trades.jsonl`, `market_trades.jsonl`, `state.json`, and
 `summary.json`. The JSONL files are the rebuildable truth; `state.json` and
-`summary.json` are derived snapshots. For transfer or archival, compress the
-core logs first:
+`summary.json` are derived snapshots. Decision rows include `intent_count` and
+`intents` so same-tick dual-side batches can be audited without replaying code.
+For transfer or archival, compress the core logs first:
 
 ```bash
 python3 scripts/archive_paper_live_run.py data/paper_live/<strategy>/<run-id>
