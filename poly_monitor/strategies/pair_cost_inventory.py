@@ -20,7 +20,10 @@ _DUAL_TRACE_FEATURE_KEYS = {
     "execution_style",
     "target_pair_notional_usdc",
     "max_pair_cost",
+    "max_pair_cost_recovery",
+    "pair_cost_cap",
     "max_unpaired_price",
+    "max_unpaired_shares",
     "max_quote_spread",
     "max_quote_book_age_ms",
     "min_quote_bid_depth_usdc",
@@ -42,6 +45,10 @@ _DUAL_TRACE_FEATURE_KEYS = {
     "working_down_shares",
     "dual_build_abs_bid_diff",
     "dual_build_max_abs_bid_diff",
+    "filled_balance_ratio",
+    "filled_unpaired_shares",
+    "paired_balance_min_ratio",
+    "paired_recovery_side",
     "strategy_profile",
     "terminal_stop_sec",
 }
@@ -132,7 +139,9 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         quote_source = "maker_quote_at_best_bid"
         if self.config.execution_style == "maker" and outcome == deficit_side:
             quote_source = "maker_rebalance_quote"
-            if force_rebalance or snapshot.elapsed_sec >= int(self.config.rebalance_start_sec):
+            if force_rebalance:
+                quote_price = min(ask, float(self.config.max_price))
+            elif snapshot.elapsed_sec >= int(self.config.rebalance_start_sec):
                 quote_price = min(
                     ask,
                     float(self.config.max_price),
@@ -162,16 +171,27 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         down_bid = _safe_float(snapshot.down.bid)
         maker_pair_cost = round(up_bid + down_bid, 6) if up_bid > 0 and down_bid > 0 else None
         filled_inventory, working_inventory = self._inventory_sets(history, snapshot.market_slug)
+        filled_shares = {outcome: filled_inventory[outcome][0] for outcome in ("Up", "Down")}
         up_avg = _avg_price(filled_inventory["Up"][1], filled_inventory["Up"][0])
         down_avg = _avg_price(filled_inventory["Down"][1], filled_inventory["Down"][0])
         working_up_avg = _avg_price(working_inventory["Up"][1], working_inventory["Up"][0])
         working_down_avg = _avg_price(working_inventory["Down"][1], working_inventory["Down"][0])
+        paired_recovery_side = self._paired_recovery_side(filled_shares)
+        filled_balance_ratio = self._balance_ratio(filled_shares)
+        filled_unpaired_shares = self._unpaired_shares(filled_shares)
         return {
             "top_pair_cost": round(up_ask + down_ask, 6) if up_ask > 0 and down_ask > 0 else None,
             "maker_pair_cost": maker_pair_cost,
             "max_pair_cost": float(self.config.max_pair_cost),
+            "max_pair_cost_recovery": float(self.config.max_pair_cost_recovery),
+            "pair_cost_cap": float(self.config.max_pair_cost_recovery if paired_recovery_side is not None else self.config.max_pair_cost),
             "dual_build_abs_bid_diff": self._dual_build_gap(snapshot),
             "dual_build_max_abs_bid_diff": self.config.dual_build_max_abs_bid_diff,
+            "max_unpaired_shares": float(self.config.max_unpaired_shares),
+            "filled_unpaired_shares": round(filled_unpaired_shares, 6),
+            "paired_balance_min_ratio": float(self.config.paired_balance_min_ratio),
+            "paired_recovery_side": paired_recovery_side,
+            "filled_balance_ratio": round(filled_balance_ratio, 6) if filled_balance_ratio is not None else None,
             "quote_quality": self._quote_quality(snapshot),
             "inventory": {
                 "up_shares": round(filled_inventory["Up"][0], 6),
@@ -211,10 +231,14 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         down_bid = _safe_float(snapshot.down.bid)
         if up_ask <= 0 or down_ask <= 0 or up_ask > self.config.max_price or down_ask > self.config.max_price:
             return "invalid_or_expensive_ask"
+        filled_inventory, _working_inventory = self._inventory_sets(history, snapshot.market_slug)
+        filled_shares = {outcome: filled_inventory[outcome][0] for outcome in ("Up", "Down")}
+        paired_recovery_side = self._paired_recovery_side(filled_shares)
+        pair_cost_cap = self._pair_cost_cap(paired_recovery_side)
         maker_pair_cost = round(up_bid + down_bid, 6) if up_bid > 0 and down_bid > 0 else None
         if maker_pair_cost is None:
             return "pair_cost_missing"
-        if maker_pair_cost > float(self.config.max_pair_cost):
+        if maker_pair_cost > pair_cost_cap:
             return "pair_cost_above_max"
         quality_reason = self._book_quality_reason(snapshot.up) or self._book_quality_reason(snapshot.down)
         if quality_reason:
@@ -238,14 +262,15 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         current_imbalance = _imbalance_ratio(current_shares["Up"], current_shares["Down"])
         imbalance_limit = _dynamic_imbalance_limit(self.config, snapshot.elapsed_sec)
         deficit_side = "Up" if current_shares["Up"] < current_shares["Down"] else "Down" if current_shares["Down"] < current_shares["Up"] else None
-        missing_filled_side = self._missing_filled_side(filled_shares)
+        paired_recovery_side = self._paired_recovery_side(filled_shares)
+        pair_cost_cap = self._pair_cost_cap(paired_recovery_side)
         dual_gate = self._dual_build_gate(
             snapshot=snapshot,
             target_pair_shares=target_pair_shares,
             current_shares=current_shares,
             current_imbalance=current_imbalance,
             deficit_side=deficit_side,
-            missing_filled_side=missing_filled_side,
+            paired_recovery_side=paired_recovery_side,
         )
         if dual_gate["blocked_by_gap"]:
             return "dual_build_gap_above_cap"
@@ -255,21 +280,21 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             if outcome in pending_outcomes:
                 last_reason = "pending_outcome_blocked"
                 continue
-            if missing_filled_side is not None and outcome != missing_filled_side:
+            if paired_recovery_side is not None and outcome != paired_recovery_side:
                 if last_reason != "pending_outcome_blocked":
-                    last_reason = "awaiting_opposite_side_fill"
+                    last_reason = "awaiting_paired_recovery_fill"
                 continue
             book = snapshot.book_for_outcome(outcome)
             ask = _safe_float(book.ask)
             if ask <= 0 or ask > self.config.max_price:
                 last_reason = "invalid_or_expensive_ask"
                 continue
-            effective_deficit_side = missing_filled_side or deficit_side
+            effective_deficit_side = paired_recovery_side or deficit_side
             quote_price, quote_source = self._x32_quote(
                 snapshot=snapshot,
                 outcome=outcome,
                 deficit_side=effective_deficit_side,
-                force_rebalance=missing_filled_side == outcome,
+                force_rebalance=paired_recovery_side == outcome,
             )
             if quote_price <= 0 or quote_price > self.config.max_price:
                 last_reason = "invalid_maker_quote"
@@ -298,15 +323,15 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             projected_pair_avg = None
             if projected_up_avg is not None and projected_down_avg is not None:
                 projected_pair_avg = projected_up_avg + projected_down_avg
-                if projected_pair_avg > float(self.config.max_pair_cost):
-                    last_reason = "projected_pair_above_cap"
+                if projected_pair_avg > pair_cost_cap:
+                    last_reason = "projected_pair_above_recovery_cap" if paired_recovery_side == outcome else "projected_pair_above_cap"
                     continue
             elif expected_price > float(self.config.max_unpaired_price):
                 last_reason = "unpaired_price_above_cap"
                 continue
             projected_imbalance = _imbalance_ratio(projected_shares["Up"], projected_shares["Down"])
             if (
-                missing_filled_side is None
+                paired_recovery_side is None
                 and projected_pair_avg is not None
                 and projected_imbalance > imbalance_limit
                 and projected_imbalance >= current_imbalance
@@ -325,7 +350,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         current_shares: dict[str, float],
         current_imbalance: float,
         deficit_side: str | None,
-        missing_filled_side: str | None = None,
+        paired_recovery_side: str | None = None,
     ) -> dict[str, bool | float | None]:
         abs_bid_diff = self._dual_build_gap(snapshot)
         max_dual_gap = getattr(self.config, "dual_build_max_abs_bid_diff", None)
@@ -348,7 +373,7 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             in_build_phase
             and both_need_inventory
             and near_flat_working
-            and missing_filled_side is None
+            and paired_recovery_side is None
             and gap_configured
             and abs_bid_diff is not None
             and abs_bid_diff <= float(max_dual_gap)
@@ -376,15 +401,17 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         if up_ask <= 0 or down_ask <= 0 or up_ask > self.config.max_price or down_ask > self.config.max_price:
             return []
         maker_pair_cost = round(up_bid + down_bid, 6) if up_bid > 0 and down_bid > 0 else None
-        if maker_pair_cost is None or maker_pair_cost > float(self.config.max_pair_cost):
+        filled_inventory, working_inventory = self._inventory_sets(history, snapshot.market_slug)
+        filled_shares = {outcome: filled_inventory[outcome][0] for outcome in ("Up", "Down")}
+        paired_recovery_side = self._paired_recovery_side(filled_shares)
+        pair_cost_cap = self._pair_cost_cap(paired_recovery_side)
+        if maker_pair_cost is None or maker_pair_cost > pair_cost_cap:
             return []
         if not self._book_quality_ok(snapshot.up) or not self._book_quality_ok(snapshot.down):
             return []
         target_pair_shares = self._target_pair_shares(maker_pair_cost)
         pending_outcomes = self._pending_outcomes(history, snapshot.market_slug)
 
-        filled_inventory, working_inventory = self._inventory_sets(history, snapshot.market_slug)
-        filled_shares = {outcome: filled_inventory[outcome][0] for outcome in ("Up", "Down")}
         current_shares = {outcome: working_inventory[outcome][0] for outcome in ("Up", "Down")}
         current_cost = {outcome: working_inventory[outcome][1] for outcome in ("Up", "Down")}
         filled_cost = {outcome: filled_inventory[outcome][1] for outcome in ("Up", "Down")}
@@ -394,14 +421,13 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         current_imbalance = _imbalance_ratio(current_shares["Up"], current_shares["Down"])
         imbalance_limit = _dynamic_imbalance_limit(self.config, snapshot.elapsed_sec)
         deficit_side = "Up" if current_shares["Up"] < current_shares["Down"] else "Down" if current_shares["Down"] < current_shares["Up"] else None
-        missing_filled_side = self._missing_filled_side(filled_shares)
         dual_gate = self._dual_build_gate(
             snapshot=snapshot,
             target_pair_shares=target_pair_shares,
             current_shares=current_shares,
             current_imbalance=current_imbalance,
             deficit_side=deficit_side,
-            missing_filled_side=missing_filled_side,
+            paired_recovery_side=paired_recovery_side,
         )
         abs_bid_diff = dual_gate["abs_bid_diff"]
         max_dual_gap = dual_gate["max_dual_gap"]
@@ -431,18 +457,18 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
         for outcome in ("Up", "Down"):
             if outcome in pending_outcomes:
                 continue
-            if missing_filled_side is not None and outcome != missing_filled_side:
+            if paired_recovery_side is not None and outcome != paired_recovery_side:
                 continue
             book = snapshot.book_for_outcome(outcome)
             ask = _safe_float(book.ask)
             if ask <= 0 or ask > self.config.max_price:
                 continue
-            effective_deficit_side = missing_filled_side or deficit_side
+            effective_deficit_side = paired_recovery_side or deficit_side
             quote_price, quote_source = self._x32_quote(
                 snapshot=snapshot,
                 outcome=outcome,
                 deficit_side=effective_deficit_side,
-                force_rebalance=missing_filled_side == outcome,
+                force_rebalance=paired_recovery_side == outcome,
             )
             if quote_price <= 0 or quote_price > self.config.max_price:
                 continue
@@ -467,13 +493,13 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             projected_pair_avg = None
             if projected_up_avg is not None and projected_down_avg is not None:
                 projected_pair_avg = projected_up_avg + projected_down_avg
-                if projected_pair_avg > float(self.config.max_pair_cost):
+                if projected_pair_avg > pair_cost_cap:
                     continue
             elif expected_price > float(self.config.max_unpaired_price):
                 continue
             projected_imbalance = _imbalance_ratio(projected_shares["Up"], projected_shares["Down"])
             if (
-                missing_filled_side is None
+                paired_recovery_side is None
                 and projected_pair_avg is not None
                 and projected_imbalance > imbalance_limit
                 and projected_imbalance >= current_imbalance
@@ -521,7 +547,10 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 "execution_style": self.config.execution_style,
                 "target_pair_notional_usdc": float(self.config.target_pair_notional_usdc),
                 "max_pair_cost": float(self.config.max_pair_cost),
+                "max_pair_cost_recovery": float(self.config.max_pair_cost_recovery),
+                "pair_cost_cap": round(pair_cost_cap, 6),
                 "max_unpaired_price": float(self.config.max_unpaired_price),
+                "max_unpaired_shares": float(self.config.max_unpaired_shares),
                 "max_quote_spread": self.config.max_quote_spread,
                 "max_quote_book_age_ms": self.config.max_quote_book_age_ms,
                 "min_quote_bid_depth_usdc": self.config.min_quote_bid_depth_usdc,
@@ -529,7 +558,11 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 "deficit_side": deficit_side,
                 "effective_deficit_side": effective_deficit_side,
                 "working_deficit_side": deficit_side,
-                "missing_filled_side": missing_filled_side,
+                "missing_filled_side": paired_recovery_side if (filled_shares["Up"] <= 1e-9 or filled_shares["Down"] <= 1e-9) else None,
+                "paired_recovery_side": paired_recovery_side,
+                "paired_balance_min_ratio": float(self.config.paired_balance_min_ratio),
+                "filled_balance_ratio": round(self._balance_ratio(filled_shares), 6) if self._balance_ratio(filled_shares) is not None else None,
+                "filled_unpaired_shares": round(self._unpaired_shares(filled_shares), 6),
                 "current_pair_avg": round(current_pair_avg, 6) if current_pair_avg is not None else None,
                 "projected_pair_avg": round(projected_pair_avg, 6) if projected_pair_avg is not None else None,
                 "current_pair_avg_basis": "filled_inventory",
@@ -547,6 +580,9 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                 "deficit_shares": round(deficit_shares, 6),
                 "book_fill": fill,
                 "quote_source": fill.get("source"),
+                "quote_forced_to_ask": True if paired_recovery_side == outcome and expected_price == ask else None,
+                "original_quote_price": round(_safe_float(book.bid), 6) if paired_recovery_side == outcome and expected_price == ask else None,
+                "forced_ask_price": round(expected_price, 6) if paired_recovery_side == outcome and expected_price == ask else None,
                 "dual_build_abs_bid_diff": abs_bid_diff,
                 "dual_build_max_abs_bid_diff": max_dual_gap,
                 "quote_level_size_shares": _safe_float(snapshot.book_for_outcome(outcome).bid_size),
@@ -633,7 +669,10 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                         "execution_style": self.config.execution_style,
                         "target_pair_notional_usdc": float(self.config.target_pair_notional_usdc),
                         "max_pair_cost": float(self.config.max_pair_cost),
+                        "max_pair_cost_recovery": float(self.config.max_pair_cost_recovery),
+                        "pair_cost_cap": float(self.config.max_pair_cost),
                         "max_unpaired_price": float(self.config.max_unpaired_price),
+                        "max_unpaired_shares": float(self.config.max_unpaired_shares),
                         "max_quote_spread": self.config.max_quote_spread,
                         "max_quote_book_age_ms": self.config.max_quote_book_age_ms,
                         "min_quote_bid_depth_usdc": self.config.min_quote_bid_depth_usdc,
@@ -642,6 +681,10 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
                         "effective_deficit_side": None,
                         "working_deficit_side": None,
                         "missing_filled_side": None,
+                        "paired_recovery_side": None,
+                        "paired_balance_min_ratio": float(self.config.paired_balance_min_ratio),
+                        "filled_balance_ratio": round(self._balance_ratio(filled_shares), 6) if self._balance_ratio(filled_shares) is not None else None,
+                        "filled_unpaired_shares": round(self._unpaired_shares(filled_shares), 6),
                         "current_pair_avg": round(current_pair_avg, 6) if current_pair_avg is not None else None,
                         "projected_pair_avg": round(projected_pair_avg, 6),
                         "current_pair_avg_basis": "filled_inventory",
@@ -682,6 +725,31 @@ class X32PairCostInventoryStrategy(WalletPathStrategy):
             return "Up"
         return None
 
+    def _balance_ratio(self, filled_shares: dict[str, float]) -> float | None:
+        high = max(filled_shares["Up"], filled_shares["Down"])
+        if high <= 1e-9:
+            return None
+        return min(filled_shares["Up"], filled_shares["Down"]) / high
+
+    def _unpaired_shares(self, filled_shares: dict[str, float]) -> float:
+        return abs(filled_shares["Up"] - filled_shares["Down"])
+
+    def _paired_recovery_side(self, filled_shares: dict[str, float]) -> str | None:
+        missing_side = self._missing_filled_side(filled_shares)
+        if missing_side is not None:
+            return missing_side
+        if self._unpaired_shares(filled_shares) > float(self.config.max_unpaired_shares):
+            return "Up" if filled_shares["Up"] < filled_shares["Down"] else "Down"
+        balance_ratio = self._balance_ratio(filled_shares)
+        if balance_ratio is None or balance_ratio >= float(self.config.paired_balance_min_ratio):
+            return None
+        return "Up" if filled_shares["Up"] < filled_shares["Down"] else "Down"
+
+    def _pair_cost_cap(self, paired_recovery_side: str | None) -> float:
+        if paired_recovery_side is not None:
+            return float(self.config.max_pair_cost_recovery)
+        return float(self.config.max_pair_cost)
+
 
 def x32_default_config(wallet: str, **overrides) -> PathStrategyConfig:
     defaults = {
@@ -692,7 +760,9 @@ def x32_default_config(wallet: str, **overrides) -> PathStrategyConfig:
         "target_pair_notional_usdc": 55.0,
         "target_pair_shares_per_side": None,
         "max_pair_cost": 0.995,
+        "max_pair_cost_recovery": 1.03,
         "max_unpaired_price": 0.70,
+        "max_unpaired_shares": 10.0,
         "early_inventory_imbalance_ratio": 0.30,
         "mid_inventory_imbalance_ratio": 0.12,
         "late_inventory_imbalance_ratio": 0.06,
@@ -703,6 +773,7 @@ def x32_default_config(wallet: str, **overrides) -> PathStrategyConfig:
         "max_quote_book_age_ms": 50.0,
         "min_quote_bid_depth_usdc": 20.0,
         "dual_build_max_abs_bid_diff": 0.60,
+        "paired_balance_min_ratio": 0.80,
         "build_phase_until_sec": 240,
         "execution_style": "maker",
         "one_trade_per_market": False,

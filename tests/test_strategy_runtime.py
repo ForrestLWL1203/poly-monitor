@@ -643,6 +643,264 @@ class RuntimeStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace.features["inventory"]["working_up_shares"], 10.0)
         self.assertEqual(trace.features["inventory"]["working_down_shares"], 10.0)
 
+    def test_x32_partial_filled_imbalance_ignores_pending_fake_balance(self):
+        strategy = strategy_from_name(
+            "x32_pair_cost_inventory_v0",
+            wallet="0x32",
+            target_pair_notional_usdc=40,
+            max_quote_book_age_ms=100,
+            min_quote_bid_depth_usdc=1,
+        )
+        market_slug = "btc-updown-5m-1770000000"
+        history = StrategyHistory(
+            emitted_intents=[
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=market_slug,
+                    sampled_ts=1770000005,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=5.0,
+                    max_price=0.95,
+                    expected_price=0.50,
+                    symbol="BTC",
+                    reason="seed",
+                ),
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=market_slug,
+                    sampled_ts=1770000006,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Down",
+                    notional_usdc=2.0,
+                    max_price=0.95,
+                    expected_price=0.50,
+                    symbol="BTC",
+                    reason="seed",
+                ),
+            ],
+            pending_intents=[
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=market_slug,
+                    sampled_ts=1770000007,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Down",
+                    notional_usdc=3.0,
+                    max_price=0.95,
+                    expected_price=0.50,
+                    symbol="BTC",
+                    reason="pending",
+                )
+            ],
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": market_slug,
+                "symbol": "BTC",
+                "sampled_ts": 1770000010,
+                "book_stale": 0,
+                "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                "down_json": {"bid": 0.48, "ask": 0.49, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+            }
+        )
+
+        trace = strategy.evaluate_many_with_trace(snapshot, history)
+
+        self.assertEqual(trace.decision, "skip")
+        self.assertEqual(trace.skip_reason, "pending_outcome_blocked")
+        self.assertEqual(trace.features["paired_recovery_side"], "Down")
+        self.assertEqual(trace.features["filled_balance_ratio"], 0.4)
+
+    def test_x32_partial_filled_imbalance_forces_lagging_side_rebalance(self):
+        strategy = strategy_from_name(
+            "x32_pair_cost_inventory_v0",
+            wallet="0x32",
+            target_pair_notional_usdc=40,
+            max_quote_book_age_ms=100,
+            min_quote_bid_depth_usdc=1,
+        )
+        market_slug = "btc-updown-5m-1770000000"
+        history = StrategyHistory(
+            emitted_intents=[
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=market_slug,
+                    sampled_ts=1770000005,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=5.0,
+                    max_price=0.95,
+                    expected_price=0.50,
+                    symbol="BTC",
+                    reason="seed",
+                ),
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=market_slug,
+                    sampled_ts=1770000006,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Down",
+                    notional_usdc=2.0,
+                    max_price=0.95,
+                    expected_price=0.50,
+                    symbol="BTC",
+                    reason="seed",
+                ),
+            ],
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": market_slug,
+                "symbol": "BTC",
+                "sampled_ts": 1770000010,
+                "book_stale": 0,
+                "up_json": {"bid": 0.49, "ask": 0.50, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                "down_json": {"bid": 0.48, "ask": 0.49, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+            }
+        )
+
+        trace = strategy.evaluate_many_with_trace(snapshot, history)
+
+        self.assertEqual(trace.decision, "intent")
+        self.assertEqual(len(trace.intents), 1)
+        self.assertEqual(trace.intent.outcome, "Down")
+        self.assertEqual(trace.intent.expected_price, 0.49)
+        self.assertEqual(trace.intent.features["quote_source"], "maker_rebalance_quote")
+        self.assertEqual(trace.intent.features["paired_recovery_side"], "Down")
+
+    def test_x32_paired_recovery_uses_wider_pair_cost_cap_and_ask_quote(self):
+        strategy = strategy_from_name(
+            "x32_pair_cost_inventory_v0",
+            wallet="0x32",
+            target_pair_notional_usdc=40,
+            max_pair_cost=0.995,
+            max_pair_cost_recovery=1.03,
+            max_quote_book_age_ms=100,
+            min_quote_bid_depth_usdc=1,
+        )
+        market_slug = "btc-updown-5m-1770000000"
+        history = StrategyHistory(
+            emitted_intents=[
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=market_slug,
+                    sampled_ts=1770000005,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=4.9,
+                    max_price=0.95,
+                    expected_price=0.49,
+                    symbol="BTC",
+                    reason="seed",
+                ),
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=market_slug,
+                    sampled_ts=1770000006,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Down",
+                    notional_usdc=1.0,
+                    max_price=0.95,
+                    expected_price=0.50,
+                    symbol="BTC",
+                    reason="seed",
+                ),
+            ],
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": market_slug,
+                "symbol": "BTC",
+                "sampled_ts": 1770000010,
+                "book_stale": 0,
+                "up_json": {"bid": 0.48, "ask": 0.49, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                "down_json": {"bid": 0.51, "ask": 0.52, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+            }
+        )
+
+        trace = strategy.evaluate_many_with_trace(snapshot, history)
+
+        self.assertEqual(trace.decision, "intent")
+        self.assertEqual(trace.intent.outcome, "Down")
+        self.assertEqual(trace.intent.expected_price, 0.52)
+        self.assertEqual(trace.intent.features["pair_cost_cap"], 1.03)
+        self.assertGreater(trace.intent.features["projected_pair_avg"], 0.995)
+        self.assertLessEqual(trace.intent.features["projected_pair_avg"], 1.03)
+
+    def test_x32_paired_recovery_still_rejects_above_recovery_pair_cost_cap(self):
+        strategy = strategy_from_name(
+            "x32_pair_cost_inventory_v0",
+            wallet="0x32",
+            target_pair_notional_usdc=40,
+            max_pair_cost=0.995,
+            max_pair_cost_recovery=1.03,
+            max_quote_book_age_ms=100,
+            min_quote_bid_depth_usdc=1,
+        )
+        market_slug = "btc-updown-5m-1770000000"
+        history = StrategyHistory(
+            emitted_intents=[
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=market_slug,
+                    sampled_ts=1770000005,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=4.9,
+                    max_price=0.95,
+                    expected_price=0.49,
+                    symbol="BTC",
+                    reason="seed",
+                ),
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=market_slug,
+                    sampled_ts=1770000006,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Down",
+                    notional_usdc=1.0,
+                    max_price=0.95,
+                    expected_price=0.50,
+                    symbol="BTC",
+                    reason="seed",
+                ),
+            ],
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": market_slug,
+                "symbol": "BTC",
+                "sampled_ts": 1770000010,
+                "book_stale": 0,
+                "up_json": {"bid": 0.48, "ask": 0.49, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                "down_json": {"bid": 0.54, "ask": 0.56, "spread": 0.02, "book_age_ms": 5, "bid_depth_usdc": 100},
+            }
+        )
+
+        trace = strategy.evaluate_many_with_trace(snapshot, history)
+
+        self.assertEqual(trace.decision, "skip")
+        self.assertEqual(trace.skip_reason, "projected_pair_above_recovery_cap")
+
     def test_x32_rejects_extreme_gap_unprotected_entry(self):
         strategy = strategy_from_name(
             "x32_pair_cost_inventory_v0",
@@ -829,11 +1087,14 @@ class StrategyFactoryTests(unittest.TestCase):
         self.assertEqual(strategy.config.target_pair_notional_usdc, 55)
         self.assertEqual(strategy.config.notional_usdc, 5)
         self.assertEqual(strategy.config.max_pair_cost, 0.995)
+        self.assertEqual(strategy.config.max_pair_cost_recovery, 1.03)
         self.assertEqual(strategy.config.max_unpaired_price, 0.70)
+        self.assertEqual(strategy.config.max_unpaired_shares, 10.0)
         self.assertEqual(strategy.config.max_quote_spread, 0.02)
         self.assertEqual(strategy.config.max_quote_book_age_ms, 50.0)
         self.assertEqual(strategy.config.min_quote_bid_depth_usdc, 20.0)
         self.assertEqual(strategy.config.rebalance_start_sec, 240)
+        self.assertEqual(strategy.config.paired_balance_min_ratio, 0.80)
         self.assertEqual(strategy.config.early_inventory_imbalance_ratio, 0.30)
         self.assertEqual(strategy.config.mid_inventory_imbalance_ratio, 0.12)
         self.assertEqual(strategy.config.late_inventory_imbalance_ratio, 0.06)
@@ -1413,7 +1674,7 @@ class StrategyRunnerTests(unittest.TestCase):
         self.assertEqual(decisions[-1]["intents"][0]["outcome"], "Down")
         self.assertEqual(decisions[-1]["intents"][0]["expected_price"], 0.5)
         self.assertTrue(decisions[-1]["intents"][0]["features"]["quote_forced_to_ask"])
-        self.assertEqual(decisions[-1]["intents"][0]["features"]["original_quote_price"], 0.49)
+        self.assertEqual(decisions[-1]["intents"][0]["features"]["original_quote_price"], 0.48)
 
     def test_live_paper_runner_immediately_fills_missing_leg_quote_at_ask(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1564,6 +1825,66 @@ class StrategyRunnerTests(unittest.TestCase):
         self.assertEqual(adjusted[0].expected_price, 0.41)
         self.assertNotIn("quote_forced_to_ask", adjusted[0].features)
 
+    def test_live_paper_runner_forces_recovery_under_recovery_pair_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = LivePaperStrategyRunner(
+                LivePaperRunConfig(run_dir=Path(tmp), run_id="test-run", mode="paper"),
+                strategy=strategy_from_name("x32_pair_cost_inventory_v0", wallet="0x32"),
+            )
+            runner.history.emitted_intents.append(
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug="btc-updown-5m-1770000000",
+                    sampled_ts=1770000010,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=4.9,
+                    max_price=0.95,
+                    expected_price=0.49,
+                    symbol="BTC",
+                    reason="maker_replay_fill",
+                )
+            )
+            snapshot = StrategySnapshot.from_market_state_sample(
+                {
+                    "market_slug": "btc-updown-5m-1770000000",
+                    "condition_id": "cond",
+                    "symbol": "BTC",
+                    "sampled_ts": 1770000011,
+                    "book_stale": 0,
+                    "up_json": {"bid": 0.48, "ask": 0.49, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                    "down_json": {"bid": 0.51, "ask": 0.52, "spread": 0.01, "book_age_ms": 5, "bid_depth_usdc": 100},
+                }
+            )
+            intent = TradeIntent(
+                strategy_name="x32_pair_cost_inventory_v0",
+                wallet="0x32",
+                market_slug=snapshot.market_slug,
+                sampled_ts=snapshot.sampled_ts,
+                checkpoint_sec=1,
+                intent="BUY",
+                outcome="Down",
+                notional_usdc=5.1,
+                max_price=0.95,
+                expected_price=0.51,
+                symbol="BTC",
+                reason="x32_pair_cost_inventory",
+                features={
+                    "quote_source": "maker_rebalance_quote",
+                    "order_shares": 10,
+                    "max_pair_cost": 0.995,
+                    "max_pair_cost_recovery": 1.03,
+                    "pair_cost_cap": 1.03,
+                },
+            )
+
+            adjusted = runner._force_recovery_quotes_to_ask(snapshot, (intent,), "Down")
+
+        self.assertEqual(adjusted[0].expected_price, 0.52)
+        self.assertTrue(adjusted[0].features["quote_forced_to_ask"])
+
     def test_missing_leg_rebalance_uses_longer_ttl(self):
         replay = PendingMakerReplay(PendingMakerReplayConfig(order_ttl_sec=5, missing_leg_ttl_multiplier=8.0))
         intent = TradeIntent(
@@ -1580,6 +1901,28 @@ class StrategyRunnerTests(unittest.TestCase):
             symbol="BTC",
             reason="x32_pair_cost_inventory",
             features={"quote_source": "maker_rebalance_quote", "missing_filled_side": "Down"},
+        )
+
+        execution = replay.submit(intent)
+
+        self.assertEqual(execution.detail["ttl_sec"], 40)
+
+    def test_paired_recovery_rebalance_uses_longer_ttl(self):
+        replay = PendingMakerReplay(PendingMakerReplayConfig(order_ttl_sec=5, missing_leg_ttl_multiplier=8.0))
+        intent = TradeIntent(
+            strategy_name="x32_pair_cost_inventory_v0",
+            wallet="0x32",
+            market_slug="btc-updown-5m-1770000000",
+            sampled_ts=1770000011,
+            checkpoint_sec=1,
+            intent="BUY",
+            outcome="Down",
+            notional_usdc=5.0,
+            max_price=0.95,
+            expected_price=0.50,
+            symbol="BTC",
+            reason="x32_pair_cost_inventory",
+            features={"quote_source": "maker_rebalance_quote", "paired_recovery_side": "Down"},
         )
 
         execution = replay.submit(intent)

@@ -732,7 +732,7 @@ class LivePaperStrategyRunner:
 
     def _forced_ask_pair_cost_ok(self, intent: TradeIntent, ask: float) -> bool:
         try:
-            max_pair_cost = float(intent.features.get("max_pair_cost"))
+            max_pair_cost = float(intent.features.get("pair_cost_cap", intent.features.get("max_pair_cost")))
         except (TypeError, ValueError):
             return True
         outcome = intent.outcome

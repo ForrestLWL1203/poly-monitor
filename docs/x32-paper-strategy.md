@@ -112,6 +112,12 @@ quote up to `maker_rebalance_ticks` above the best bid, capped by the best ask
 and `max_price`, to recover balance faster. This is an aggressive rebalance
 quote and may cross into the spread when the market moves.
 
+Paired recovery is stricter than ordinary rebalance. If filled-only inventory is
+missing or below `paired_balance_min_ratio`, the lagging side quotes directly at
+the best ask, capped by `max_price`. Paper models that as immediate ask-side
+recovery, and live trading would need an explicit taker/crossing order path for
+the same behavior.
+
 Feature flags in emitted intents:
 
 - `book_fill.source = maker_quote_at_best_bid`
@@ -139,6 +145,47 @@ Reason:
 
 The emitted diagnostics therefore distinguish `current_*_shares` (filled only)
 from `working_*_shares` (filled plus pending).
+
+### Paired-Tranche Recovery
+
+The latest 0x25/0x32 comparison reinforced a practical rule: pending orders
+must not be allowed to create fake balance. 0x32's first Up/Down fill gap is
+usually only a few seconds, while our paper runs lost most money when the first
+leg filled and the opposite leg stayed missing or badly undersized.
+
+The strategy now treats each build as a paired tranche. It computes a
+filled-only balance ratio:
+
+```text
+filled_balance_ratio = min(filled_up_shares, filled_down_shares)
+                       / max(filled_up_shares, filled_down_shares)
+paired_balance_min_ratio = 0.80
+max_unpaired_shares = 10.0
+```
+
+If one filled side is missing, or if the filled-only balance ratio is below
+`paired_balance_min_ratio`, or if `abs(filled_up_shares - filled_down_shares)`
+is above `max_unpaired_shares`, the market enters paired recovery mode. In that
+mode:
+
+- no fresh dual-build batch is allowed;
+- the strategy only emits the lagging side;
+- the lagging side is quoted as `maker_rebalance_quote` immediately, regardless
+  of `rebalance_start_sec`;
+- existing pending orders do not count as proof that the pair is balanced.
+
+This is not a guarantee that the missing side can always be bought. Paired
+recovery uses its own wider pair-cost cap:
+
+```text
+max_pair_cost = 0.995
+max_pair_cost_recovery = 1.03
+```
+
+If buying the missing side would push projected pair average above
+`max_pair_cost_recovery`, the strategy stops adding exposure in that market
+instead of pretending the pair can be repaired cheaply. Ordinary build entries
+still use `max_pair_cost`.
 
 ## Candidate Selection
 
@@ -178,10 +225,14 @@ It skips an outcome if:
 - elapsed time is at or past `terminal_stop_sec`;
 - ask data is invalid;
 - ask is above `max_price`;
-- maker pair cost is above `max_pair_cost`;
+- maker pair cost is above the active pair-cost cap, `max_pair_cost` for normal
+  entries or `max_pair_cost_recovery` during paired recovery;
 - quote price is invalid or above `max_price`;
 - the order would be below `min_order_usdc`;
-- projected pair average would exceed `max_pair_cost` after both sides exist;
+- projected pair average would exceed the active pair-cost cap after both sides
+  exist;
+- filled-only inventory is below the paired-tranche balance floor and the
+  candidate is not the lagging side;
 - the candidate would worsen an already-too-large inventory imbalance.
 
 Among valid candidates, it prefers:
@@ -238,6 +289,8 @@ early_inventory_imbalance_ratio = 0.30
 mid_inventory_imbalance_ratio = 0.12
 late_inventory_imbalance_ratio = 0.06
 final_inventory_imbalance_ratio = 0.05
+paired_balance_min_ratio = 0.80
+max_unpaired_shares = 10.0
 rebalance_start_sec = 240
 ```
 
@@ -253,6 +306,11 @@ The emitted features include:
 - `current_down_shares`
 - `working_up_shares`
 - `working_down_shares`
+- `paired_recovery_side`
+- `filled_balance_ratio`
+- `filled_unpaired_shares`
+- `max_unpaired_shares`
+- `paired_balance_min_ratio`
 - `current_imbalance_ratio`
 - `projected_imbalance_ratio`
 - `deficit_side`
@@ -276,13 +334,16 @@ notional_usdc = 5.0
 target_pair_notional_usdc = 55.0
 target_pair_shares_per_side = None
 max_pair_cost = 0.995
+max_pair_cost_recovery = 1.03
 max_unpaired_price = 0.70
+max_unpaired_shares = 10.0
 max_price = 0.95
 min_order_usdc = 1.0
 max_quote_spread = 0.02
 max_quote_book_age_ms = 50.0
 min_quote_bid_depth_usdc = 20.0
 dual_build_max_abs_bid_diff = 0.60
+paired_balance_min_ratio = 0.80
 build_phase_until_sec = 240
 execution_style = maker
 one_trade_per_market = False

@@ -30,7 +30,9 @@ class PathStrategyConfig:
     target_pair_notional_usdc: float = 25.0
     target_pair_shares_per_side: float | None = None
     max_pair_cost: float = 0.99
+    max_pair_cost_recovery: float = 1.03
     max_unpaired_price: float = 0.6
+    max_unpaired_shares: float = 10.0
     max_inventory_imbalance_ratio: float = 0.05
     early_inventory_imbalance_ratio: float = 0.30
     mid_inventory_imbalance_ratio: float = 0.15
@@ -44,6 +46,7 @@ class PathStrategyConfig:
     max_quote_book_age_ms: float | None = None
     min_quote_bid_depth_usdc: float | None = None
     dual_build_max_abs_bid_diff: float | None = None
+    paired_balance_min_ratio: float = 0.80
     build_phase_until_sec: int = 240
     execution_style: str = "maker"
     one_trade_per_market: bool = True

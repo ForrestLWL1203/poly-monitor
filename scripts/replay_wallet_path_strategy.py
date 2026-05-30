@@ -36,7 +36,9 @@ def main() -> int:
     parser.add_argument("--target-pair-notional", type=float, default=25.0)
     parser.add_argument("--target-pair-shares", type=float, help="Per-side target shares by window end; overrides --target-pair-notional for wallet_path_v0")
     parser.add_argument("--max-pair-cost", type=float, default=0.99)
+    parser.add_argument("--max-pair-cost-recovery", type=float, default=1.03)
     parser.add_argument("--max-unpaired-price", type=float, default=0.6)
+    parser.add_argument("--max-unpaired-shares", type=float, default=10.0)
     parser.add_argument("--max-inventory-imbalance-ratio", type=float, default=0.05)
     parser.add_argument("--min-order-usdc", type=float, default=1.0)
     parser.add_argument("--execution-style", choices=("maker", "taker"), default="maker")
@@ -75,7 +77,9 @@ def main() -> int:
         target_pair_notional_usdc=args.target_pair_notional,
         target_pair_shares_per_side=args.target_pair_shares,
         max_pair_cost=args.max_pair_cost,
+        max_pair_cost_recovery=args.max_pair_cost_recovery,
         max_unpaired_price=args.max_unpaired_price,
+        max_unpaired_shares=args.max_unpaired_shares,
         max_inventory_imbalance_ratio=args.max_inventory_imbalance_ratio,
         rebalance_start_sec=args.rebalance_start_sec,
         maker_rebalance_ticks=args.maker_rebalance_ticks,

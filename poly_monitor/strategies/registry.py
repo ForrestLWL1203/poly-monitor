@@ -37,7 +37,9 @@ def _base_config(name: str, **kwargs: Any) -> PathStrategyConfig:
             else None
         ),
         max_pair_cost=float(_coalesce(kwargs.get("max_pair_cost"), 0.99)),
+        max_pair_cost_recovery=float(_coalesce(kwargs.get("max_pair_cost_recovery"), 1.03)),
         max_unpaired_price=float(_coalesce(kwargs.get("max_unpaired_price"), 0.6)),
+        max_unpaired_shares=float(_coalesce(kwargs.get("max_unpaired_shares"), 10.0)),
         max_inventory_imbalance_ratio=float(_coalesce(kwargs.get("max_inventory_imbalance_ratio"), 0.05)),
         early_inventory_imbalance_ratio=float(_coalesce(kwargs.get("early_inventory_imbalance_ratio"), 0.30)),
         mid_inventory_imbalance_ratio=float(_coalesce(kwargs.get("mid_inventory_imbalance_ratio"), 0.15)),
@@ -79,7 +81,17 @@ def _x32_config(**kwargs: Any) -> PathStrategyConfig:
             else None
         ),
         max_pair_cost=float(kwargs["max_pair_cost"]) if kwargs.get("max_pair_cost") is not None else None,
+        max_pair_cost_recovery=(
+            float(kwargs["max_pair_cost_recovery"])
+            if kwargs.get("max_pair_cost_recovery") is not None
+            else None
+        ),
         max_unpaired_price=float(kwargs["max_unpaired_price"]) if kwargs.get("max_unpaired_price") is not None else None,
+        max_unpaired_shares=(
+            float(kwargs["max_unpaired_shares"])
+            if kwargs.get("max_unpaired_shares") is not None
+            else None
+        ),
         max_inventory_imbalance_ratio=(
             float(kwargs["max_inventory_imbalance_ratio"])
             if kwargs.get("max_inventory_imbalance_ratio") is not None
@@ -125,6 +137,11 @@ def _x32_config(**kwargs: Any) -> PathStrategyConfig:
             if kwargs.get("dual_build_max_abs_bid_diff") is not None
             else None
         ) if "dual_build_max_abs_bid_diff" in kwargs else "__use_default__",
+        paired_balance_min_ratio=(
+            float(kwargs["paired_balance_min_ratio"])
+            if kwargs.get("paired_balance_min_ratio") is not None
+            else None
+        ),
         build_phase_until_sec=int(kwargs["build_phase_until_sec"]) if kwargs.get("build_phase_until_sec") is not None else None,
         execution_style=str(kwargs["execution_style"]) if kwargs.get("execution_style") is not None else None,
         one_trade_per_market=bool(kwargs["one_trade_per_market"]) if kwargs.get("one_trade_per_market") is not None else None,

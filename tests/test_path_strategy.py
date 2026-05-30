@@ -399,8 +399,83 @@ class PathStrategyTests(unittest.TestCase):
         self.assertIsNotNone(intent)
         assert intent is not None
         self.assertEqual(intent.outcome, "Down")
-        self.assertEqual(intent.expected_price, 0.59)
+        self.assertEqual(intent.expected_price, 0.60)
         self.assertEqual(intent.features["book_fill"]["source"], "maker_rebalance_quote")
+        self.assertEqual(intent.features["paired_recovery_side"], "Down")
+
+    def test_x32_absolute_unpaired_cap_forces_lagging_recovery(self):
+        strategy = X32PairCostInventoryStrategy(
+            PathStrategyConfig(
+                wallet="0x32",
+                checkpoints=(1,),
+                max_price=0.95,
+                target_pair_notional_usdc=140,
+                max_pair_cost=0.995,
+                max_pair_cost_recovery=1.03,
+                max_unpaired_price=0.70,
+                max_unpaired_shares=10.0,
+                paired_balance_min_ratio=0.80,
+                min_order_usdc=1,
+                execution_style="maker",
+                one_trade_per_market=False,
+            )
+        )
+        snapshot = StrategySnapshot.from_market_state_sample(
+            {
+                "market_slug": "btc-updown-5m-1770000000",
+                "symbol": "BTC",
+                "sampled_ts": 1770000042,
+                "book_stale": 0,
+                "up_json": {"bid": 0.49, "ask": 0.50},
+                "down_json": {"bid": 0.49, "ask": 0.51},
+            }
+        )
+        history = StrategyHistory(
+            emitted_intents=[
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=snapshot.market_slug,
+                    sampled_ts=1770000005,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Up",
+                    notional_usdc=49.0,
+                    max_price=0.95,
+                    expected_price=0.49,
+                    symbol="BTC",
+                    reason="seed_inventory",
+                ),
+                TradeIntent(
+                    strategy_name="x32_pair_cost_inventory_v0",
+                    wallet="0x32",
+                    market_slug=snapshot.market_slug,
+                    sampled_ts=1770000006,
+                    checkpoint_sec=1,
+                    intent="BUY",
+                    outcome="Down",
+                    notional_usdc=41.65,
+                    max_price=0.95,
+                    expected_price=0.49,
+                    symbol="BTC",
+                    reason="seed_inventory",
+                ),
+            ],
+            snapshots_by_market={snapshot.market_slug: [snapshot]},
+        )
+
+        intent = strategy.evaluate(snapshot, history)
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.outcome, "Down")
+        self.assertEqual(intent.expected_price, 0.51)
+        self.assertEqual(intent.features["paired_recovery_side"], "Down")
+        self.assertAlmostEqual(intent.features["filled_balance_ratio"], 0.85)
+        self.assertAlmostEqual(intent.features["filled_unpaired_shares"], 15.0)
+        self.assertEqual(intent.features["max_unpaired_shares"], 10.0)
+        self.assertEqual(intent.features["pair_cost_cap"], 1.03)
+        self.assertTrue(intent.features["quote_forced_to_ask"])
 
     def test_x32_strategy_treats_pending_quotes_as_working_inventory_for_sizing(self):
         strategy = X32PairCostInventoryStrategy(

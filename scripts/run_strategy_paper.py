@@ -64,7 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-pair-notional", type=float)
     parser.add_argument("--target-pair-shares", type=float, help="Per-side target shares by window end; overrides --target-pair-notional for wallet_path_v0")
     parser.add_argument("--max-pair-cost", type=float)
+    parser.add_argument("--max-pair-cost-recovery", type=float)
     parser.add_argument("--max-unpaired-price", type=float)
+    parser.add_argument("--max-unpaired-shares", type=float)
     parser.add_argument("--max-inventory-imbalance-ratio", type=float)
     parser.add_argument("--min-order-usdc", type=float)
     parser.add_argument("--max-quote-spread", type=float)
@@ -112,7 +114,9 @@ async def async_main() -> int:
         target_pair_notional_usdc=args.target_pair_notional,
         target_pair_shares_per_side=args.target_pair_shares,
         max_pair_cost=args.max_pair_cost,
+        max_pair_cost_recovery=args.max_pair_cost_recovery,
         max_unpaired_price=args.max_unpaired_price,
+        max_unpaired_shares=args.max_unpaired_shares,
         max_inventory_imbalance_ratio=args.max_inventory_imbalance_ratio,
         min_order_usdc=args.min_order_usdc,
         max_quote_spread=args.max_quote_spread,

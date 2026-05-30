@@ -171,7 +171,7 @@ class PendingMakerReplay:
     def ttl_for_intent(self, intent: TradeIntent) -> int:
         base_ttl = self._base_ttl_for_intent(intent)
         source = book_fill_source(intent.features)
-        if intent.features.get("missing_filled_side") == intent.outcome:
+        if intent.features.get("missing_filled_side") == intent.outcome or intent.features.get("paired_recovery_side") == intent.outcome:
             return max(1, int(round(base_ttl * self.config.missing_leg_ttl_multiplier)))
         if source == "maker_rebalance_quote":
             return max(1, int(round(base_ttl * self.config.rebalance_ttl_multiplier)))
